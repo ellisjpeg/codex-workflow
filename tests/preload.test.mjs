@@ -12,13 +12,21 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness({ initialSettings, setSettings } = {}) {
+async function createHarness({ initialSettings, setSettings, updateStatus } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
+    <header id="top-toolbar" class="flex h-toolbar draggable">
+      <div id="toolbar-actions" class="@container flex items-center">
+        <button type="button" aria-label="Share"></button>
+        <button type="button" aria-label="Toggle summary"></button>
+        <button type="button" aria-label="Toggle bottom panel"></button>
+        <button type="button" aria-label="Toggle top panel"></button>
+      </div>
+    </header>
     <aside class="app-shell-left-panel">
       <div id="pull-requests" class="sidebar-item" style="display: block !important" aria-hidden="false" tabindex="3">
         <a href="/pull-requests"><span class="text-fade-truncate">Pull requests</span></a>
       </div>
-      <button id="account-menu-trigger" type="button">Account</button>
+      <button id="account-menu-trigger" type="button" aria-haspopup="menu">Account</button>
     </aside>
     <div id="settings-shell">
       <nav aria-label="Settings">
@@ -41,6 +49,7 @@ async function createHarness({ initialSettings, setSettings } = {}) {
   const intervalCalls = [];
   const timeoutCallbacks = new Map();
   const animationFrameCallbacks = [];
+  const invokedChannels = [];
   let deferAnimationFrames = false;
   let nextTimer = 1;
   let deliveredMutationCallbacks = 0;
@@ -55,13 +64,21 @@ async function createHarness({ initialSettings, setSettings } = {}) {
     };
   const ipcRenderer = {
     invoke(channel, patch) {
+      invokedChannels.push(channel);
       if (channel === "codex-workflow:settings:get") {
         return Promise.resolve({ ...persistedSettings });
+      }
+      if (channel === "codex-workflow:update:get") {
+        return Promise.resolve(updateStatus || { available: false });
+      }
+      if (channel === "codex-workflow:update:install") {
+        return Promise.resolve({ ...(updateStatus || {}), applying: true });
       }
       if (setSettings) return setSettings(patch);
       persistedSettings = { ...persistedSettings, ...patch, schemaVersion: 2 };
       return Promise.resolve({ ...persistedSettings });
     },
+    on() {},
     send() {},
   };
 
@@ -158,6 +175,7 @@ async function createHarness({ initialSettings, setSettings } = {}) {
     document,
     nav,
     ipcRenderer,
+    invokedChannels,
     observers,
     intervalCalls,
     timeoutCallbacks,
@@ -172,6 +190,61 @@ async function createHarness({ initialSettings, setSettings } = {}) {
     },
   };
 }
+
+test("Workflow Update mirrors the native responsive toolbar pill", async () => {
+  const harness = await createHarness({
+    updateStatus: {
+      available: true,
+      installedVersion: "0.5.0",
+      availableVersion: "0.5.1",
+    },
+  });
+  try {
+    const { document, window, emitMutation, invokedChannels } = harness;
+    const toolbar = document.querySelector("#top-toolbar");
+    const actions = document.querySelector("#toolbar-actions");
+    const pill = document.querySelector('[data-codex-workflow-update="true"]');
+    assert.ok(pill);
+    assert.equal(pill.parentElement, actions);
+    assert.equal(pill.nextElementSibling.getAttribute("aria-label"), "Share");
+    assert.equal(pill.getAttribute("aria-label"), "Workflow Update");
+    assert.ok(pill.className.includes("bg-chart-blue"));
+    assert.ok(pill.className.includes("@[180px]:max-w-36"));
+    assert.ok(pill.querySelector("svg").className.baseVal.includes("@[180px]:opacity-0"));
+    assert.equal(
+      pill.querySelector('[data-codex-workflow-update-label="true"]').textContent,
+      "Workflow Update",
+    );
+
+    const share = actions.querySelector('[aria-label="Share"]');
+    const summary = actions.querySelector('[aria-label="Toggle summary"]');
+    share.remove();
+    summary.remove();
+    emitMutation(toolbar, { removedNodes: [share, summary] });
+    await flush();
+    assert.equal(pill.nextElementSibling.getAttribute("aria-label"), "Toggle bottom panel");
+
+    pill.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await flush();
+    assert.ok(invokedChannels.includes("codex-workflow:update:install"));
+    assert.equal(pill.disabled, true);
+    assert.equal(pill.getAttribute("aria-label"), "Installing Workflow Update");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("Workflow Update is absent when no newer Workflow release exists", async () => {
+  const harness = await createHarness({ updateStatus: { available: false } });
+  try {
+    assert.equal(
+      harness.document.querySelector('[data-codex-workflow-update="true"]'),
+      null,
+    );
+  } finally {
+    harness.dom.window.close();
+  }
+});
 
 test("Workflow participates in native keyboard navigation and clones active styling", async () => {
   const harness = await createHarness();
@@ -347,6 +420,36 @@ test("friend invite is hidden before the account menu's first rendered frame and
     await flush();
     assert.equal(inviteItem.style.getPropertyValue("display"), "none");
     assert.equal(inviteItem.hasAttribute("data-codex-workflow-invite-friend-menu-hidden"), true);
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("account menu discovery starts before the native pointerdown opener", async () => {
+  const harness = await createHarness();
+  try {
+    const { document, window, emitMutation } = harness;
+    const trigger = document.querySelector("#account-menu-trigger");
+    let menu;
+    trigger.addEventListener("pointerdown", () => {
+      menu = document.createElement("div");
+      menu.setAttribute("role", "menu");
+      menu.innerHTML = `
+        <button id="pointerdown-pet-menu-item" role="menuitem">Show pet</button>
+        <button id="pointerdown-invite-menu-item" role="menuitem">Invite a friend</button>
+        <button role="menuitem">Settings</button>
+      `;
+      document.body.appendChild(menu);
+      emitMutation(document.body, { addedNodes: [menu] });
+    });
+
+    trigger.dispatchEvent(new window.MouseEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+    }));
+
+    assert.equal(menu.querySelector("#pointerdown-pet-menu-item").style.display, "none");
+    assert.equal(menu.querySelector("#pointerdown-invite-menu-item").style.display, "none");
   } finally {
     harness.dom.window.close();
   }
@@ -653,12 +756,13 @@ test("scoped observers ignore 120 response-stream mutations", async () => {
     const { document, observers, intervalCalls, emitMutation, deliveredMutationCallbacks } = harness;
     const sidebar = document.querySelector(".app-shell-left-panel");
     const settingsShell = document.querySelector("#settings-shell");
+    const toolbar = document.querySelector("#top-toolbar");
     const activeSubtreeTargets = observers
       .filter((observer) => observer.active && observer.options?.subtree)
       .map((observer) => observer.target);
 
     assert.equal(intervalCalls.length, 0);
-    assert.deepEqual(new Set(activeSubtreeTargets), new Set([sidebar, settingsShell]));
+    assert.deepEqual(new Set(activeSubtreeTargets), new Set([sidebar, settingsShell, toolbar]));
     assert.ok(!activeSubtreeTargets.includes(document.documentElement));
 
     const beforeCallbacks = deliveredMutationCallbacks();

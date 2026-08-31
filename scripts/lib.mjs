@@ -28,15 +28,21 @@ export const asarPath = join(appRoot, "Contents", "Resources", "app.asar");
 export const infoPlistPath = join(appRoot, "Contents", "Info.plist");
 export const runtimeRoot = join(homedir(), "Library", "Application Support", "Codex Workflow");
 export const disabledPath = join(runtimeRoot, "DISABLED");
+export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.ellisjpeg.codex-workflow-updater.plist");
 export const supportedVersion = "26.820.60940";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.4.4";
+export const patchVersion = "0.5.1";
 
 const journalPath = join(runtimeRoot, "transaction.json");
 const backupsRoot = join(runtimeRoot, "backups");
 const statePath = join(runtimeRoot, "state.json");
-const managedRuntimePaths = ["runtime/main.cjs", "runtime/preload.cjs"];
+const managedRuntimePaths = [
+  "runtime/main.cjs",
+  "runtime/preload.cjs",
+  "runtime/updater.cjs",
+  "update-config.json",
+];
 
 export function readPackage(targetAsar = asarPath) {
   return JSON.parse(asar.extractFile(targetAsar, "package.json").toString("utf8"));
@@ -230,6 +236,20 @@ export function installRuntimeFiles() {
   mkdirSync(runtimeDestination, { recursive: true });
   atomicReplace(join(sourceRoot, "runtime", "main.cjs"), join(runtimeDestination, "main.cjs"));
   atomicReplace(join(sourceRoot, "runtime", "preload.cjs"), join(runtimeDestination, "preload.cjs"));
+  atomicReplace(join(sourceRoot, "runtime", "updater.cjs"), join(runtimeDestination, "updater.cjs"));
+  writeJsonAtomic(join(runtimeRoot, "update-config.json"), {
+    schemaVersion: 1,
+    sourceRoot,
+    nodeExecutable: process.execPath,
+    appRoot,
+    appExecutable: join(
+      appRoot,
+      "Contents",
+      "MacOS",
+      plistValue("CFBundleExecutable", infoPlistPath),
+    ),
+    releaseApi: "https://api.github.com/repos/ellisjpeg/codex-workflow/releases/latest",
+  });
   const settingsPath = join(runtimeRoot, "settings.json");
   if (!existsSync(settingsPath)) {
     writeJsonAtomic(settingsPath, {
@@ -239,6 +259,64 @@ export function installRuntimeFiles() {
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
     });
+  }
+}
+
+export function installUpdaterAgent() {
+  const executable = process.execPath;
+  const escapeXml = (value) => String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ellisjpeg.codex-workflow-updater</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escapeXml(executable)}</string>
+    <string>${escapeXml(join(runtimeRoot, "runtime", "updater.cjs"))}</string>
+    <string>--background</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_WORKFLOW_ROOT</key><string>${escapeXml(runtimeRoot)}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>${escapeXml(join(runtimeRoot, "logs", "updater.log"))}</string>
+  <key>StandardErrorPath</key><string>${escapeXml(join(runtimeRoot, "logs", "updater.log"))}</string>
+</dict>
+</plist>
+`;
+  mkdirSync(dirname(updaterAgentPath), { recursive: true });
+  const stageDir = mkdtempSync(join(dirname(updaterAgentPath), ".codex-workflow-"));
+  try {
+    const staged = join(stageDir, "updater.plist");
+    writeFileSync(staged, plist, { mode: 0o600 });
+    renameSync(staged, updaterAgentPath);
+    fsyncDirectory(dirname(updaterAgentPath));
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+  const domain = `gui/${process.getuid()}`;
+  spawnSync("/bin/launchctl", ["bootout", domain, updaterAgentPath], { stdio: "ignore" });
+  const loaded = spawnSync("/bin/launchctl", ["bootstrap", domain, updaterAgentPath], {
+    encoding: "utf8",
+  });
+  if (loaded.status !== 0) {
+    throw new Error((loaded.stderr || "Workflow background updater could not be loaded").trim());
+  }
+}
+
+export function uninstallUpdaterAgent() {
+  const domain = `gui/${process.getuid()}`;
+  spawnSync("/bin/launchctl", ["bootout", domain, updaterAgentPath], { stdio: "ignore" });
+  if (existsSync(updaterAgentPath)) {
+    rmSync(updaterAgentPath, { force: true });
+    fsyncDirectory(dirname(updaterAgentPath));
   }
 }
 

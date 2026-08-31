@@ -13,6 +13,7 @@ import {
   headerHash,
   infoPlistPath,
   installRuntimeFiles,
+  installUpdaterAgent,
   pendingTransaction,
   preflight,
   preflightLiveUncached,
@@ -122,6 +123,11 @@ try {
     writePatchState(patchState);
   } catch {
     warnings.push("state-write-failed");
+  }
+  try {
+    installUpdaterAgent();
+  } catch {
+    warnings.push("background-updater-install-failed");
   }
 
   console.log(JSON.stringify({

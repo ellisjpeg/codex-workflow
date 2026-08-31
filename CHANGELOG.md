@@ -2,6 +2,18 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.1 - 2026-08-31
+
+- Started account-menu discovery on native pointer and keyboard open events so pet and friend-invite rows are hidden before the first portal paint.
+- Added regression coverage for the native pointerdown event order.
+
+## 0.5.0 - 2026-08-31
+
+- Added a native responsive Workflow Update pill to the conversation toolbar.
+- Added one-click quit, guarded reapply, and relaunch without a confirmation dialog.
+- Added a local background agent for verified GitHub Release updates while ChatGPT is closed.
+- Added release packaging with GitHub asset-digest and archive-path verification.
+
 ## 0.4.4 - 2026-08-31
 
 - Added a Focused Interface preference that hides Invite a friend before the account menu paints.

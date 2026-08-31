@@ -12,6 +12,9 @@ This is an independent community project and is not affiliated with or endorsed 
 - Native-style **Workflow** category in Codex Settings.
 - **Focused Interface** master switch with individual visibility controls.
 - Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
+- Native responsive **Workflow Update** control in the conversation toolbar.
+- One-click quit, guarded patch application, and automatic relaunch without a dialog.
+- A six-hour background update check that can apply verified releases while ChatGPT is closed.
 - Scoped sidebar and settings observers with route/remount recovery.
 - Atomic local settings persistence and visible rollback after write failures.
 - Version, bundle identity, ASAR integrity, backup, transaction, recovery, and uninstall guards.
@@ -54,6 +57,8 @@ npm run reapply:patch
 
 Relaunch Codex and run `npm run status` again. A healthy installation reports `ok: true`, matching integrity, current runtime files, and no pending transaction.
 
+After installation, Workflow checks the configured local checkout and packaged GitHub Releases. When an update is available, the toolbar shows the same responsive icon-to-pill treatment as Codex's native Update control. Clicking it quits ChatGPT, applies the guarded reapply transaction, and relaunches the app. The background agent uses the same transaction but never opens ChatGPT when it was already closed.
+
 ## Recovery and removal
 
 If status reports a recoverable interrupted transaction, quit Codex and run:
@@ -74,12 +79,15 @@ The installer replaces the app's main entry with a small fail-open loader. Featu
 
 Before modifying the app, the installer validates the bundle identifier, package name, supported version, original entry, and Electron ASAR integrity. It keeps a source backup and a durable rollback journal covering both the app bundle and managed runtime files.
 
+Release tags build a self-contained `codex-workflow-<version>.tar.gz` asset. The updater requires GitHub's SHA-256 asset digest to match before extracting it, rejects unsafe archive paths, and still refuses unsupported Codex builds.
+
 ## Safety notes
 
 - The patch modifies `/Applications/ChatGPT.app`; keep a current backup and use only the guarded commands.
 - Never use `--allow-version` without reviewing the new Codex build.
 - Quit Codex before install, reapply, recovery, or uninstall.
 - Settings, logs, backups, and transactions remain local to the current macOS user.
+- The background updater contacts only the configured GitHub Releases API and can be removed with the normal uninstall command.
 - Modifying an installed app may affect its macOS code-signature status. Workflow reports signature and ASAR integrity separately.
 
 ## Development

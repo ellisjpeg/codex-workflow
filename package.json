@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow",
-  "version": "0.4.4",
+  "version": "0.5.1",
   "description": "A version-guarded, native-style Workflow extension for Codex Desktop on macOS.",
   "private": true,
   "type": "module",
@@ -29,7 +29,7 @@
     "recover:patch": "node scripts/install.mjs --recover",
     "status": "node scripts/status.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check runtime/main.cjs && node --check runtime/preload.cjs && node --check loader.cjs && node --check scripts/lib.mjs && node --check scripts/install.mjs && node --check scripts/status.mjs && node --check scripts/uninstall.mjs && npm test",
+    "check": "node --check runtime/main.cjs && node --check runtime/preload.cjs && node --check runtime/updater.cjs && node --check loader.cjs && node --check scripts/lib.mjs && node --check scripts/install.mjs && node --check scripts/status.mjs && node --check scripts/uninstall.mjs && npm test",
     "uninstall:patch": "node scripts/uninstall.mjs"
   },
   "dependencies": {

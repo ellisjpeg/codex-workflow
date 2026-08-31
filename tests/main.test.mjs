@@ -20,6 +20,7 @@ function loadSettings(rawSettings) {
           app: {
             getVersion: () => "test",
             on() {},
+            quit() {},
             whenReady: () => ({ then() {} }),
           },
           ipcMain: {
@@ -29,8 +30,10 @@ function loadSettings(rawSettings) {
             on() {},
           },
           session: { defaultSession: {} },
+          webContents: { getAllWebContents: () => [] },
         };
       }
+      if (name === "node:child_process") return { spawn() { throw new Error("Unexpected spawn"); } };
       if (name === "node:crypto") return { randomUUID: () => "test" };
       if (name === "node:path") return path;
       if (name === "node:fs") {
@@ -89,5 +92,100 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
     },
+  );
+});
+
+test("Workflow Update launches the detached updater and quits without a dialog", async () => {
+  const handlers = new Map();
+  const spawned = [];
+  let quitCount = 0;
+  const runtimeRoot = "/tmp/codex-workflow-main-update-test";
+  const sourceRoot = "/tmp/codex-workflow-source-test";
+  const files = new Map([
+    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
+      sourceRoot,
+      nodeExecutable: "/opt/node/bin/node",
+    })],
+    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
+    [path.join(sourceRoot, "package.json"), JSON.stringify({ version: "0.5.0" })],
+    ["/opt/node/bin/node", ""],
+  ]);
+  const context = createContext({
+    setImmediate,
+    process: {
+      env: { CODEX_WORKFLOW_ROOT: runtimeRoot },
+      execPath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+      pid: 456,
+    },
+    require(name) {
+      if (name === "electron") {
+        return {
+          app: {
+            getVersion: () => "test",
+            on() {},
+            quit() { quitCount += 1; },
+            whenReady: () => ({ then() {} }),
+          },
+          ipcMain: {
+            handle(channel, handler) { handlers.set(channel, handler); },
+            on() {},
+          },
+          session: { defaultSession: {} },
+          webContents: { getAllWebContents: () => [] },
+        };
+      }
+      if (name === "node:child_process") {
+        return {
+          spawn(executable, args, options) {
+            const call = { executable, args, options, unref: false };
+            spawned.push(call);
+            return {
+              once(event, callback) {
+                if (event === "spawn") queueMicrotask(callback);
+              },
+              unref() { call.unref = true; },
+            };
+          },
+        };
+      }
+      if (name === "node:crypto") return { randomUUID: () => "test" };
+      if (name === "node:path") return path;
+      if (name === "node:fs") {
+        return {
+          appendFileSync() {},
+          existsSync(target) { return files.has(target); },
+          mkdirSync() {},
+          readFileSync(target) {
+            if (files.has(target)) return files.get(target);
+            throw new Error(`Unexpected read: ${target}`);
+          },
+          statSync() { return { size: 0 }; },
+        };
+      }
+      throw new Error(`Unexpected require: ${name}`);
+    },
+  });
+  new Script(mainSource, { filename: "main.cjs" }).runInContext(context);
+  const trusted = { senderFrame: { url: "app://codex/thread" } };
+  const status = handlers.get("codex-workflow:update:get")(trusted);
+  assert.equal(status.available, true);
+  assert.equal(status.availableVersion, "0.5.0");
+
+  const result = await handlers.get("codex-workflow:update:install")(trusted);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(result.applying, true);
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].executable, "/opt/node/bin/node");
+  assert.equal(spawned[0].options.detached, true);
+  assert.equal(spawned[0].options.env.CODEX_WORKFLOW_ROOT, runtimeRoot);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(spawned[0].args.slice(1))),
+    ["--apply", "--relaunch", "--parent", "456"],
+  );
+  assert.equal(spawned[0].unref, true);
+  assert.equal(quitCount, 1);
+  await assert.rejects(
+    handlers.get("codex-workflow:update:install")({ senderFrame: { url: "https://example.com" } }),
+    /untrusted renderer/u,
   );
 });

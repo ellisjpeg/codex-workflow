@@ -1,0 +1,252 @@
+"use strict";
+
+const { createHash, randomUUID } = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const runtimeRoot = process.env.CODEX_WORKFLOW_ROOT;
+if (!runtimeRoot) throw new Error("CODEX_WORKFLOW_ROOT is not set");
+
+const configPath = path.join(runtimeRoot, "update-config.json");
+const statePath = path.join(runtimeRoot, "update-state.json");
+const patchStatePath = path.join(runtimeRoot, "state.json");
+const updatesRoot = path.join(runtimeRoot, "updates");
+
+function readJson(target) {
+  try {
+    return JSON.parse(fs.readFileSync(target, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonAtomic(target, value) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const staged = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(staged, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(staged, target);
+  } finally {
+    fs.rmSync(staged, { force: true });
+  }
+}
+
+function versionParts(value) {
+  const match = String(value || "").match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareVersions(left, right) {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  if (!a || !b) return 0;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+  }
+  return 0;
+}
+
+function sourcePackage(sourceRoot) {
+  const packagePath = path.join(sourceRoot, "package.json");
+  const installPath = path.join(sourceRoot, "scripts", "install.mjs");
+  const pkg = readJson(packagePath);
+  if (!pkg || pkg.name !== "codex-workflow" || !versionParts(pkg.version) || !fs.existsSync(installPath)) {
+    return null;
+  }
+  return { root: sourceRoot, version: pkg.version, installPath };
+}
+
+function installedVersion() {
+  return readJson(patchStatePath)?.patchVersion || null;
+}
+
+function appIsRunning(executable) {
+  const result = spawnSync("/bin/ps", ["-axo", "args="], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error("Could not inspect the ChatGPT process list");
+  return result.stdout.split("\n")
+    .some((line) => line === executable || line.startsWith(`${executable} `));
+}
+
+function chooseCandidate(config) {
+  const installed = installedVersion();
+  const local = sourcePackage(config.sourceRoot);
+  const remoteState = readJson(statePath);
+  const remote = remoteState?.stagedSourceRoot
+    ? sourcePackage(remoteState.stagedSourceRoot)
+    : null;
+  const candidates = [local, remote]
+    .filter((candidate) => candidate && compareVersions(candidate.version, installed) > 0)
+    .sort((a, b) => compareVersions(b.version, a.version));
+  return { installed, candidate: candidates[0] || null };
+}
+
+function sha256(target) {
+  return createHash("sha256").update(fs.readFileSync(target)).digest("hex");
+}
+
+function validateTarEntries(listing) {
+  const entries = listing.split("\n").filter(Boolean);
+  if (!entries.length) throw new Error("Workflow release archive is empty");
+  for (const entry of entries) {
+    const normal = path.posix.normalize(entry);
+    if (path.posix.isAbsolute(entry) || normal === ".." || normal.startsWith("../")) {
+      throw new Error("Workflow release archive contains an unsafe path");
+    }
+  }
+}
+
+function validateTarTypes(listing) {
+  const entries = listing.split("\n").filter(Boolean);
+  if (!entries.length || entries.some((entry) => !["-", "d"].includes(entry[0]))) {
+    throw new Error("Workflow release archive contains an unsupported entry type");
+  }
+}
+
+async function download(url, target) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/octet-stream", "User-Agent": "codex-workflow-updater" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error(`Workflow update download failed (${response.status})`);
+  fs.writeFileSync(target, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+}
+
+async function checkRemote(config) {
+  if (!config.releaseApi) return null;
+  const response = await fetch(config.releaseApi, {
+    headers: { Accept: "application/vnd.github+json", "User-Agent": "codex-workflow-updater" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error(`Workflow release check failed (${response.status})`);
+  const release = await response.json();
+  const version = String(release.tag_name || "").replace(/^v/u, "");
+  if (!versionParts(version) || compareVersions(version, installedVersion()) <= 0) return null;
+  const assetName = `codex-workflow-${version}.tar.gz`;
+  const asset = Array.isArray(release.assets)
+    ? release.assets.find((entry) => entry?.name === assetName)
+    : null;
+  if (!asset?.browser_download_url || !/^sha256:[0-9a-f]{64}$/iu.test(asset.digest || "")) {
+    throw new Error(`Workflow release ${version} is missing its verified ${assetName} asset`);
+  }
+
+  const releaseRoot = path.join(updatesRoot, version);
+  const archive = path.join(updatesRoot, `${version}.tar.gz`);
+  fs.mkdirSync(updatesRoot, { recursive: true });
+  await download(asset.browser_download_url, archive);
+  if (sha256(archive) !== asset.digest.slice(7).toLowerCase()) {
+    throw new Error("Workflow release asset digest does not match GitHub metadata");
+  }
+  const listing = spawnSync("/usr/bin/tar", ["-tzf", archive], { encoding: "utf8" });
+  if (listing.status !== 0) throw new Error("Workflow release archive could not be inspected");
+  validateTarEntries(listing.stdout);
+  const verboseListing = spawnSync("/usr/bin/tar", ["-tvzf", archive], { encoding: "utf8" });
+  if (verboseListing.status !== 0) throw new Error("Workflow release archive types could not be inspected");
+  validateTarTypes(verboseListing.stdout);
+  fs.rmSync(releaseRoot, { recursive: true, force: true });
+  fs.mkdirSync(releaseRoot, { recursive: true });
+  const extracted = spawnSync("/usr/bin/tar", ["-xzf", archive, "-C", releaseRoot], { encoding: "utf8" });
+  if (extracted.status !== 0) throw new Error("Workflow release archive could not be extracted");
+  const children = fs.readdirSync(releaseRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(releaseRoot, entry.name));
+  const source = [releaseRoot, ...children].map(sourcePackage).find(Boolean);
+  if (!source || source.version !== version) throw new Error("Workflow release archive has invalid contents");
+  return source;
+}
+
+function applyCandidate(config, candidate, relaunch) {
+  const result = spawnSync(config.nodeExecutable, [candidate.installPath, "--reapply"], {
+    encoding: "utf8",
+    env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
+  });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || "Workflow update failed").trim());
+  }
+  writeJsonAtomic(statePath, {
+    schemaVersion: 1,
+    checkedAt: new Date().toISOString(),
+    appliedVersion: candidate.version,
+    availableVersion: null,
+    stagedSourceRoot: null,
+    error: null,
+  });
+  if (relaunch) {
+    const opened = spawnSync("/usr/bin/open", [config.appRoot], { encoding: "utf8" });
+    if (opened.status !== 0) throw new Error("Workflow updated, but ChatGPT could not be relaunched");
+  }
+}
+
+async function run() {
+  const config = readJson(configPath);
+  if (!config || config.schemaVersion !== 1 || !config.sourceRoot || !config.nodeExecutable || !config.appExecutable || !config.appRoot) {
+    throw new Error("Workflow updater configuration is missing or invalid");
+  }
+  if (!fs.existsSync(config.nodeExecutable)) throw new Error("Workflow updater Node.js runtime is unavailable");
+  const apply = process.argv.includes("--apply");
+  const background = process.argv.includes("--background");
+  const relaunch = process.argv.includes("--relaunch");
+  const parentIndex = process.argv.indexOf("--parent");
+  const parentPid = parentIndex >= 0 ? Number(process.argv[parentIndex + 1]) : null;
+
+  const localSelection = chooseCandidate(config);
+  let remote = null;
+  let checkError = null;
+  if (!apply || !localSelection.candidate) {
+    try {
+      remote = await checkRemote(config);
+    } catch (error) {
+      checkError = String(error?.message || error).slice(0, 1000);
+      const previous = readJson(statePath) || {};
+      writeJsonAtomic(statePath, {
+        ...previous,
+        schemaVersion: 1,
+        checkedAt: new Date().toISOString(),
+        error: checkError,
+      });
+    }
+  }
+  const selected = chooseCandidate(config);
+  const candidate = remote && (!selected.candidate || compareVersions(remote.version, selected.candidate.version) > 0)
+    ? remote
+    : selected.candidate;
+  writeJsonAtomic(statePath, {
+    schemaVersion: 1,
+    checkedAt: new Date().toISOString(),
+    installedVersion: selected.installed,
+    availableVersion: candidate?.version || null,
+    stagedSourceRoot: remote?.root || readJson(statePath)?.stagedSourceRoot || null,
+    error: checkError,
+  });
+  if (!candidate || (!apply && !background)) return;
+
+  if (apply && parentPid) {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(parentPid, 0);
+      } catch {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  if (appIsRunning(config.appExecutable)) return;
+  applyCandidate(config, candidate, relaunch);
+}
+
+if (require.main === module) {
+  run().catch((error) => {
+    const previous = readJson(statePath) || {};
+    writeJsonAtomic(statePath, {
+      ...previous,
+      schemaVersion: 1,
+      checkedAt: new Date().toISOString(),
+      error: String(error?.stack || error).slice(0, 4000),
+    });
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { compareVersions, chooseCandidate, sourcePackage, validateTarEntries, validateTarTypes };

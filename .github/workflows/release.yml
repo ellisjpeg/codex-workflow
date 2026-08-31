@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Build updater asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          package_version="$(node -p 'require("./package.json").version')"
+          test "$version" = "$package_version"
+          npm prune --omit=dev
+          mkdir -p "dist/stage/codex-workflow-$version"
+          rsync -a \
+            --exclude .git \
+            --exclude .github \
+            --exclude dist \
+            "./" "dist/stage/codex-workflow-$version/"
+          tar -C dist/stage -czf "dist/codex-workflow-$version.tar.gz" "codex-workflow-$version"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/codex-workflow-$version.tar.gz" \
+            --generate-notes \
+            --verify-tag

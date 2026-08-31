@@ -56,6 +56,8 @@ function fixtureJournal(overrides = {}) {
     runtimeFiles: [
       { relativePath: "runtime/main.cjs", existed: true },
       { relativePath: "runtime/preload.cjs", existed: false },
+      { relativePath: "runtime/updater.cjs", existed: false },
+      { relativePath: "update-config.json", existed: false },
     ],
     ...overrides,
   };

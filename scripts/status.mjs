@@ -15,7 +15,7 @@ import {
   transactionRecoveryStatus,
 } from "./lib.mjs";
 
-const runtimeFiles = ["main.cjs", "preload.cjs"].map((name) => {
+const runtimeFiles = ["main.cjs", "preload.cjs", "updater.cjs"].map((name) => {
   const installedPath = join(runtimeRoot, "runtime", name);
   const sourcePath = join(sourceRoot, "runtime", name);
   const present = existsSync(installedPath);
@@ -25,6 +25,7 @@ const runtimeFiles = ["main.cjs", "preload.cjs"].map((name) => {
   } catch {}
   return { name, present, matchesSource };
 });
+const updateConfigPresent = existsSync(join(runtimeRoot, "update-config.json"));
 let pending;
 let pendingError;
 try {
@@ -54,7 +55,7 @@ if (patched) {
 }
 
 const versionSupported = current?.pkg.version === supportedVersion;
-const runtimeReady = runtimeFiles.every((file) => file.present);
+const runtimeReady = runtimeFiles.every((file) => file.present) && updateConfigPresent;
 const runtimeCurrent = runtimeFiles.every((file) => file.matchesSource);
 const sourceCurrent = current?.pkg.__codexWorkflow?.version === patchVersion;
 const disabled = existsSync(disabledPath);
@@ -93,6 +94,7 @@ console.log(JSON.stringify({
     computed: current.computedIntegrity,
   } : null,
   runtimeFiles,
+  updateConfigPresent,
   settings: readSettings(),
   state: readPatchState(),
   signature: current ? {

@@ -11,6 +11,7 @@ import {
   recoverPendingTransaction,
   resolveSourceBackup,
   setTransactionPhase,
+  uninstallUpdaterAgent,
   writePatchState,
 } from "./lib.mjs";
 
@@ -48,6 +49,11 @@ try {
     writePatchState(patchState);
   } catch {
     warnings.push("state-write-failed");
+  }
+  try {
+    uninstallUpdaterAgent();
+  } catch {
+    warnings.push("background-updater-remove-failed");
   }
   console.log(JSON.stringify({
     ok: true,

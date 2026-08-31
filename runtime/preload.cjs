@@ -21,7 +21,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     hideInviteFriendMenuItem: true,
   };
   const discoveryDelays = [16, 50, 150, 450, 1000];
-  const discoveryRootSelector = ".app-shell-left-panel, nav[aria-label='Settings'], [data-settings-panel-slug='general-settings']";
+  const discoveryRootSelector = ".app-shell-left-panel, nav[aria-label='Settings'], [data-settings-panel-slug='general-settings'], button[aria-label='Share'], button[aria-label='Toggle summary'], button[aria-label='Toggle bottom panel'], button[aria-label='Toggle top panel']";
   const state = {
     settings: { ...defaults },
     discoveryObserver: null,
@@ -33,10 +33,16 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     settingsObserver: null,
     settingsMountObservers: [],
     settingsShell: null,
+    toolbarObserver: null,
+    toolbarMountObservers: [],
+    toolbarRoot: null,
     accountMenuDiscoveryObserver: null,
     accountMenuDiscoveryTimer: null,
     scheduled: false,
-    dirty: { discovery: false, sidebar: false, settings: false },
+    dirty: { discovery: false, sidebar: false, settings: false, toolbar: false },
+    updateStatus: { available: false, installedVersion: null, availableVersion: null },
+    updateApplying: false,
+    updatePill: null,
     customNav: null,
     settingsNav: null,
     panel: null,
@@ -90,6 +96,16 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     } catch (error) {
       log("error", `settings read failed: ${error?.stack || error}`);
     }
+    try {
+      state.updateStatus = await ipcRenderer.invoke("codex-workflow:update:get");
+    } catch (error) {
+      log("error", `update status read failed: ${error?.stack || error}`);
+    }
+    ipcRenderer.on?.("codex-workflow:update:status", (_event, status) => {
+      state.updateStatus = status || { available: false };
+      state.updateApplying = false;
+      scheduleWork("toolbar");
+    });
 
     const boot = () => {
       installHistoryHooks();
@@ -134,20 +150,25 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         const result = original.apply(this, args);
         if (state.activeWorkflow && location.href !== previousLocation) restoreNativeSettingsView();
         beginDiscovery();
-        scheduleWork("sidebar", "settings");
+        scheduleWork("sidebar", "settings", "toolbar");
         return result;
       };
     }
     const onNavigation = () => {
       if (state.activeWorkflow) restoreNativeSettingsView();
       beginDiscovery();
-      scheduleWork("sidebar", "settings");
+      scheduleWork("sidebar", "settings", "toolbar");
     };
     window.addEventListener("popstate", onNavigation);
     window.addEventListener("hashchange", onNavigation);
   }
 
   function installDiscoveryHooks() {
+    document.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.ctrlKey) return;
+      const target = accountMenuTriggerFromEvent(event);
+      if (target) beginAccountMenuDiscovery();
+    }, true);
     document.addEventListener("click", (event) => {
       const target = event.target instanceof Element
         ? event.target.closest("button, a, [role='button'], [role='menuitem']")
@@ -155,13 +176,25 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       if (!target) return;
       const label = compactText(target.getAttribute("aria-label") || target.textContent);
       if (label === "settings" || label === "open settings") beginDiscovery();
-      if (target.matches("button, [role='button']") && target.closest(".app-shell-left-panel")) {
+      if (event.detail === 0 && accountMenuTriggerFromEvent(event)) {
         beginAccountMenuDiscovery();
       }
     }, true);
     document.addEventListener("keydown", (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key === ",") beginDiscovery();
+      if (["Enter", " ", "ArrowDown"].includes(event.key) && accountMenuTriggerFromEvent(event)) {
+        beginAccountMenuDiscovery();
+      }
     }, true);
+  }
+
+  function accountMenuTriggerFromEvent(event) {
+    const target = event.target instanceof Element
+      ? event.target.closest("button, [role='button']")
+      : null;
+    return target?.matches('[aria-haspopup="menu"]') && target.closest(".app-shell-left-panel")
+      ? target
+      : null;
   }
 
   function scheduleWork(...kinds) {
@@ -171,10 +204,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     requestAnimationFrame(() => {
       state.scheduled = false;
       const dirty = state.dirty;
-      state.dirty = { discovery: false, sidebar: false, settings: false };
+      state.dirty = { discovery: false, sidebar: false, settings: false, toolbar: false };
       if (dirty.discovery) discoverRoots();
       if (dirty.sidebar) syncPullRequests();
       if (dirty.settings) syncSettingsPage();
+      if (dirty.toolbar) syncUpdatePill();
     });
   }
 
@@ -245,7 +279,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (settingsShell) bindSettingsShell(settingsShell);
     else if (state.settingsShell && !state.settingsShell.isConnected) unbindSettingsShell();
 
-    if (state.sidebarRoot?.isConnected && state.settingsShell?.isConnected) {
+    const toolbarRoot = findToolbarRoot();
+    if (toolbarRoot) bindToolbarRoot(toolbarRoot);
+    else if (state.toolbarRoot && !state.toolbarRoot.isConnected) unbindToolbarRoot();
+
+    if (state.sidebarRoot?.isConnected && state.settingsShell?.isConnected && state.toolbarRoot?.isConnected) {
       stopDiscovery();
       return;
     }
@@ -344,6 +382,57 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     releaseSettingsMount();
   }
 
+  function toolbarActionButtons(root = document) {
+    const labels = new Set(["share", "toggle summary", "toggle bottom panel", "toggle top panel"]);
+    return Array.from(root.querySelectorAll("button, [role='button']")).filter((element) => {
+      if (!(element instanceof HTMLElement)) return false;
+      if (element.closest("[role='dialog'], [role='menu'], [cmdk-root], .app-shell-left-panel, nav[aria-label='Settings']")) return false;
+      return labels.has(compactText(element.getAttribute("aria-label") || element.getAttribute("title")));
+    });
+  }
+
+  function findToolbarRoot() {
+    const actions = toolbarActionButtons();
+    if (actions.length < 2) return null;
+    const counts = new Map();
+    for (const action of actions) {
+      let candidate = action.parentElement;
+      for (let depth = 0; candidate && depth < 7; depth += 1, candidate = candidate.parentElement) {
+        const className = String(candidate.className || "");
+        if (/\bdraggable\b|h-toolbar/u.test(className)) {
+          counts.set(candidate, (counts.get(candidate) || 0) + 1);
+          break;
+        }
+      }
+    }
+    return Array.from(counts.entries()).find(([, count]) => count >= 2)?.[0] || null;
+  }
+
+  function bindToolbarRoot(root) {
+    if (state.toolbarRoot === root && root.isConnected) return;
+    unbindToolbarRoot();
+    state.toolbarRoot = root;
+    state.toolbarObserver = new MutationObserver(() => scheduleWork("toolbar"));
+    state.toolbarObserver.observe(root, {
+      attributes: true,
+      attributeFilter: ["aria-label", "class"],
+      childList: true,
+      subtree: true,
+    });
+    state.toolbarMountObservers = observeMountChain("toolbar", root);
+    scheduleWork("toolbar");
+  }
+
+  function unbindToolbarRoot() {
+    state.toolbarObserver?.disconnect();
+    state.toolbarObserver = null;
+    disconnectObservers(state.toolbarMountObservers);
+    state.toolbarMountObservers = [];
+    state.updatePill?.remove();
+    state.updatePill = null;
+    state.toolbarRoot = null;
+  }
+
   function observeMountChain(kind, root) {
     const observers = [];
     let child = root;
@@ -353,6 +442,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         if (root.isConnected) return;
         if (kind === "sidebar" && state.sidebarRoot === root) unbindSidebarRoot();
         if (kind === "settings" && state.settingsShell === root) unbindSettingsShell();
+        if (kind === "toolbar" && state.toolbarRoot === root) unbindToolbarRoot();
         beginDiscovery();
       });
       observer.observe(parent, { childList: true });
@@ -1088,6 +1178,81 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.customNav = null;
     state.customInactiveSnapshot = null;
     state.settingsNav = null;
+  }
+
+  function syncUpdatePill() {
+    const root = state.toolbarRoot;
+    if (!root?.isConnected) {
+      if (root) unbindToolbarRoot();
+      beginDiscovery();
+      return;
+    }
+    if (!state.updateStatus?.available) {
+      state.updatePill?.remove();
+      state.updatePill = null;
+      return;
+    }
+
+    const actions = toolbarActionButtons(root);
+    if (actions.length < 2) {
+      state.updatePill?.remove();
+      state.updatePill = null;
+      return;
+    }
+    let group = actions[0].parentElement;
+    while (group && group !== root && !actions.every((action) => group.contains(action))) {
+      group = group.parentElement;
+    }
+    if (!group || !actions.every((action) => group.contains(action))) return;
+    let anchor = actions[0];
+    while (anchor.parentElement !== group && anchor.parentElement) anchor = anchor.parentElement;
+
+    let button = state.updatePill;
+    if (!button?.isConnected) {
+      button = createUpdatePill();
+      state.updatePill = button;
+    }
+    button.disabled = state.updateApplying;
+    button.setAttribute("aria-label", state.updateApplying ? "Installing Workflow Update" : "Workflow Update");
+    button.title = state.updateApplying ? "Installing Workflow Update" : "Workflow Update";
+    const label = button.querySelector('[data-codex-workflow-update-label="true"]');
+    if (label) label.textContent = state.updateApplying ? "Installing" : "Workflow Update";
+    if (button.parentElement !== group || button.nextSibling !== anchor) group.insertBefore(button, anchor);
+  }
+
+  function createUpdatePill() {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.codexWorkflowUpdate = "true";
+    button.className = "no-drag relative shrink-0 cursor-interaction rounded-full bg-chart-blue text-[10px] leading-3 font-semibold text-white shadow-sm contain-layout contain-style active:bg-chart-blue/80 enabled:hover:bg-[color-mix(in_srgb,var(--color-chart-blue)_92%,black_8%)] motion-reduce:transition-none flex h-5 max-w-5 min-w-5 items-center justify-center overflow-hidden px-2.5 transition-[background-color] duration-relaxed ease-basic contain-paint @[180px]:max-w-36 @[180px]:min-w-10";
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 20 20");
+    svg.setAttribute("fill", "currentColor");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("class", "shrink-0 motion-reduce:transition-none absolute left-1/2 h-3 w-3 -translate-x-1/2 transition-opacity duration-relaxed ease-basic [will-change:opacity] @[180px]:opacity-0");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M2.66831 12.6664V12.5004C2.66831 12.1331 2.96607 11.8353 3.33334 11.8353C3.70061 11.8353 3.99838 12.1331 3.99838 12.5004V12.6664C3.99838 13.3773 3.99929 13.8708 4.03061 14.2543C4.0613 14.6299 4.11812 14.8414 4.19858 14.9994L4.26889 15.1263C4.4452 15.4138 4.69823 15.6482 5.00034 15.8021L5.13022 15.8578C5.27399 15.9092 5.4635 15.9471 5.74545 15.9701C6.12897 16.0014 6.62231 16.0013 7.33334 16.0013H12.6664C13.3772 16.0013 13.8708 16.0014 14.2542 15.9701C14.6296 15.9394 14.8414 15.8825 14.9994 15.8021L15.1263 15.7308C15.4137 15.5545 15.6482 15.3014 15.8021 14.9994L15.8578 14.8695C15.9092 14.7258 15.947 14.5361 15.9701 14.2543C16.0014 13.8708 16.0013 13.3772 16.0013 12.6664V12.5004C16.0013 12.1332 16.2992 11.8355 16.6664 11.8353C17.0336 11.8353 17.3314 12.1331 17.3314 12.5004V12.6664C17.3314 13.3554 17.332 13.9125 17.2953 14.3627C17.2625 14.7636 17.1975 15.1248 17.0531 15.4613L16.9867 15.6039C16.7212 16.1248 16.3173 16.5606 15.8216 16.8646L15.6039 16.9867C15.2271 17.1787 14.8206 17.2579 14.3626 17.2953C13.9124 17.3321 13.3554 17.3314 12.6664 17.3314H7.33334C6.64425 17.3314 6.0873 17.3321 5.63706 17.2953C5.23651 17.2626 4.87562 17.1982 4.5394 17.0541L4.39682 16.9867C3.8757 16.7212 3.4392 16.3175 3.1351 15.8217L3.01303 15.6039C2.82106 15.2271 2.74186 14.8207 2.70444 14.3627C2.66767 13.9125 2.66831 13.3554 2.66831 12.6664ZM9.3353 3.33337C9.3353 2.9661 9.63307 2.66833 10.0003 2.66833C10.3675 2.66851 10.6654 2.96621 10.6654 3.33337V10.8939L12.8626 8.69666L12.9671 8.61169C13.2253 8.44097 13.5767 8.4693 13.804 8.69666C14.0634 8.95633 14.0635 9.37748 13.804 9.63708L10.4701 12.9701C10.3454 13.0947 10.1766 13.1653 10.0003 13.1654C9.82397 13.1654 9.65434 13.0948 9.52963 12.9701L6.19663 9.63708L6.11166 9.53259C5.9411 9.27445 5.96934 8.92394 6.19663 8.69666C6.42392 8.46937 6.77442 8.44113 7.03256 8.61169L7.13705 8.69666L9.3353 10.8949V3.33337Z");
+    svg.append(path);
+
+    const label = document.createElement("span");
+    label.dataset.codexWorkflowUpdateLabel = "true";
+    label.className = "min-w-0 truncate tabular-nums opacity-0 transition-opacity duration-relaxed ease-basic [will-change:opacity] motion-reduce:transition-none @[180px]:opacity-100";
+    label.textContent = "Workflow Update";
+    button.append(svg, label);
+    button.addEventListener("click", async () => {
+      if (state.updateApplying) return;
+      state.updateApplying = true;
+      syncUpdatePill();
+      try {
+        await ipcRenderer.invoke("codex-workflow:update:install");
+      } catch (error) {
+        state.updateApplying = false;
+        syncUpdatePill();
+        log("error", `update launch failed: ${error?.stack || error}`);
+      }
+    });
+    return button;
   }
 
   function compactText(value) {
