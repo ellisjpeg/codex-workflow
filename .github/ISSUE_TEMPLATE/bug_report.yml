@@ -1,0 +1,48 @@
+name: Bug report
+description: Report reproducible Workflow behavior.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach app bundles, credentials, prompts, or private logs.
+  - type: input
+    id: workflow-version
+    attributes:
+      label: Workflow version
+      placeholder: 0.4.3
+    validations:
+      required: true
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex version and build
+      placeholder: 26.820.60940 / 7119
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I ran `npm run status` and removed private information from any output.
+          required: true

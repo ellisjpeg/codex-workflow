@@ -1,0 +1,674 @@
+import * as asar from "@electron/asar";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  closeSync,
+  cpSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+export const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export const appRoot = "/Applications/ChatGPT.app";
+export const asarPath = join(appRoot, "Contents", "Resources", "app.asar");
+export const infoPlistPath = join(appRoot, "Contents", "Info.plist");
+export const runtimeRoot = join(homedir(), "Library", "Application Support", "Codex Workflow");
+export const disabledPath = join(runtimeRoot, "DISABLED");
+export const supportedVersion = "26.820.60940";
+export const expectedBundleIdentifier = "com.openai.codex";
+export const expectedPackageName = "openai-codex-electron";
+export const patchVersion = "0.4.3";
+
+const journalPath = join(runtimeRoot, "transaction.json");
+const backupsRoot = join(runtimeRoot, "backups");
+const statePath = join(runtimeRoot, "state.json");
+const managedRuntimePaths = ["runtime/main.cjs", "runtime/preload.cjs"];
+
+export function readPackage(targetAsar = asarPath) {
+  return JSON.parse(asar.extractFile(targetAsar, "package.json").toString("utf8"));
+}
+
+export function headerHash(targetAsar = asarPath) {
+  const raw = asar.getRawHeader(targetAsar);
+  return createHash("sha256").update(raw.headerString).digest("hex");
+}
+
+export function fileHash(targetPath) {
+  const hash = createHash("sha256");
+  const descriptor = openSync(targetPath, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let offset = 0;
+    for (;;) {
+      const bytes = readSync(descriptor, buffer, 0, buffer.length, offset);
+      if (bytes === 0) break;
+      hash.update(buffer.subarray(0, bytes));
+      offset += bytes;
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  return hash.digest("hex");
+}
+
+export function plistValue(keyPath, targetPlist = infoPlistPath) {
+  return execFileSync("/usr/libexec/PlistBuddy", ["-c", `Print :${keyPath}`, targetPlist], {
+    encoding: "utf8",
+  }).trim();
+}
+
+export function setPlistValue(keyPath, value, targetPlist = infoPlistPath) {
+  execFileSync("/usr/libexec/PlistBuddy", ["-c", `Set :${keyPath} ${value}`, targetPlist]);
+}
+
+export function signatureIsValid() {
+  return spawnSync("codesign", ["--verify", "--deep", "--strict", appRoot], {
+    stdio: "ignore",
+  }).status === 0;
+}
+
+export function appIsRunning() {
+  const executable = join(
+    appRoot,
+    "Contents",
+    "MacOS",
+    plistValue("CFBundleExecutable", infoPlistPath),
+  );
+  const processList = spawnSync("/bin/ps", ["-axo", "args="], { encoding: "utf8" });
+  if (processList.status !== 0) {
+    throw new Error("Could not verify whether ChatGPT/Codex is running");
+  }
+  return processList.stdout.split("\n")
+    .some((line) => line === executable || line.startsWith(`${executable} `));
+}
+
+export function assertAppNotRunning() {
+  if (appIsRunning()) {
+    throw new Error("Quit ChatGPT/Codex before changing its application bundle");
+  }
+}
+
+export function timestamp() {
+  const now = new Date();
+  const part = (value) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}${part(now.getSeconds())}`;
+}
+
+export function fingerprint(targetAsar = asarPath, pkg = readPackage(targetAsar)) {
+  return {
+    version: pkg.version,
+    build: String(pkg.codexBuildNumber || "unknown"),
+    asarSha256: fileHash(targetAsar),
+    headerSha256: headerHash(targetAsar),
+  };
+}
+
+export function formatFingerprint(value) {
+  const fingerprintValue = validateSourceFingerprint(value);
+  return `${fingerprintValue.version}-${fingerprintValue.build}-${fingerprintValue.asarSha256.slice(0, 16)}`;
+}
+
+export function validateSourceFingerprint(value) {
+  if (!value || typeof value !== "object") {
+    throw new Error("Workflow source fingerprint is missing");
+  }
+  for (const field of ["version", "build"]) {
+    if (typeof value[field] !== "string" || !/^[a-z0-9][a-z0-9._+-]{0,127}$/iu.test(value[field])) {
+      throw new Error(`Workflow source fingerprint has an invalid ${field}`);
+    }
+  }
+  for (const field of ["asarSha256", "headerSha256"]) {
+    if (typeof value[field] !== "string" || !/^[0-9a-f]{64}$/iu.test(value[field])) {
+      throw new Error(`Workflow source fingerprint has an invalid ${field}`);
+    }
+  }
+  return value;
+}
+
+export function preflight(targetAsar = asarPath, targetPlist = infoPlistPath, { allowVersion = false } = {}) {
+  if (!existsSync(targetAsar) || !existsSync(targetPlist)) {
+    throw new Error("ChatGPT app bundle is incomplete");
+  }
+  const bundleIdentifier = plistValue("CFBundleIdentifier", targetPlist);
+  if (bundleIdentifier !== expectedBundleIdentifier) {
+    throw new Error(`Unexpected bundle identifier ${bundleIdentifier}`);
+  }
+  const algorithm = plistValue("ElectronAsarIntegrity:Resources/app.asar:algorithm", targetPlist);
+  if (algorithm !== "SHA256") {
+    throw new Error(`Unexpected Electron ASAR integrity algorithm ${algorithm}`);
+  }
+  const expectedIntegrity = plistValue("ElectronAsarIntegrity:Resources/app.asar:hash", targetPlist);
+  const computedIntegrity = headerHash(targetAsar);
+  if (expectedIntegrity !== computedIntegrity) {
+    throw new Error("Electron ASAR integrity metadata does not match app.asar");
+  }
+  const pkg = readPackage(targetAsar);
+  if (pkg.name !== expectedPackageName) {
+    throw new Error(`Unexpected package name ${pkg.name}`);
+  }
+  if (pkg.__codexWorkflow?.source) validateSourceFingerprint(pkg.__codexWorkflow.source);
+  const originalMain = pkg.__codexWorkflow?.originalMain || pkg.main;
+  if (typeof originalMain !== "string" || !originalMain.startsWith(".") || originalMain.includes("..")) {
+    throw new Error("App main entry point is not a safe archive-relative path");
+  }
+  try {
+    asar.extractFile(targetAsar, originalMain);
+  } catch {
+    throw new Error(`App main entry point is missing: ${originalMain}`);
+  }
+  if (pkg.version !== supportedVersion && !allowVersion) {
+    throw new Error(`Unsupported Codex version ${pkg.version}; expected ${supportedVersion}`);
+  }
+  return {
+    pkg,
+    bundleIdentifier,
+    expectedIntegrity,
+    computedIntegrity,
+    originalMain,
+    signatureIsValid: signatureIsValid(),
+    fingerprint: fingerprint(targetAsar, pkg),
+  };
+}
+
+export function preflightLiveUncached({ allowVersion = false } = {}) {
+  const work = mkdtempSync(join(tmpdir(), "codex-workflow-verify-"));
+  const snapshotAsar = join(work, "app.asar");
+  const snapshotPlist = join(work, "Info.plist");
+  try {
+    cpSync(asarPath, snapshotAsar);
+    cpSync(infoPlistPath, snapshotPlist);
+    return preflight(snapshotAsar, snapshotPlist, { allowVersion });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+export async function buildPatchedAsar(inputAsar, outputAsar, sourceFingerprint) {
+  const work = mkdtempSync(join(tmpdir(), "codex-workflow-asar-"));
+  const extracted = join(work, "src");
+  try {
+    const unpackOptions = collectUnpackOptions(inputAsar);
+    asar.extractAll(inputAsar, extracted);
+    const packagePath = join(extracted, "package.json");
+    const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
+    const originalMain = pkg.__codexWorkflow?.originalMain || pkg.main;
+    pkg.main = "workflow-loader.cjs";
+    pkg.__codexWorkflow = {
+      version: patchVersion,
+      appVersion: pkg.version,
+      originalMain,
+      runtimeRoot,
+      source: sourceFingerprint,
+    };
+    writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
+    cpSync(join(sourceRoot, "loader.cjs"), join(extracted, "workflow-loader.cjs"));
+    await asar.createPackageWithOptions(extracted, outputAsar, {
+      globOptions: { dot: true },
+      ...unpackOptions,
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+export function installRuntimeFiles() {
+  const runtimeDestination = join(runtimeRoot, "runtime");
+  mkdirSync(runtimeDestination, { recursive: true });
+  atomicReplace(join(sourceRoot, "runtime", "main.cjs"), join(runtimeDestination, "main.cjs"));
+  atomicReplace(join(sourceRoot, "runtime", "preload.cjs"), join(runtimeDestination, "preload.cjs"));
+  const settingsPath = join(runtimeRoot, "settings.json");
+  if (!existsSync(settingsPath)) {
+    writeJsonAtomic(settingsPath, {
+      schemaVersion: 2,
+      focusedInterface: true,
+      hidePullRequests: true,
+      hidePetMenuItem: true,
+    });
+  }
+}
+
+export function ensureSourceBackup(source) {
+  const backupDir = sourceBackupDirectory(source);
+  const backupAsar = join(backupDir, "app.asar");
+  const backupPlist = join(backupDir, "Info.plist");
+  const manifestPath = join(backupDir, "manifest.json");
+  if (existsSync(manifestPath)) {
+    const manifest = readJson(manifestPath);
+    if (!manifest || manifest.source?.asarSha256 !== source.asarSha256 || !existsSync(backupAsar) || !existsSync(backupPlist)) {
+      throw new Error(`Source backup is incomplete or does not match ${formatFingerprint(source)}`);
+    }
+    return resolveSourceBackup(source);
+  }
+  assertNoSymlink(backupsRoot, "backup root");
+  assertNoSymlink(backupDir, "source backup");
+  mkdirSync(backupDir, { recursive: true });
+  assertManagedDirectory(backupsRoot, backupDir, "source backup");
+  copyFileDurably(asarPath, backupAsar);
+  copyFileDurably(infoPlistPath, backupPlist);
+  const manifest = {
+    schemaVersion: 1,
+    createdAt: new Date().toISOString(),
+    bundleIdentifier: plistValue("CFBundleIdentifier"),
+    source,
+  };
+  writeJsonAtomic(manifestPath, manifest);
+  return resolveSourceBackup(source);
+}
+
+export function resolveSourceBackup(source) {
+  const backupDir = sourceBackupDirectory(source);
+  const backupAsar = join(backupDir, "app.asar");
+  const backupPlist = join(backupDir, "Info.plist");
+  const manifestPath = join(backupDir, "manifest.json");
+  assertNoSymlink(backupsRoot, "backup root");
+  assertManagedDirectory(backupsRoot, backupDir, "source backup");
+  for (const target of [backupAsar, backupPlist, manifestPath]) {
+    assertManagedFile(backupDir, target, "source backup file");
+  }
+  const manifest = readJson(manifestPath);
+  if (!manifest || manifest.source?.asarSha256 !== source.asarSha256 || !existsSync(backupAsar) || !existsSync(backupPlist)) {
+    throw new Error(`No verified source backup for ${formatFingerprint(source)}`);
+  }
+  validateSourceFingerprint(manifest.source);
+  const backupCheck = preflight(backupAsar, backupPlist, { allowVersion: true });
+  if (backupCheck.fingerprint.asarSha256 !== source.asarSha256) {
+    throw new Error("Source backup ASAR hash does not match its manifest");
+  }
+  return { backupDir, backupAsar, backupPlist, manifestPath, manifest };
+}
+
+export function createTransaction() {
+  mkdirSync(runtimeRoot, { recursive: true });
+  if (existsSync(journalPath)) {
+    throw new Error("An incomplete Workflow patch transaction exists; run recovery first");
+  }
+  const id = `${timestamp()}-${randomUUID()}`;
+  const transactionDir = join(runtimeRoot, "transactions", id);
+  mkdirSync(transactionDir, { recursive: true });
+  const rollbackAsar = join(transactionDir, "rollback.asar");
+  const rollbackPlist = join(transactionDir, "rollback.Info.plist");
+  try {
+    copyFileDurably(asarPath, rollbackAsar);
+    copyFileDurably(infoPlistPath, rollbackPlist);
+    const runtimeFiles = managedRuntimePaths.map((relativePath) => {
+      const target = join(runtimeRoot, relativePath);
+      const rollback = join(transactionDir, "rollback-runtime", relativePath);
+      const existed = existsSync(target);
+      if (existed) copyFileDurably(target, rollback);
+      return { relativePath, existed };
+    });
+    const journal = {
+      schemaVersion: 1,
+      id,
+      createdAt: new Date().toISOString(),
+      phase: "prepared",
+      transactionDir,
+      rollbackAsar,
+      rollbackPlist,
+      runtimeFiles,
+    };
+    writeJsonAtomic(journalPath, journal);
+    return journal;
+  } catch (error) {
+    rmSync(transactionDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export function setTransactionPhase(journal, phase) {
+  const next = { ...journal, phase, updatedAt: new Date().toISOString() };
+  writeJsonAtomic(journalPath, next);
+  return next;
+}
+
+export function completeTransaction(journal) {
+  rmSync(journalPath, { force: true });
+  fsyncDirectory(dirname(journalPath));
+  try {
+    rmSync(journal.transactionDir, { recursive: true, force: true });
+  } catch {}
+}
+
+export function pendingTransaction() {
+  if (!existsSync(journalPath)) return null;
+  let journal;
+  try {
+    journal = JSON.parse(readFileSync(journalPath, "utf8"));
+  } catch {
+    throw new Error("Workflow patch transaction journal is unreadable; inspect it before continuing");
+  }
+  return validateTransactionJournal(journal);
+}
+
+export function transactionRecoveryStatus(journal) {
+  if (!journal) return { ready: false, reason: "missing-journal" };
+  if (!Array.isArray(journal.runtimeFiles)) {
+    return { ready: false, reason: "legacy-journal-missing-runtime-metadata" };
+  }
+  const missing = [journal.rollbackAsar, journal.rollbackPlist]
+    .filter((target) => !existsSync(target));
+  for (const entry of journal.runtimeFiles || []) {
+    if (!entry.existed) continue;
+    const rollback = join(journal.transactionDir, "rollback-runtime", entry.relativePath);
+    if (!existsSync(rollback)) missing.push(rollback);
+  }
+  return missing.length
+    ? { ready: false, reason: "missing-rollback-files", missingCount: missing.length }
+    : { ready: true };
+}
+
+export function recoverPendingTransaction() {
+  const journal = pendingTransaction();
+  if (!journal) return { recovered: false };
+  return recoverTransaction(journal);
+}
+
+export function recoverTransaction(journal, {
+  targetAsar = asarPath,
+  targetPlist = infoPlistPath,
+  targetRuntimeRoot = runtimeRoot,
+  verifyRollback = () => preflight(journal.rollbackAsar, journal.rollbackPlist, { allowVersion: true }),
+  verifyRestored = () => {
+    if (targetAsar === asarPath && targetPlist === infoPlistPath) {
+      return preflightLiveUncached({ allowVersion: true });
+    }
+    return preflight(targetAsar, targetPlist, { allowVersion: true });
+  },
+  finish = completeTransaction,
+} = {}) {
+  const recovery = transactionRecoveryStatus(journal);
+  if (!recovery.ready) {
+    throw new Error("Workflow patch recovery files are missing; do not modify the app bundle");
+  }
+  verifyRollback();
+  restoreFilePair(journal.rollbackAsar, journal.rollbackPlist, targetAsar, targetPlist);
+  restoreRuntimeFiles(journal, targetRuntimeRoot);
+  verifyRestored();
+  finish(journal);
+  return { recovered: true, id: journal.id, phase: journal.phase };
+}
+
+export function restoreFilePair(
+  backupAsar,
+  backupPlist,
+  targetAsar = asarPath,
+  targetPlist = infoPlistPath,
+) {
+  atomicReplace(backupAsar, targetAsar);
+  atomicReplace(backupPlist, targetPlist);
+}
+
+export function restoreRuntimeFiles(journal, targetRoot = runtimeRoot) {
+  for (const entry of journal.runtimeFiles || []) {
+    if (!managedRuntimePaths.includes(entry.relativePath) || typeof entry.existed !== "boolean") {
+      throw new Error("Workflow runtime rollback metadata is invalid");
+    }
+    const target = join(targetRoot, entry.relativePath);
+    if (entry.existed) {
+      atomicReplace(join(journal.transactionDir, "rollback-runtime", entry.relativePath), target);
+    } else if (existsSync(target)) {
+      rmSync(target, { force: true });
+      fsyncDirectory(dirname(target));
+    }
+  }
+}
+
+export function atomicReplace(from, to) {
+  const stageDir = mkdtempSync(join(dirname(to), ".codex-workflow-"));
+  const staged = join(stageDir, "replacement");
+  try {
+    copyFileDurably(from, staged);
+    renameSync(staged, to);
+    fsyncDirectory(dirname(to));
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+}
+
+export function writeJsonAtomic(targetPath, value) {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  const stageDir = mkdtempSync(join(dirname(targetPath), ".codex-workflow-"));
+  const staged = join(stageDir, "replacement.json");
+  try {
+    writeFileSync(staged, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+    fsyncFile(staged);
+    renameSync(staged, targetPath);
+    fsyncDirectory(dirname(targetPath));
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+}
+
+export function writePatchState(value) {
+  writeJsonAtomic(statePath, value);
+}
+
+export function readPatchState() {
+  return readJson(statePath);
+}
+
+export function readSettings() {
+  return readJson(join(runtimeRoot, "settings.json"));
+}
+
+function sourceBackupDirectory(source) {
+  const target = resolve(backupsRoot, formatFingerprint(source));
+  const child = relative(resolve(backupsRoot), target);
+  if (!child || child === ".." || child.startsWith("../") || isAbsolute(child)) {
+    throw new Error("Workflow source backup path escapes the managed backup root");
+  }
+  return target;
+}
+
+function assertNoSymlink(targetPath, label) {
+  if (existsSync(targetPath) && lstatSync(targetPath).isSymbolicLink()) {
+    throw new Error(`Workflow ${label} must not be a symbolic link`);
+  }
+}
+
+function assertManagedDirectory(rootPath, targetPath, label) {
+  if (!existsSync(targetPath)) return;
+  assertNoSymlinkComponents(rootPath, targetPath, label);
+  const child = relative(realpathSync(rootPath), realpathSync(targetPath));
+  if (child === ".." || child.startsWith("../") || isAbsolute(child)) {
+    throw new Error(`Workflow ${label} escapes its managed root`);
+  }
+}
+
+function assertManagedFile(rootPath, targetPath, label) {
+  if (!existsSync(targetPath)) return;
+  assertNoSymlinkComponents(rootPath, targetPath, label);
+  const child = relative(realpathSync(rootPath), realpathSync(targetPath));
+  if (!child || child === ".." || child.startsWith("../") || isAbsolute(child)) {
+    throw new Error(`Workflow ${label} escapes its managed root`);
+  }
+}
+
+function assertNoSymlinkComponents(rootPath, targetPath, label) {
+  const root = resolve(rootPath);
+  const target = resolve(targetPath);
+  const child = relative(root, target);
+  if (child === ".." || child.startsWith("../") || isAbsolute(child)) {
+    throw new Error(`Workflow ${label} escapes its managed root`);
+  }
+  let current = root;
+  assertNoSymlink(current, `${label} root`);
+  for (const part of child.split("/").filter(Boolean)) {
+    current = join(current, part);
+    assertNoSymlink(current, label);
+  }
+}
+
+export function prettyBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+export function appAsarSize() {
+  return statSync(asarPath).size;
+}
+
+function readJson(targetPath) {
+  try {
+    return JSON.parse(readFileSync(targetPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function validateTransactionJournal(journal) {
+  if (
+    !journal ||
+    journal.schemaVersion !== 1 ||
+    typeof journal.id !== "string" ||
+    typeof journal.phase !== "string" ||
+    typeof journal.transactionDir !== "string" ||
+    typeof journal.rollbackAsar !== "string" ||
+    typeof journal.rollbackPlist !== "string"
+  ) {
+    throw new Error("Workflow patch transaction journal has an unsupported schema");
+  }
+  if (!/^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(journal.id)) {
+    throw new Error("Workflow patch transaction journal has an invalid id");
+  }
+  if (!["prepared", "runtime-installed", "asar-replaced", "plist-replaced", "asar-restored", "plist-restored"].includes(journal.phase)) {
+    throw new Error("Workflow patch transaction journal has an invalid phase");
+  }
+  const expectedDir = join(runtimeRoot, "transactions", journal.id);
+  const expectedAsar = join(expectedDir, "rollback.asar");
+  const expectedPlist = join(expectedDir, "rollback.Info.plist");
+  if (
+    resolve(journal.transactionDir) !== resolve(expectedDir) ||
+    resolve(journal.rollbackAsar) !== resolve(expectedAsar) ||
+    resolve(journal.rollbackPlist) !== resolve(expectedPlist)
+  ) {
+    throw new Error("Workflow patch transaction journal contains unsafe paths");
+  }
+  const transactionsRoot = join(runtimeRoot, "transactions");
+  assertNoSymlink(transactionsRoot, "transaction root");
+  assertNoSymlink(journal.transactionDir, "transaction directory");
+  if (existsSync(journal.transactionDir)) {
+    assertManagedDirectory(transactionsRoot, journal.transactionDir, "transaction directory");
+  }
+  for (const target of [journal.rollbackAsar, journal.rollbackPlist]) {
+    assertNoSymlink(target, "transaction rollback file");
+    if (existsSync(target)) assertManagedFile(journal.transactionDir, target, "transaction rollback file");
+  }
+  if (journal.runtimeFiles !== undefined) {
+    if (!Array.isArray(journal.runtimeFiles)) {
+      throw new Error("Workflow patch transaction journal has invalid runtime rollback metadata");
+    }
+    const seen = new Set();
+    for (const entry of journal.runtimeFiles) {
+      if (!entry || !managedRuntimePaths.includes(entry.relativePath) || typeof entry.existed !== "boolean") {
+        throw new Error("Workflow patch transaction journal has invalid runtime rollback metadata");
+      }
+      if (seen.has(entry.relativePath)) {
+        throw new Error("Workflow patch transaction journal repeats runtime rollback metadata");
+      }
+      seen.add(entry.relativePath);
+      const rollback = join(journal.transactionDir, "rollback-runtime", entry.relativePath);
+      assertNoSymlink(rollback, "runtime rollback file");
+      if (existsSync(rollback)) {
+        assertManagedFile(journal.transactionDir, rollback, "runtime rollback file");
+      }
+    }
+    if (seen.size !== managedRuntimePaths.length) {
+      throw new Error("Workflow patch transaction journal has incomplete runtime rollback metadata");
+    }
+  }
+  return journal;
+}
+
+function copyFileDurably(from, to) {
+  mkdirSync(dirname(to), { recursive: true });
+  cpSync(from, to);
+  fsyncFile(to);
+  fsyncDirectory(dirname(to));
+}
+
+function fsyncFile(targetPath) {
+  const descriptor = openSync(targetPath, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function fsyncDirectory(targetPath) {
+  const descriptor = openSync(targetPath, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function collectUnpackOptions(targetAsar) {
+  const sibling = `${targetAsar}.unpacked`;
+  if (!existsSync(sibling)) return {};
+  const raw = asar.getRawHeader(targetAsar);
+  const covers = unpackCovers(raw.header, "").covers;
+  const dirs = covers.filter((cover) => cover.type === "dir").map((cover) => stripSlash(cover.path));
+  const files = covers.filter((cover) => cover.type === "file").map((cover) => `**/${stripSlash(cover.path)}`);
+  return {
+    ...(files.length ? { unpack: bracePattern(files) } : {}),
+    ...(dirs.length ? { unpackDir: bracePattern(dirs) } : {}),
+  };
+}
+
+function unpackCovers(node, prefix) {
+  const files = node?.files;
+  if (!files) return { total: 0, unpacked: 0, covers: [] };
+  let total = 0;
+  let unpacked = 0;
+  const covers = [];
+  for (const [name, value] of Object.entries(files)) {
+    const current = `${prefix}/${name}`;
+    if (value?.files) {
+      const child = unpackCovers(value, current);
+      total += child.total;
+      unpacked += child.unpacked;
+      covers.push(...child.covers);
+    } else {
+      total += 1;
+      if (value?.unpacked) {
+        unpacked += 1;
+        covers.push({ type: "file", path: current });
+      }
+    }
+  }
+  if (prefix && total > 0 && total === unpacked) {
+    return { total, unpacked, covers: [{ type: "dir", path: prefix }] };
+  }
+  return { total, unpacked, covers };
+}
+
+function stripSlash(value) {
+  return value.replace(/^\/+/, "");
+}
+
+function bracePattern(values) {
+  return values.length === 1 ? values[0] : `{${values.join(",")}}`;
+}
