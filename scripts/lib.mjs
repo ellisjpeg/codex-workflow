@@ -31,7 +31,7 @@ export const disabledPath = join(runtimeRoot, "DISABLED");
 export const supportedVersion = "26.820.60940";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.4.3";
+export const patchVersion = "0.4.4";
 
 const journalPath = join(runtimeRoot, "transaction.json");
 const backupsRoot = join(runtimeRoot, "backups");
@@ -237,6 +237,7 @@ export function installRuntimeFiles() {
       focusedInterface: true,
       hidePullRequests: true,
       hidePetMenuItem: true,
+      hideInviteFriendMenuItem: true,
     });
   }
 }

@@ -11,7 +11,7 @@ This is an independent community project and is not affiliated with or endorsed 
 
 - Native-style **Workflow** category in Codex Settings.
 - **Focused Interface** master switch with individual visibility controls.
-- Optional hiding of **Pull requests** and account-menu pet controls.
+- Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
 - Scoped sidebar and settings observers with route/remount recovery.
 - Atomic local settings persistence and visible rollback after write failures.
 - Version, bundle identity, ASAR integrity, backup, transaction, recovery, and uninstall guards.

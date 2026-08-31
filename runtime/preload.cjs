@@ -18,6 +18,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     focusedInterface: true,
     hidePullRequests: true,
     hidePetMenuItem: true,
+    hideInviteFriendMenuItem: true,
   };
   const discoveryDelays = [16, 50, 150, 450, 1000];
   const discoveryRootSelector = ".app-shell-left-panel, nav[aria-label='Settings'], [data-settings-panel-slug='general-settings']";
@@ -32,10 +33,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     settingsObserver: null,
     settingsMountObservers: [],
     settingsShell: null,
-    petMenuDiscoveryObserver: null,
-    petMenuDiscoveryTimer: null,
+    accountMenuDiscoveryObserver: null,
+    accountMenuDiscoveryTimer: null,
     scheduled: false,
-    dirty: { discovery: false, sidebar: false, settings: false, petMenu: false },
+    dirty: { discovery: false, sidebar: false, settings: false },
     customNav: null,
     settingsNav: null,
     panel: null,
@@ -49,7 +50,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     loggedSettingsShell: false,
     hiddenPullRequestCount: -1,
     hiddenPetMenuItemCount: -1,
+    hiddenInviteFriendMenuItemCount: -1,
     loggedAmbiguousPetMenu: false,
+    loggedAmbiguousInviteFriendMenu: false,
     customizationOpen: false,
     customizationSection: null,
     settingsWriteInFlight: false,
@@ -117,6 +120,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       hidePetMenuItem: typeof value?.hidePetMenuItem === "boolean"
         ? value.hidePetMenuItem
         : defaults.hidePetMenuItem,
+      hideInviteFriendMenuItem: typeof value?.hideInviteFriendMenuItem === "boolean"
+        ? value.hideInviteFriendMenuItem
+        : defaults.hideInviteFriendMenuItem,
     };
   }
 
@@ -150,7 +156,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       const label = compactText(target.getAttribute("aria-label") || target.textContent);
       if (label === "settings" || label === "open settings") beginDiscovery();
       if (target.matches("button, [role='button']") && target.closest(".app-shell-left-panel")) {
-        beginPetMenuDiscovery();
+        beginAccountMenuDiscovery();
       }
     }, true);
     document.addEventListener("keydown", (event) => {
@@ -165,38 +171,37 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     requestAnimationFrame(() => {
       state.scheduled = false;
       const dirty = state.dirty;
-      state.dirty = { discovery: false, sidebar: false, settings: false, petMenu: false };
+      state.dirty = { discovery: false, sidebar: false, settings: false };
       if (dirty.discovery) discoverRoots();
       if (dirty.sidebar) syncPullRequests();
       if (dirty.settings) syncSettingsPage();
-      if (dirty.petMenu) syncPetMenuItem();
     });
   }
 
-  function beginPetMenuDiscovery() {
-    stopPetMenuDiscovery();
-    state.petMenuDiscoveryObserver = new MutationObserver((mutations) => {
-      if (mutations.some(mutationMayContainProfileMenu)) scheduleWork("petMenu");
+  function beginAccountMenuDiscovery() {
+    stopAccountMenuDiscovery();
+    state.accountMenuDiscoveryObserver = new MutationObserver((mutations) => {
+      if (mutations.some(mutationMayContainAccountMenu)) syncAccountMenuItems();
     });
-    state.petMenuDiscoveryObserver.observe(document.body, {
+    state.accountMenuDiscoveryObserver.observe(document.body, {
       attributes: true,
       attributeFilter: ["role"],
       characterData: true,
       childList: true,
       subtree: true,
     });
-    state.petMenuDiscoveryTimer = setTimeout(stopPetMenuDiscovery, 1500);
-    scheduleWork("petMenu");
+    state.accountMenuDiscoveryTimer = setTimeout(stopAccountMenuDiscovery, 1500);
+    syncAccountMenuItems();
   }
 
-  function stopPetMenuDiscovery() {
-    state.petMenuDiscoveryObserver?.disconnect();
-    state.petMenuDiscoveryObserver = null;
-    if (state.petMenuDiscoveryTimer != null) clearTimeout(state.petMenuDiscoveryTimer);
-    state.petMenuDiscoveryTimer = null;
+  function stopAccountMenuDiscovery() {
+    state.accountMenuDiscoveryObserver?.disconnect();
+    state.accountMenuDiscoveryObserver = null;
+    if (state.accountMenuDiscoveryTimer != null) clearTimeout(state.accountMenuDiscoveryTimer);
+    state.accountMenuDiscoveryTimer = null;
   }
 
-  function mutationMayContainProfileMenu(mutation) {
+  function mutationMayContainAccountMenu(mutation) {
     const target = mutation.target instanceof Element
       ? mutation.target
       : mutation.target?.parentElement;
@@ -449,91 +454,121 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       });
   }
 
-  function syncPetMenuItem() {
-    const matching = findPetMenuItems();
-    const owned = Array.from(
-      document.querySelectorAll('[data-codex-workflow-pet-menu-hidden="true"]'),
-    );
-    const shouldHide = state.settings.focusedInterface && state.settings.hidePetMenuItem;
+  function syncAccountMenuItems() {
+    const petReady = syncAccountMenuItem({
+      settingKey: "hidePetMenuItem",
+      labels: ["show pet", "hide pet"],
+      marker: "data-codex-workflow-pet-menu-hidden",
+      datasetPrefix: "codexWorkflowPet",
+      ambiguousStateKey: "loggedAmbiguousPetMenu",
+      hiddenCountStateKey: "hiddenPetMenuItemCount",
+      logLabel: "Pet menu",
+    });
+    const inviteReady = syncAccountMenuItem({
+      settingKey: "hideInviteFriendMenuItem",
+      labels: ["invite a friend"],
+      marker: "data-codex-workflow-invite-friend-menu-hidden",
+      datasetPrefix: "codexWorkflowInviteFriend",
+      ambiguousStateKey: "loggedAmbiguousInviteFriendMenu",
+      hiddenCountStateKey: "hiddenInviteFriendMenuItemCount",
+      logLabel: "Friend invite menu",
+    });
+    if (petReady && inviteReady) stopAccountMenuDiscovery();
+  }
 
-    if (matching.length > 0) stopPetMenuDiscovery();
+  function syncAccountMenuItem({
+    settingKey,
+    labels,
+    marker,
+    datasetPrefix,
+    ambiguousStateKey,
+    hiddenCountStateKey,
+    logLabel,
+  }) {
+    const matching = findAccountMenuItems(labels);
+    const owned = Array.from(document.querySelectorAll(`[${marker}="true"]`));
+    const shouldHide = state.settings.focusedInterface && state.settings[settingKey];
+
     if (shouldHide && matching.length > 1) {
-      if (!state.loggedAmbiguousPetMenu) {
-        state.loggedAmbiguousPetMenu = true;
-        log("error", `Pet menu target ambiguous: ${matching.length} candidates`);
+      if (!state[ambiguousStateKey]) {
+        state[ambiguousStateKey] = true;
+        log("error", `${logLabel} target ambiguous: ${matching.length} candidates`);
       }
-      return;
+      return false;
     }
-    if (matching.length <= 1) state.loggedAmbiguousPetMenu = false;
+    if (matching.length <= 1) state[ambiguousStateKey] = false;
 
+    const originalDisplayKey = `${datasetPrefix}OriginalDisplay`;
+    const originalDisplayPriorityKey = `${datasetPrefix}OriginalDisplayPriority`;
+    const hadAriaHiddenKey = `${datasetPrefix}HadAriaHidden`;
+    const originalAriaHiddenKey = `${datasetPrefix}OriginalAriaHidden`;
+    const hadTabindexKey = `${datasetPrefix}HadTabindex`;
+    const originalTabindexKey = `${datasetPrefix}OriginalTabindex`;
     const candidates = new Set(shouldHide ? [...matching, ...owned] : owned);
     for (const element of candidates) {
       if (!(element instanceof HTMLElement)) continue;
       if (shouldHide) {
-        if (!element.hasAttribute("data-codex-workflow-pet-menu-hidden")) {
-          element.dataset.codexWorkflowPetOriginalDisplay = element.style.display || "";
-          element.dataset.codexWorkflowPetOriginalDisplayPriority = element.style.getPropertyPriority("display");
-          element.dataset.codexWorkflowPetHadAriaHidden = String(element.hasAttribute("aria-hidden"));
-          element.dataset.codexWorkflowPetOriginalAriaHidden = element.getAttribute("aria-hidden") || "";
-          element.dataset.codexWorkflowPetHadTabindex = String(element.hasAttribute("tabindex"));
-          element.dataset.codexWorkflowPetOriginalTabindex = element.getAttribute("tabindex") || "";
-          element.dataset.codexWorkflowPetMenuHidden = "true";
+        if (!element.hasAttribute(marker)) {
+          element.dataset[originalDisplayKey] = element.style.display || "";
+          element.dataset[originalDisplayPriorityKey] = element.style.getPropertyPriority("display");
+          element.dataset[hadAriaHiddenKey] = String(element.hasAttribute("aria-hidden"));
+          element.dataset[originalAriaHiddenKey] = element.getAttribute("aria-hidden") || "";
+          element.dataset[hadTabindexKey] = String(element.hasAttribute("tabindex"));
+          element.dataset[originalTabindexKey] = element.getAttribute("tabindex") || "";
+          element.setAttribute(marker, "true");
         }
         const focused = document.activeElement;
         if (focused instanceof HTMLElement && element.contains(focused)) focused.blur();
         element.style.setProperty("display", "none", "important");
         element.setAttribute("aria-hidden", "true");
         element.setAttribute("tabindex", "-1");
-      } else if (element.hasAttribute("data-codex-workflow-pet-menu-hidden")) {
-        const originalDisplay = element.dataset.codexWorkflowPetOriginalDisplay || "";
+      } else if (element.hasAttribute(marker)) {
+        const originalDisplay = element.dataset[originalDisplayKey] || "";
         if (originalDisplay) {
           element.style.setProperty(
             "display",
             originalDisplay,
-            element.dataset.codexWorkflowPetOriginalDisplayPriority || "",
+            element.dataset[originalDisplayPriorityKey] || "",
           );
         } else {
           element.style.removeProperty("display");
         }
-        if (element.dataset.codexWorkflowPetHadAriaHidden === "true") {
-          element.setAttribute("aria-hidden", element.dataset.codexWorkflowPetOriginalAriaHidden || "");
+        if (element.dataset[hadAriaHiddenKey] === "true") {
+          element.setAttribute("aria-hidden", element.dataset[originalAriaHiddenKey] || "");
         } else {
           element.removeAttribute("aria-hidden");
         }
-        if (element.dataset.codexWorkflowPetHadTabindex === "true") {
-          element.setAttribute("tabindex", element.dataset.codexWorkflowPetOriginalTabindex || "");
+        if (element.dataset[hadTabindexKey] === "true") {
+          element.setAttribute("tabindex", element.dataset[originalTabindexKey] || "");
         } else {
           element.removeAttribute("tabindex");
         }
-        delete element.dataset.codexWorkflowPetOriginalDisplay;
-        delete element.dataset.codexWorkflowPetOriginalDisplayPriority;
-        delete element.dataset.codexWorkflowPetHadAriaHidden;
-        delete element.dataset.codexWorkflowPetOriginalAriaHidden;
-        delete element.dataset.codexWorkflowPetHadTabindex;
-        delete element.dataset.codexWorkflowPetOriginalTabindex;
-        delete element.dataset.codexWorkflowPetMenuHidden;
+        delete element.dataset[originalDisplayKey];
+        delete element.dataset[originalDisplayPriorityKey];
+        delete element.dataset[hadAriaHiddenKey];
+        delete element.dataset[originalAriaHiddenKey];
+        delete element.dataset[hadTabindexKey];
+        delete element.dataset[originalTabindexKey];
+        element.removeAttribute(marker);
       }
     }
 
-    const hiddenCount = document.querySelectorAll(
-      '[data-codex-workflow-pet-menu-hidden="true"]',
-    ).length;
-    if (hiddenCount !== state.hiddenPetMenuItemCount) {
-      state.hiddenPetMenuItemCount = hiddenCount;
-      log("info", `Pet menu hidden rows: ${hiddenCount}`);
+    const hiddenCount = document.querySelectorAll(`[${marker}="true"]`).length;
+    if (hiddenCount !== state[hiddenCountStateKey]) {
+      state[hiddenCountStateKey] = hiddenCount;
+      log("info", `${logLabel} hidden rows: ${hiddenCount}`);
     }
+    return !shouldHide || matching.length === 1;
   }
 
-  function findPetMenuItems() {
+  function findAccountMenuItems(expectedLabels) {
     const matches = [];
     for (const menu of document.querySelectorAll('[role="menu"]')) {
       if (!(menu instanceof HTMLElement) || menu.closest("[cmdk-root]")) continue;
       const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
       if (!items.some((item) => menuItemHasLabel(item, "settings"))) continue;
       for (const item of items) {
-        if (menuItemHasLabel(item, "show pet") || menuItemHasLabel(item, "hide pet")) {
-          matches.push(item);
-        }
+        if (expectedLabels.some((label) => menuItemHasLabel(item, label))) matches.push(item);
       }
     }
     return matches;
@@ -823,6 +858,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         description: "Remove the pet control from the account menu.",
         requiresFocusedInterface: true,
       }),
+      renderSettingRow({
+        key: "hideInviteFriendMenuItem",
+        label: "Hide friend invite",
+        description: "Remove Invite a friend from the account menu.",
+        requiresFocusedInterface: true,
+      }),
     );
     section.append(header, card);
     return section;
@@ -959,7 +1000,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function syncFocusedInterfaceEffects() {
     syncPullRequests();
-    syncPetMenuItem();
+    syncAccountMenuItems();
   }
 
   function muteNativeActiveNav(nav) {

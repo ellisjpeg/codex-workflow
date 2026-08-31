@@ -2,6 +2,11 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.4.4 - 2026-08-31
+
+- Added a Focused Interface preference that hides Invite a friend before the account menu paints.
+- Prevented hidden account-menu controls from appearing for one frame as the menu opens.
+
 ## 0.4.3 - 2026-08-31
 
 - Generalized the runtime location for the current macOS user.

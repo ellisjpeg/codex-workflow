@@ -67,6 +67,7 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
       focusedInterface: false,
       hidePullRequests: true,
       hidePetMenuItem: true,
+      hideInviteFriendMenuItem: true,
     },
   );
 });
@@ -79,12 +80,14 @@ test("main settings normalizer accepts only canonical booleans", () => {
       efficiencyMode: false,
       hidePullRequests: false,
       hidePetMenuItem: 1,
+      hideInviteFriendMenuItem: "yes",
     }),
     {
       schemaVersion: 2,
       focusedInterface: false,
       hidePullRequests: false,
       hidePetMenuItem: true,
+      hideInviteFriendMenuItem: true,
     },
   );
 });

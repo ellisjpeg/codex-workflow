@@ -40,6 +40,8 @@ async function createHarness({ initialSettings, setSettings } = {}) {
   const observers = [];
   const intervalCalls = [];
   const timeoutCallbacks = new Map();
+  const animationFrameCallbacks = [];
+  let deferAnimationFrames = false;
   let nextTimer = 1;
   let deliveredMutationCallbacks = 0;
   let persistedSettings = initialSettings
@@ -49,6 +51,7 @@ async function createHarness({ initialSettings, setSettings } = {}) {
       focusedInterface: true,
       hidePullRequests: true,
       hidePetMenuItem: true,
+      hideInviteFriendMenuItem: true,
     };
   const ipcRenderer = {
     invoke(channel, patch) {
@@ -104,8 +107,9 @@ async function createHarness({ initialSettings, setSettings } = {}) {
   };
   context.clearTimeout = (id) => timeoutCallbacks.delete(id);
   context.requestAnimationFrame = (callback) => {
-    callback();
-    return 1;
+    if (deferAnimationFrames) animationFrameCallbacks.push(callback);
+    else callback();
+    return nextTimer++;
   };
   Object.defineProperty(window, "innerWidth", { value: 1200, configurable: true });
 
@@ -159,6 +163,13 @@ async function createHarness({ initialSettings, setSettings } = {}) {
     timeoutCallbacks,
     emitMutation,
     deliveredMutationCallbacks: () => deliveredMutationCallbacks,
+    deferAnimationFrames: () => {
+      deferAnimationFrames = true;
+    },
+    flushAnimationFrame: () => {
+      const callbacks = animationFrameCallbacks.splice(0);
+      for (const callback of callbacks) callback();
+    },
   };
 }
 
@@ -215,11 +226,12 @@ test("Focused Interface exposes a native customize disclosure with unique switch
     assert.equal(options.hidden, false);
     assert.equal(document.querySelector("#codex-workflow-hidePullRequests-label").textContent, "Hide Pull requests");
     assert.equal(document.querySelector("#codex-workflow-hidePetMenuItem-label").textContent, "Hide pet controls");
+    assert.equal(document.querySelector("#codex-workflow-hideInviteFriendMenuItem-label").textContent, "Hide friend invite");
 
     const switches = Array.from(document.querySelectorAll('[role="switch"]'));
-    assert.equal(switches.length, 3);
-    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-labelledby"))).size, 3);
-    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-describedby"))).size, 3);
+    assert.equal(switches.length, 4);
+    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-labelledby"))).size, 4);
+    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-describedby"))).size, 4);
   } finally {
     harness.dom.window.close();
   }
@@ -238,11 +250,14 @@ test("legacy Efficiency mode state migrates to Focused Interface", async () => {
     const master = document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]');
     const pullRequests = document.querySelector('[aria-labelledby="codex-workflow-hidePullRequests-label"]');
     const petControls = document.querySelector('[aria-labelledby="codex-workflow-hidePetMenuItem-label"]');
+    const friendInvite = document.querySelector('[aria-labelledby="codex-workflow-hideInviteFriendMenuItem-label"]');
     assert.equal(master.getAttribute("aria-checked"), "false");
     assert.equal(pullRequests.getAttribute("aria-checked"), "true");
     assert.equal(petControls.getAttribute("aria-checked"), "true");
+    assert.equal(friendInvite.getAttribute("aria-checked"), "true");
     assert.equal(pullRequests.disabled, true);
     assert.equal(petControls.disabled, true);
+    assert.equal(friendInvite.disabled, true);
   } finally {
     harness.dom.window.close();
   }
@@ -293,7 +308,51 @@ test("pet controls are hidden only in the account menu and restore exactly", asy
   }
 });
 
-test("pet menu discovery handles labels populated after portal mount", async () => {
+test("friend invite is hidden before the account menu's first rendered frame and restores exactly", async () => {
+  const harness = await createHarness();
+  try {
+    const { document, emitMutation, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('button[aria-controls="codex-workflow-focused-options"]').click();
+    document.querySelector("#account-menu-trigger").click();
+
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <div id="usage-menu-item" role="menuitem">Usage</div>
+      <div id="invite-friend-menu-item" role="menuitem" style="display: flex !important" aria-hidden="false" tabindex="4"><svg aria-hidden="true"></svg><span>Invite a friend</span></div>
+      <div role="menuitem"><svg aria-hidden="true"></svg><span>Settings</span><span>⌘,</span></div>
+      <button role="menuitem">Log out</button>
+    `;
+    document.body.appendChild(menu);
+    emitMutation(document.body, { addedNodes: [menu] });
+
+    const inviteItem = document.querySelector("#invite-friend-menu-item");
+    const inviteToggle = document.querySelector('[aria-labelledby="codex-workflow-hideInviteFriendMenuItem-label"]');
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.style.getPropertyPriority("display"), "important");
+    assert.equal(inviteItem.getAttribute("aria-hidden"), "true");
+    assert.equal(inviteItem.getAttribute("tabindex"), "-1");
+    assert.equal(document.querySelector("#usage-menu-item").style.display, "");
+
+    inviteToggle.click();
+    await flush();
+    assert.equal(inviteItem.style.getPropertyValue("display"), "flex");
+    assert.equal(inviteItem.style.getPropertyPriority("display"), "important");
+    assert.equal(inviteItem.getAttribute("aria-hidden"), "false");
+    assert.equal(inviteItem.getAttribute("tabindex"), "4");
+    assert.equal(inviteItem.hasAttribute("data-codex-workflow-invite-friend-menu-hidden"), false);
+
+    inviteToggle.click();
+    await flush();
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.hasAttribute("data-codex-workflow-invite-friend-menu-hidden"), true);
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("account menu discovery handles labels populated after portal mount", async () => {
   const harness = await createHarness();
   try {
     const { document, emitMutation } = harness;
@@ -306,23 +365,71 @@ test("pet menu discovery handles labels populated after portal mount", async () 
     petItem.setAttribute("role", "menuitem");
     const petLabel = document.createTextNode("");
     petItem.appendChild(petLabel);
+    const inviteItem = document.createElement("button");
+    inviteItem.id = "late-invite-menu-item";
+    inviteItem.setAttribute("role", "menuitem");
+    const inviteLabel = document.createTextNode("");
+    inviteItem.appendChild(inviteLabel);
     const settingsItem = document.createElement("button");
     settingsItem.setAttribute("role", "menuitem");
     const settingsLabel = document.createTextNode("");
     settingsItem.appendChild(settingsLabel);
-    menu.append(petItem, settingsItem);
+    menu.append(petItem, inviteItem, settingsItem);
     document.body.appendChild(menu);
     emitMutation(document.body, { addedNodes: [menu] });
     await flush();
     assert.equal(petItem.style.getPropertyValue("display"), "");
+    assert.equal(inviteItem.style.getPropertyValue("display"), "");
 
     petLabel.nodeValue = "Show pet";
+    inviteLabel.nodeValue = "Invite a friend";
     settingsLabel.nodeValue = "Settings";
     emitMutation(petLabel);
+    emitMutation(inviteLabel);
     emitMutation(settingsLabel);
     await flush();
     assert.equal(petItem.style.getPropertyValue("display"), "none");
     assert.equal(petItem.getAttribute("aria-hidden"), "true");
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.getAttribute("aria-hidden"), "true");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("account menu items are hidden before the first paint after a deferred portal mount", async () => {
+  const harness = await createHarness();
+  try {
+    const {
+      document,
+      window,
+      emitMutation,
+      deferAnimationFrames,
+      flushAnimationFrame,
+    } = harness;
+    deferAnimationFrames();
+    document.querySelector("#account-menu-trigger").click();
+
+    let petItem;
+    let inviteItem;
+    window.requestAnimationFrame(() => {
+      const menu = document.createElement("div");
+      menu.setAttribute("role", "menu");
+      menu.innerHTML = `
+        <button id="deferred-pet-menu-item" role="menuitem">Show pet</button>
+        <button id="deferred-invite-menu-item" role="menuitem">Invite a friend</button>
+        <button role="menuitem">Settings</button>
+      `;
+      document.body.appendChild(menu);
+      petItem = menu.querySelector("#deferred-pet-menu-item");
+      inviteItem = menu.querySelector("#deferred-invite-menu-item");
+      emitMutation(document.body, { addedNodes: [menu] });
+    });
+
+    flushAnimationFrame();
+    await flush();
+    assert.equal(petItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
   } finally {
     harness.dom.window.close();
   }
@@ -340,6 +447,7 @@ test("Focused Interface controls all configured interface effects", async () => 
     menu.setAttribute("role", "menu");
     menu.innerHTML = `
       <button id="pet-menu-item" role="menuitem">Show pet</button>
+      <button id="invite-friend-menu-item" role="menuitem">Invite a friend</button>
       <button role="menuitem">Settings</button>
     `;
     document.body.appendChild(menu);
@@ -350,11 +458,14 @@ test("Focused Interface controls all configured interface effects", async () => 
     const childToggles = [
       document.querySelector('[aria-labelledby="codex-workflow-hidePullRequests-label"]'),
       document.querySelector('[aria-labelledby="codex-workflow-hidePetMenuItem-label"]'),
+      document.querySelector('[aria-labelledby="codex-workflow-hideInviteFriendMenuItem-label"]'),
     ];
     const pullRequests = document.querySelector("#pull-requests");
     const petMenuItem = document.querySelector("#pet-menu-item");
+    const inviteItem = document.querySelector("#invite-friend-menu-item");
     assert.equal(pullRequests.style.getPropertyValue("display"), "none");
     assert.equal(petMenuItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
 
     master.click();
     await flush();
@@ -362,6 +473,7 @@ test("Focused Interface controls all configured interface effects", async () => 
     assert.ok(childToggles.every((toggle) => toggle.disabled));
     assert.equal(pullRequests.style.getPropertyValue("display"), "block");
     assert.equal(petMenuItem.style.getPropertyValue("display"), "");
+    assert.equal(inviteItem.style.getPropertyValue("display"), "");
 
     master.click();
     await flush();
@@ -369,6 +481,7 @@ test("Focused Interface controls all configured interface effects", async () => 
     assert.ok(childToggles.every((toggle) => !toggle.disabled));
     assert.equal(pullRequests.style.getPropertyValue("display"), "none");
     assert.equal(petMenuItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
   } finally {
     harness.dom.window.close();
   }
@@ -392,6 +505,29 @@ test("ambiguous pet menu targets are left untouched", async () => {
     const petItems = menu.querySelectorAll('[role="menuitem"]');
     assert.equal(petItems[0].style.display, "");
     assert.equal(petItems[1].style.display, "");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("ambiguous friend invite targets are left untouched", async () => {
+  const harness = await createHarness();
+  try {
+    const { document, emitMutation } = harness;
+    document.querySelector("#account-menu-trigger").click();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <button role="menuitem">Invite a friend</button>
+      <button role="menuitem" aria-label="Invite a friend">Invite</button>
+      <button role="menuitem">Settings</button>
+    `;
+    document.body.appendChild(menu);
+    emitMutation(document.body, { addedNodes: [menu] });
+    await flush();
+    const inviteItems = menu.querySelectorAll('[role="menuitem"]');
+    assert.equal(inviteItems[0].style.display, "");
+    assert.equal(inviteItems[1].style.display, "");
   } finally {
     harness.dom.window.close();
   }
@@ -426,6 +562,40 @@ test("failed pet preference persistence restores its switch and menu effect", as
     assert.equal(petToggle.disabled, false);
     assert.equal(petMenuItem.style.getPropertyValue("display"), "none");
     assert.equal(petMenuItem.getAttribute("aria-hidden"), "true");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("failed friend invite preference persistence restores its switch and menu effect", async () => {
+  const harness = await createHarness({
+    setSettings: () => Promise.reject(new Error("fixture write failed")),
+  });
+  try {
+    const { document, emitMutation, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('button[aria-controls="codex-workflow-focused-options"]').click();
+    document.querySelector("#account-menu-trigger").click();
+
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <button id="invite-friend-menu-item" role="menuitem">Invite a friend</button>
+      <button role="menuitem">Settings</button>
+    `;
+    document.body.appendChild(menu);
+    emitMutation(document.body, { addedNodes: [menu] });
+    await flush();
+
+    const inviteItem = document.querySelector("#invite-friend-menu-item");
+    const inviteToggle = document.querySelector('[aria-labelledby="codex-workflow-hideInviteFriendMenuItem-label"]');
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
+    inviteToggle.click();
+    await flush();
+    assert.equal(inviteToggle.getAttribute("aria-checked"), "true");
+    assert.equal(inviteToggle.disabled, false);
+    assert.equal(inviteItem.style.getPropertyValue("display"), "none");
+    assert.equal(inviteItem.getAttribute("aria-hidden"), "true");
   } finally {
     harness.dom.window.close();
   }

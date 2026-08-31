@@ -18,6 +18,7 @@ const defaults = {
   focusedInterface: true,
   hidePullRequests: true,
   hidePetMenuItem: true,
+  hideInviteFriendMenuItem: true,
 };
 
 fs.mkdirSync(logDir, { recursive: true });
@@ -49,6 +50,9 @@ function normaliseSettings(value) {
     hidePetMenuItem: typeof value?.hidePetMenuItem === "boolean"
       ? value.hidePetMenuItem
       : defaults.hidePetMenuItem,
+    hideInviteFriendMenuItem: typeof value?.hideInviteFriendMenuItem === "boolean"
+      ? value.hideInviteFriendMenuItem
+      : defaults.hideInviteFriendMenuItem,
   };
 }
 
