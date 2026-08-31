@@ -23,6 +23,7 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
       </div>
     </header>
     <aside class="app-shell-left-panel">
+      <div id="sidebar-toolbar" class="h-toolbar w-full shrink-0 draggable"></div>
       <div id="pull-requests" class="sidebar-item" style="display: block !important" aria-hidden="false" tabindex="3">
         <a href="/pull-requests"><span class="text-fade-truncate">Pull requests</span></a>
       </div>
@@ -191,7 +192,7 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
   };
 }
 
-test("Workflow Update mirrors the native responsive toolbar pill", async () => {
+test("Workflow Update uses the native sidebar hover-reveal pill", async () => {
   const harness = await createHarness({
     updateStatus: {
       available: true,
@@ -201,28 +202,35 @@ test("Workflow Update mirrors the native responsive toolbar pill", async () => {
   });
   try {
     const { document, window, emitMutation, invokedChannels } = harness;
-    const toolbar = document.querySelector("#top-toolbar");
-    const actions = document.querySelector("#toolbar-actions");
+    const toolbar = document.querySelector("#sidebar-toolbar");
     const pill = document.querySelector('[data-codex-workflow-update="true"]');
+    const slot = document.querySelector('[data-codex-workflow-update-slot="true"]');
     assert.ok(pill);
-    assert.equal(pill.parentElement, actions);
-    assert.equal(pill.nextElementSibling.getAttribute("aria-label"), "Share");
+    assert.equal(slot.parentElement, toolbar);
+    assert.equal(pill.parentElement, slot);
+    assert.ok(slot.className.includes("pointer-events-auto"));
+    assert.ok(slot.className.includes("justify-end"));
+    assert.ok(slot.className.includes("px-panel"));
     assert.equal(pill.getAttribute("aria-label"), "Workflow Update");
     assert.ok(pill.className.includes("bg-chart-blue"));
-    assert.ok(pill.className.includes("@[180px]:max-w-36"));
-    assert.ok(pill.querySelector("svg").className.baseVal.includes("@[180px]:opacity-0"));
+    assert.ok(pill.className.includes("pointer-events-auto"));
+    assert.ok(pill.className.includes("grid-cols-[0fr]"));
+    assert.ok(pill.className.includes("hover:grid-cols-[1fr]"));
+    assert.ok(pill.querySelector('[data-codex-workflow-update-icon="true"]').className.includes("group-hover:opacity-0"));
+    assert.ok(pill.querySelector('[data-codex-workflow-update-sliding-label="true"]').className.includes("group-hover:translate-x-0"));
     assert.equal(
       pill.querySelector('[data-codex-workflow-update-label="true"]').textContent,
       "Workflow Update",
     );
 
+    const actions = document.querySelector("#toolbar-actions");
     const share = actions.querySelector('[aria-label="Share"]');
     const summary = actions.querySelector('[aria-label="Toggle summary"]');
     share.remove();
     summary.remove();
-    emitMutation(toolbar, { removedNodes: [share, summary] });
+    emitMutation(document.querySelector("#top-toolbar"), { removedNodes: [share, summary] });
     await flush();
-    assert.equal(pill.nextElementSibling.getAttribute("aria-label"), "Toggle bottom panel");
+    assert.equal(pill.parentElement, slot);
 
     pill.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await flush();
@@ -756,13 +764,12 @@ test("scoped observers ignore 120 response-stream mutations", async () => {
     const { document, observers, intervalCalls, emitMutation, deliveredMutationCallbacks } = harness;
     const sidebar = document.querySelector(".app-shell-left-panel");
     const settingsShell = document.querySelector("#settings-shell");
-    const toolbar = document.querySelector("#top-toolbar");
     const activeSubtreeTargets = observers
       .filter((observer) => observer.active && observer.options?.subtree)
       .map((observer) => observer.target);
 
     assert.equal(intervalCalls.length, 0);
-    assert.deepEqual(new Set(activeSubtreeTargets), new Set([sidebar, settingsShell, toolbar]));
+    assert.deepEqual(new Set(activeSubtreeTargets), new Set([sidebar, settingsShell]));
     assert.ok(!activeSubtreeTargets.includes(document.documentElement));
 
     const beforeCallbacks = deliveredMutationCallbacks();

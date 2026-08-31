@@ -19,6 +19,8 @@ import {
   writeJsonAtomic,
 } from "../scripts/lib.mjs";
 
+const libSource = readFileSync(new URL("../scripts/lib.mjs", import.meta.url), "utf8");
+
 async function createAsarPair(root, name, marker) {
   const source = join(root, `${name}-source`);
   const targetAsar = join(root, `${name}.asar`);
@@ -98,6 +100,12 @@ test("runtime data uses the current macOS user profile", () => {
     runtimeRoot,
     join(homedir(), "Library", "Application Support", "Codex Workflow"),
   );
+});
+
+test("background updater watches local changes and checks every five minutes", () => {
+  assert.match(libSource, /<key>WatchPaths<\/key>/u);
+  assert.match(libSource, /<key>StartInterval<\/key><integer>300<\/integer>/u);
+  assert.doesNotMatch(libSource, /<integer>21600<\/integer>/u);
 });
 
 test("restoreFilePair replaces both fixture targets", () => {

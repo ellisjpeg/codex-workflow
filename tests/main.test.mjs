@@ -98,7 +98,9 @@ test("main settings normalizer accepts only canonical booleans", () => {
 test("Workflow Update launches the detached updater and quits without a dialog", async () => {
   const handlers = new Map();
   const spawned = [];
+  const timeoutCallbacks = [];
   let quitCount = 0;
+  let exitCount = 0;
   const runtimeRoot = "/tmp/codex-workflow-main-update-test";
   const sourceRoot = "/tmp/codex-workflow-source-test";
   const files = new Map([
@@ -112,6 +114,11 @@ test("Workflow Update launches the detached updater and quits without a dialog",
   ]);
   const context = createContext({
     setImmediate,
+    setTimeout(callback, delay) {
+      const timer = { callback, delay, unrefCalled: false, unref() { this.unrefCalled = true; } };
+      timeoutCallbacks.push(timer);
+      return timer;
+    },
     process: {
       env: { CODEX_WORKFLOW_ROOT: runtimeRoot },
       execPath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
@@ -124,6 +131,7 @@ test("Workflow Update launches the detached updater and quits without a dialog",
             getVersion: () => "test",
             on() {},
             quit() { quitCount += 1; },
+            exit() { exitCount += 1; },
             whenReady: () => ({ then() {} }),
           },
           ipcMain: {
@@ -140,6 +148,7 @@ test("Workflow Update launches the detached updater and quits without a dialog",
             const call = { executable, args, options, unref: false };
             spawned.push(call);
             return {
+              pid: 789,
               once(event, callback) {
                 if (event === "spawn") queueMicrotask(callback);
               },
@@ -184,6 +193,11 @@ test("Workflow Update launches the detached updater and quits without a dialog",
   );
   assert.equal(spawned[0].unref, true);
   assert.equal(quitCount, 1);
+  assert.equal(timeoutCallbacks.length, 1);
+  assert.equal(timeoutCallbacks[0].delay, 2000);
+  assert.equal(timeoutCallbacks[0].unrefCalled, true);
+  timeoutCallbacks[0].callback();
+  assert.equal(exitCount, 1);
   await assert.rejects(
     handlers.get("codex-workflow:update:install")({ senderFrame: { url: "https://example.com" } }),
     /untrusted renderer/u,

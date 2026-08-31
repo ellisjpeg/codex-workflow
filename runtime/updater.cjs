@@ -12,6 +12,19 @@ const configPath = path.join(runtimeRoot, "update-config.json");
 const statePath = path.join(runtimeRoot, "update-state.json");
 const patchStatePath = path.join(runtimeRoot, "state.json");
 const updatesRoot = path.join(runtimeRoot, "updates");
+const logPath = path.join(runtimeRoot, "logs", "updater.log");
+const remoteIntervalMs = 5 * 60 * 1000;
+
+function appendLog(level, message) {
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(
+      logPath,
+      `[${new Date().toISOString()}] [${level}] ${String(message).replaceAll("\0", "").slice(0, 4096)}\n`,
+      { mode: 0o600 },
+    );
+  } catch {}
+}
 
 function readJson(target) {
   try {
@@ -47,6 +60,11 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function remoteCheckDue(state, now = Date.now()) {
+  const checkedAt = Date.parse(state?.remoteCheckedAt || "");
+  return !Number.isFinite(checkedAt) || now - checkedAt >= remoteIntervalMs;
+}
+
 function sourcePackage(sourceRoot) {
   const packagePath = path.join(sourceRoot, "package.json");
   const installPath = path.join(sourceRoot, "scripts", "install.mjs");
@@ -66,6 +84,29 @@ function appIsRunning(executable) {
   if (result.status !== 0) throw new Error("Could not inspect the ChatGPT process list");
   return result.stdout.split("\n")
     .some((line) => line === executable || line.startsWith(`${executable} `));
+}
+
+async function waitForProcessExit(pid, timeoutMs = 30000) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function waitForAppExit(executable, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!appIsRunning(executable)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return !appIsRunning(executable);
 }
 
 function chooseCandidate(config) {
@@ -113,16 +154,30 @@ async function download(url, target) {
   fs.writeFileSync(target, Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
 }
 
-async function checkRemote(config) {
+async function checkRemote(config, previousState) {
   if (!config.releaseApi) return null;
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "codex-workflow-updater",
+  };
+  if (typeof previousState?.releaseEtag === "string" && previousState.releaseEtag) {
+    headers["If-None-Match"] = previousState.releaseEtag;
+  }
   const response = await fetch(config.releaseApi, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "codex-workflow-updater" },
+    headers,
     signal: AbortSignal.timeout(8000),
   });
+  if (response.status === 304) {
+    return { candidate: null, etag: previousState?.releaseEtag || null };
+  }
+  if (response.status === 404) return { candidate: null, etag: null };
   if (!response.ok) throw new Error(`Workflow release check failed (${response.status})`);
+  const etag = response.headers.get("etag") || null;
   const release = await response.json();
   const version = String(release.tag_name || "").replace(/^v/u, "");
-  if (!versionParts(version) || compareVersions(version, installedVersion()) <= 0) return null;
+  if (!versionParts(version) || compareVersions(version, installedVersion()) <= 0) {
+    return { candidate: null, etag };
+  }
   const assetName = `codex-workflow-${version}.tar.gz`;
   const asset = Array.isArray(release.assets)
     ? release.assets.find((entry) => entry?.name === assetName)
@@ -153,10 +208,11 @@ async function checkRemote(config) {
     .map((entry) => path.join(releaseRoot, entry.name));
   const source = [releaseRoot, ...children].map(sourcePackage).find(Boolean);
   if (!source || source.version !== version) throw new Error("Workflow release archive has invalid contents");
-  return source;
+  return { candidate: source, etag };
 }
 
 function applyCandidate(config, candidate, relaunch) {
+  appendLog("info", `Applying Workflow ${candidate.version} from ${candidate.root}`);
   const result = spawnSync(config.nodeExecutable, [candidate.installPath, "--reapply"], {
     encoding: "utf8",
     env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
@@ -165,6 +221,7 @@ function applyCandidate(config, candidate, relaunch) {
     throw new Error((result.stderr || result.stdout || "Workflow update failed").trim());
   }
   writeJsonAtomic(statePath, {
+    ...(readJson(statePath) || {}),
     schemaVersion: 1,
     checkedAt: new Date().toISOString(),
     appliedVersion: candidate.version,
@@ -176,6 +233,7 @@ function applyCandidate(config, candidate, relaunch) {
     const opened = spawnSync("/usr/bin/open", [config.appRoot], { encoding: "utf8" });
     if (opened.status !== 0) throw new Error("Workflow updated, but ChatGPT could not be relaunched");
   }
+  appendLog("info", `Workflow ${candidate.version} applied successfully`);
 }
 
 async function run() {
@@ -189,55 +247,61 @@ async function run() {
   const relaunch = process.argv.includes("--relaunch");
   const parentIndex = process.argv.indexOf("--parent");
   const parentPid = parentIndex >= 0 ? Number(process.argv[parentIndex + 1]) : null;
+  appendLog("info", `Updater started (${apply ? "apply" : background ? "background" : "check"})`);
 
   const localSelection = chooseCandidate(config);
-  let remote = null;
+  const previousState = readJson(statePath) || {};
+  const shouldCheckRemote = (!apply || !localSelection.candidate) &&
+    (apply || remoteCheckDue(previousState));
+  let remoteResult = null;
   let checkError = null;
-  if (!apply || !localSelection.candidate) {
+  if (shouldCheckRemote) {
     try {
-      remote = await checkRemote(config);
+      remoteResult = await checkRemote(config, previousState);
     } catch (error) {
       checkError = String(error?.message || error).slice(0, 1000);
-      const previous = readJson(statePath) || {};
-      writeJsonAtomic(statePath, {
-        ...previous,
-        schemaVersion: 1,
-        checkedAt: new Date().toISOString(),
-        error: checkError,
-      });
     }
   }
   const selected = chooseCandidate(config);
-  const candidate = remote && (!selected.candidate || compareVersions(remote.version, selected.candidate.version) > 0)
-    ? remote
+  const remoteCandidate = remoteResult?.candidate || null;
+  const candidate = remoteCandidate && (!selected.candidate || compareVersions(remoteCandidate.version, selected.candidate.version) > 0)
+    ? remoteCandidate
     : selected.candidate;
+  const checkedAt = new Date().toISOString();
   writeJsonAtomic(statePath, {
+    ...previousState,
     schemaVersion: 1,
-    checkedAt: new Date().toISOString(),
+    checkedAt,
+    remoteCheckedAt: shouldCheckRemote && !checkError
+      ? checkedAt
+      : previousState.remoteCheckedAt || null,
+    releaseEtag: remoteResult
+      ? remoteResult.etag
+      : previousState.releaseEtag || null,
     installedVersion: selected.installed,
     availableVersion: candidate?.version || null,
-    stagedSourceRoot: remote?.root || readJson(statePath)?.stagedSourceRoot || null,
+    stagedSourceRoot: remoteCandidate?.root || previousState.stagedSourceRoot || null,
     error: checkError,
   });
-  if (!candidate || (!apply && !background)) return;
+  if (!candidate || (!apply && !background)) {
+    appendLog("info", candidate ? `Workflow ${candidate.version} is available` : "No Workflow update is available");
+    return;
+  }
 
   if (apply && parentPid) {
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline) {
-      try {
-        process.kill(parentPid, 0);
-      } catch {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    if (!await waitForProcessExit(parentPid)) {
+      throw new Error("ChatGPT did not exit in time for the Workflow update");
     }
   }
-  if (appIsRunning(config.appExecutable)) return;
+  if (!await waitForAppExit(config.appExecutable)) {
+    throw new Error("ChatGPT is still running; Workflow update was not applied");
+  }
   applyCandidate(config, candidate, relaunch);
 }
 
 if (require.main === module) {
   run().catch((error) => {
+    appendLog("error", error?.stack || error);
     const previous = readJson(statePath) || {};
     writeJsonAtomic(statePath, {
       ...previous,
@@ -249,4 +313,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { compareVersions, chooseCandidate, sourcePackage, validateTarEntries, validateTarTypes };
+module.exports = { checkRemote, compareVersions, remoteCheckDue, chooseCandidate, sourcePackage, validateTarEntries, validateTarTypes, waitForProcessExit };

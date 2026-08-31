@@ -2,6 +2,16 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.3 - 2026-08-31
+
+- Made the Workflow Update control explicitly interactive inside the draggable titlebar.
+- Added a forced-exit fallback, complete updater handoff logging, and explicit app-exit failures instead of silent cancellation.
+
+## 0.5.2 - 2026-08-31
+
+- Moved Workflow Update into the sidebar titlebar with the native hover-reveal motion.
+- Added instant local source detection and five-minute conditional release checks.
+
 ## 0.5.1 - 2026-08-31
 
 - Started account-menu discovery on native pointer and keyboard open events so pet and friend-invite rows are hidden before the first portal paint.

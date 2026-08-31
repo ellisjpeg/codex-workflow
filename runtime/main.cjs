@@ -18,6 +18,8 @@ const updateConfigPath = path.join(runtimeRoot, "update-config.json");
 const updateStatePath = path.join(runtimeRoot, "update-state.json");
 const patchStatePath = path.join(runtimeRoot, "state.json");
 const updaterPath = path.join(runtimeRoot, "runtime", "updater.cjs");
+const updateWatchers = [];
+let updateLaunchInFlight = false;
 const defaults = {
   schemaVersion: 2,
   focusedInterface: true,
@@ -144,11 +146,26 @@ function broadcastUpdateStatus() {
 
 function watchUpdateState() {
   try {
-    fs.watch(path.dirname(updateStatePath), { persistent: false }, (_event, filename) => {
-      if (filename === path.basename(updateStatePath)) broadcastUpdateStatus();
+    const watcher = fs.watch(path.dirname(updateStatePath), { persistent: false }, (_event, filename) => {
+      if (String(filename || "") === path.basename(updateStatePath)) broadcastUpdateStatus();
     });
+    updateWatchers.push(watcher);
   } catch (error) {
     appendLog("error", `update state watch failed: ${error?.message || error}`);
+  }
+}
+
+function watchLocalSource() {
+  const sourceRoot = readJson(updateConfigPath)?.sourceRoot;
+  if (!sourceRoot) return;
+  const packagePath = path.join(sourceRoot, "package.json");
+  try {
+    const watcher = fs.watch(path.dirname(packagePath), { persistent: false }, (_event, filename) => {
+      if (String(filename || "") === path.basename(packagePath)) broadcastUpdateStatus();
+    });
+    updateWatchers.push(watcher);
+  } catch (error) {
+    appendLog("error", `local update watch failed: ${error?.message || error}`);
   }
 }
 
@@ -202,27 +219,44 @@ if (!globalThis.__codexWorkflowMainInstalled) {
     assertTrustedSender(event);
     const status = readUpdateStatus();
     if (!status.available) return status;
+    if (updateLaunchInFlight) return { ...status, applying: true };
     const config = readJson(updateConfigPath);
     if (!config?.nodeExecutable || !fs.existsSync(config.nodeExecutable)) {
       throw new Error("Workflow updater Node.js runtime is unavailable");
     }
-    const child = spawn(config.nodeExecutable, [
-      updaterPath,
-      "--apply",
-      "--relaunch",
-      "--parent",
-      String(process.pid),
-    ], {
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
+    updateLaunchInFlight = true;
+    appendLog("info", `Workflow update requested: ${status.installedVersion || "unknown"} -> ${status.availableVersion || "unknown"}`);
+    try {
+      const child = spawn(config.nodeExecutable, [
+        updaterPath,
+        "--apply",
+        "--relaunch",
+        "--parent",
+        String(process.pid),
+      ], {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
+      });
+      await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("spawn", resolve);
+      });
+      child.unref();
+      appendLog("info", `Workflow updater launched as process ${child.pid || "unknown"}`);
+    } catch (error) {
+      updateLaunchInFlight = false;
+      appendLog("error", `Workflow updater launch failed: ${error?.stack || error}`);
+      throw error;
+    }
+    setImmediate(() => {
+      const fallback = setTimeout(() => {
+        appendLog("error", "Graceful quit timed out; forcing exit for Workflow update");
+        app.exit(0);
+      }, 2000);
+      fallback.unref?.();
+      app.quit();
     });
-    await new Promise((resolve, reject) => {
-      child.once("error", reject);
-      child.once("spawn", resolve);
-    });
-    child.unref();
-    setImmediate(() => app.quit());
     return { ...status, applying: true };
   });
   ipcMain.on("codex-workflow:log", (event, level, message) => {
@@ -233,6 +267,7 @@ if (!globalThis.__codexWorkflowMainInstalled) {
   app.whenReady().then(() => {
     registerPreload(session.defaultSession, "defaultSession");
     watchUpdateState();
+    watchLocalSource();
   });
   app.on("session-created", (createdSession) => registerPreload(createdSession, "session-created"));
   app.on("web-contents-created", (_event, contents) => {
