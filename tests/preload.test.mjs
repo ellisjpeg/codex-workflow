@@ -89,14 +89,14 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
         return Promise.resolve({ ...(updateStatus || {}), applying: true });
       }
       if (channel === "codex-workflow:settings:activate") {
-        if (patch.target === "account-menu") {
-          document.querySelector("#account-menu-trigger")?.click();
-          return Promise.resolve(true);
-        }
-        const nativeSettings = Array.from(document.querySelectorAll('[role="menuitem"]')).find((item) =>
-          !item.hasAttribute("data-codex-workflow-help-updates") && item.textContent.includes("Settings"));
-        nativeSettings?.click();
-        return Promise.resolve(Boolean(nativeSettings));
+        if (patch.target !== "keyboard-shortcut") return Promise.reject(new Error("invalid activation"));
+        document.dispatchEvent(new window.KeyboardEvent("keydown", {
+          key: ",",
+          code: "Comma",
+          metaKey: true,
+          bubbles: true,
+        }));
+        return Promise.resolve(true);
       }
       if (setSettings) return setSettings(patch);
       persistedSettings = { ...persistedSettings, ...patch, schemaVersion: 2 };
@@ -806,6 +806,10 @@ test("Help and Settings swap preserves native behavior, alignment, dismissal, an
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") unmountHelp();
       if (event.key === "Escape" && accountMenu) unmountAccount();
+      if (event.metaKey && event.key === ",") {
+        settingsOpenCount += 1;
+        unmountAccount();
+      }
     });
 
     assert.equal(shortcut.getAttribute("aria-label"), "Open settings");
@@ -823,6 +827,8 @@ test("Help and Settings swap preserves native behavior, alignment, dismissal, an
     assert.equal(settingsOpenCount, 1);
     assert.equal(accountMenu, null);
     assert.equal(helpMenu, null);
+    assert.equal(harness.invokedChannels.filter((channel) =>
+      channel === "codex-workflow:settings:activate").length, 1);
 
     accountTrigger.click();
     const helpUpdates = accountMenu.querySelector('[data-codex-workflow-help-updates="true"]');
@@ -872,19 +878,9 @@ test("Help and Settings swap preserves native behavior, alignment, dismissal, an
     assert.ok(accountMenu);
     assert.ok(accountMenu.querySelector('[data-codex-workflow-help-updates="true"]'));
 
-    const activatingMenu = accountMenu;
-    harness.deferAnimationFrames();
     shortcut.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     shortcut.dispatchEvent(new window.MouseEvent("click", { bubbles: true, button: 0 }));
-    harness.flushAnimationFrame();
-    assert.equal(activatingMenu.style.getPropertyValue("opacity"), "0");
-    assert.equal(activatingMenu.style.getPropertyPriority("opacity"), "important");
-    harness.flushAnimationFrame();
-    harness.flushAnimationFrame();
     await flush();
-    harness.flushAnimationFrame();
-    harness.flushAnimationFrame();
-    harness.resumeAnimationFrames();
     assert.equal(settingsOpenCount, 2);
     assert.equal(accountMenu, null);
 

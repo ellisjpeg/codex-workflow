@@ -98,11 +98,10 @@ test("main settings normalizer accepts only canonical booleans", () => {
   );
 });
 
-test("Settings activation sends a bounded trusted mouse click", () => {
+test("Settings activation sends the native shortcut without moving the pointer", () => {
   const harness = createUpdateHarness(new Map());
   const inputEvents = [];
   const sender = {
-    getOwnerBrowserWindow: () => ({ getContentSize: () => [1200, 800] }),
     getURL: () => "app://codex/thread",
     isDestroyed: () => false,
     sendInputEvent: (event) => inputEvents.push(event),
@@ -110,24 +109,23 @@ test("Settings activation sends a bounded trusted mouse click", () => {
   const activate = harness.handlers.get("codex-workflow:settings:activate");
   assert.equal(activate(
     { sender, senderFrame: { url: "app://codex/thread" } },
-    { target: "settings-item", x: 32, y: 744 },
+    { target: "keyboard-shortcut" },
   ), true);
   assert.deepEqual(JSON.parse(JSON.stringify(inputEvents)), [
-    { type: "mouseMove", x: 32, y: 744 },
-    { type: "mouseDown", x: 32, y: 744, button: "left", clickCount: 1 },
-    { type: "mouseUp", x: 32, y: 744, button: "left", clickCount: 1 },
+    { type: "keyDown", keyCode: ",", modifiers: ["meta"] },
+    { type: "keyUp", keyCode: ",", modifiers: ["meta"] },
   ]);
   assert.throws(
     () => activate(
       { sender, senderFrame: { url: "app://codex/thread" } },
-      { target: "settings-item", x: 1200, y: 744 },
+      { target: "settings-item" },
     ),
-    /invalid Settings coordinates/u,
+    /invalid Settings activation/u,
   );
   assert.throws(
     () => activate(
       { sender, senderFrame: { url: "https://example.com" } },
-      { target: "settings-item", x: 32, y: 744 },
+      { target: "keyboard-shortcut" },
     ),
     /untrusted renderer/u,
   );

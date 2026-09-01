@@ -220,31 +220,14 @@ if (!globalThis.__codexWorkflowMainInstalled) {
     assertTrustedSender(event);
     return writeSettings(patch);
   });
-  ipcMain.handle("codex-workflow:settings:activate", (event, point) => {
+  ipcMain.handle("codex-workflow:settings:activate", (event, request) => {
     assertTrustedSender(event);
     const contents = event.sender;
-    const ownerWindow = contents?.getOwnerBrowserWindow?.();
-    const size = ownerWindow?.getContentSize?.();
-    const x = point?.x;
-    const y = point?.y;
-    const target = point?.target;
-    if (
-      contents?.isDestroyed?.() ||
-      !Array.isArray(size) ||
-      size.length !== 2 ||
-      !["account-menu", "settings-item"].includes(target) ||
-      !Number.isInteger(x) ||
-      !Number.isInteger(y) ||
-      x < 0 ||
-      y < 0 ||
-      x >= size[0] ||
-      y >= size[1]
-    ) {
-      throw new Error("Codex Workflow rejected invalid Settings coordinates");
+    if (contents?.isDestroyed?.() || request?.target !== "keyboard-shortcut") {
+      throw new Error("Codex Workflow rejected invalid Settings activation");
     }
-    contents.sendInputEvent({ type: "mouseMove", x, y });
-    contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
-    contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+    contents.sendInputEvent({ type: "keyDown", keyCode: ",", modifiers: ["meta"] });
+    contents.sendInputEvent({ type: "keyUp", keyCode: ",", modifiers: ["meta"] });
     return true;
   });
   ipcMain.handle("codex-workflow:update:get", (event) => {

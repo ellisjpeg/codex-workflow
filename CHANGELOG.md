@@ -2,6 +2,10 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.8 - 2026-09-01
+
+- Open Settings from the sidebar gear through Codex's native `Cmd+,` command, removing the profile-menu click race and synthetic pointer hover.
+
 ## 0.5.7 - 2026-09-01
 
 - Kept the Workflow Update control out of the native titlebar flex layout and aligned its trailing inset with native sidebar actions.

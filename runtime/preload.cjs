@@ -66,9 +66,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     loggedAmbiguousSettingsMenu: false,
     sidebarHelpButton: null,
     sidebarHelpSnapshot: null,
-    pendingSettingsOpen: false,
-    settingsOpenScheduled: false,
-    settingsActivationInFlight: false,
     suppressSidebarSettingsClick: false,
     helpOpenRequested: false,
     helpAnchorRect: null,
@@ -327,8 +324,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       subtree: true,
     });
     state.accountMenuDiscoveryTimer = setTimeout(() => {
-      state.pendingSettingsOpen = false;
-      state.settingsOpenScheduled = false;
       stopAccountMenuDiscovery();
     }, 1500);
     syncAccountMenuItems();
@@ -758,74 +753,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function openNativeSettings() {
-    const items = findAccountSettingsItems().filter((item) => {
-      const menu = item.closest('[role="menu"]');
-      const rect = menu?.getBoundingClientRect();
-      return rect && rect.width > 0 && rect.height > 0;
-    });
-    if (items.length === 1) {
-      clickNativeSettingsItem(items[0]);
-      return;
-    }
-    if (items.length > 1) return;
-    const trigger = findAccountMenuTrigger();
-    if (!trigger) return;
-    state.pendingSettingsOpen = true;
-    beginAccountMenuDiscovery();
-    invokeTrustedSettingsClick(trigger, "account-menu").catch((error) => {
-      state.pendingSettingsOpen = false;
-      log("error", `Account menu activation failed: ${error?.message || error}`);
+    ipcRenderer.invoke("codex-workflow:settings:activate", {
+      target: "keyboard-shortcut",
+    }).catch((error) => {
+      log("error", `Settings shortcut activation failed: ${error?.message || error}`);
       beginDiscovery();
     });
-  }
-
-  function clickNativeSettingsItem(item) {
-    if (state.settingsActivationInFlight) return;
-    state.pendingSettingsOpen = false;
-    state.settingsOpenScheduled = false;
-    state.settingsActivationInFlight = true;
-    const menu = item.closest('[role="menu"]');
-    const menuOpacity = menu instanceof HTMLElement
-      ? {
-        value: menu.style.getPropertyValue("opacity"),
-        priority: menu.style.getPropertyPriority("opacity"),
-      }
-      : null;
-    if (menuOpacity) menu.style.setProperty("opacity", "0", "important");
-    const snapshot = state.accountSettingsSnapshots.get(item);
-    if (snapshot?.clone) restoreAccountSettingsItem(snapshot.clone);
-    const finish = () => {
-      state.settingsActivationInFlight = false;
-      if (menu instanceof HTMLElement && menu.isConnected) syncAccountSettingsItem();
-      if (menuOpacity && menu instanceof HTMLElement) {
-        if (menuOpacity.value) menu.style.setProperty("opacity", menuOpacity.value, menuOpacity.priority);
-        else menu.style.removeProperty("opacity");
-      }
-      if (menu instanceof HTMLElement && menu.isConnected) beginAccountMenuDiscovery();
-      else beginDiscovery();
-    };
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (!item.isConnected) {
-        finish();
-        return;
-      }
-      item.focus({ preventScroll: true });
-      invokeTrustedSettingsClick(item, "settings-item").catch((error) => {
-        log("error", `Settings activation failed: ${error?.message || error}`);
-      }).finally(() => {
-        requestAnimationFrame(() => requestAnimationFrame(finish));
-      });
-    }));
-  }
-
-  function invokeTrustedSettingsClick(element, target) {
-    const rect = element.getBoundingClientRect();
-    const x = Math.round(rect.left + rect.width / 2);
-    const y = Math.round(rect.top + rect.height / 2);
-    if (!(rect.width > 0 && rect.height > 0 && Number.isFinite(x) && Number.isFinite(y))) {
-      return Promise.reject(new Error(`Invalid ${target} target bounds`));
-    }
-    return ipcRenderer.invoke("codex-workflow:settings:activate", { target, x, y });
   }
 
   function syncAccountMenuItems() {
@@ -860,8 +793,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const matching = findAccountSettingsItems();
     const owned = Array.from(document.querySelectorAll('[data-codex-workflow-help-updates="true"]'));
 
-    if (state.settingsActivationInFlight) return true;
-
     if (matching.length > 1) {
       if (!state.loggedAmbiguousSettingsMenu) {
         state.loggedAmbiguousSettingsMenu = true;
@@ -870,11 +801,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       return false;
     }
     state.loggedAmbiguousSettingsMenu = false;
-
-    if (state.pendingSettingsOpen && matching.length === 1) {
-      clickNativeSettingsItem(matching[0]);
-      return true;
-    }
 
     if (!shouldReplace) {
       for (const item of owned) restoreAccountSettingsItem(item);
