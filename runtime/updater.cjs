@@ -169,7 +169,11 @@ async function checkRemote(config, previousState) {
     Accept: "application/vnd.github+json",
     "User-Agent": "codex-workflow-updater",
   };
-  if (typeof previousState?.releaseEtag === "string" && previousState.releaseEtag) {
+  const staged = previousState?.stagedSourceRoot
+    ? sourcePackage(previousState.stagedSourceRoot)
+    : null;
+  const canReuseCachedRelease = staged && staged.version === previousState.availableVersion;
+  if (canReuseCachedRelease && typeof previousState?.releaseEtag === "string" && previousState.releaseEtag) {
     headers["If-None-Match"] = previousState.releaseEtag;
   }
   const response = await fetch(config.releaseApi, {

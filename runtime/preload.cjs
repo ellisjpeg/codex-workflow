@@ -42,6 +42,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     updateApplying: false,
     updatePill: null,
     updatePillSlot: null,
+    updatePillHost: null,
+    updatePillHostObserver: null,
+    updatePillHostMountObservers: [],
     customNav: null,
     settingsNav: null,
     panel: null,
@@ -441,6 +444,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.updatePillSlot?.remove();
     state.updatePillSlot = null;
     state.updatePill = null;
+    releaseUpdatePillHost();
     restoreSidebarHelpShortcut();
     state.sidebarRoot = null;
   }
@@ -491,6 +495,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         if (root.isConnected) return;
         if (kind === "sidebar" && state.sidebarRoot === root) unbindSidebarRoot();
         if (kind === "settings" && state.settingsShell === root) unbindSettingsShell();
+        if (kind === "update-pill" && state.updatePillHost === root) {
+          releaseUpdatePillHost();
+          scheduleWork("toolbar");
+          return;
+        }
         beginDiscovery();
       });
       observer.observe(parent, { childList: true });
@@ -1837,23 +1846,30 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.updatePillSlot?.remove();
       state.updatePillSlot = null;
       state.updatePill = null;
+      releaseUpdatePillHost();
       return;
     }
 
-    const toolbar = Array.from(root.children).find((child) => {
-      if (!(child instanceof HTMLElement)) return false;
-      const classes = child.classList;
-      return classes.contains("h-toolbar") && classes.contains("draggable");
-    });
-    if (!toolbar) return;
+    const host = findUpdatePillHost(root);
+    if (!host) {
+      state.updatePillSlot?.remove();
+      state.updatePillSlot = null;
+      state.updatePill = null;
+      releaseUpdatePillHost();
+      return;
+    }
+    bindUpdatePillHost(host.element);
 
     let slot = state.updatePillSlot;
     if (!slot?.isConnected) {
-      slot = div("pointer-events-auto flex h-full w-full items-center justify-end px-panel");
+      slot = document.createElement("div");
       slot.dataset.codexWorkflowUpdateSlot = "true";
       state.updatePillSlot = slot;
     }
-    if (slot.parentElement !== toolbar) toolbar.append(slot);
+    slot.className = host.globalTitlebar
+      ? "pointer-events-auto no-drag ms-auto flex h-full min-w-0 flex-1 items-center justify-end px-panel"
+      : "pointer-events-auto flex h-full w-full items-center justify-end px-panel";
+    if (slot.parentElement !== host.element) host.element.append(slot);
 
     let button = state.updatePill;
     if (!button?.isConnected) {
@@ -1863,8 +1879,76 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     button.disabled = state.updateApplying;
     button.setAttribute("aria-label", state.updateApplying ? "Installing Workflow Update" : "Workflow Update");
     button.title = state.updateApplying ? "Installing Workflow Update" : "Workflow Update";
-    syncUpdatePillMotion(button);
+    syncUpdatePillMotion(button, host.globalTitlebar);
     if (button.parentElement !== slot) slot.append(button);
+  }
+
+  function findUpdatePillHost(root) {
+    const toolbar = Array.from(root.children).find((child) => {
+      if (!(child instanceof HTMLElement)) return false;
+      const classes = child.classList;
+      return classes.contains("h-toolbar") && classes.contains("draggable");
+    });
+    if (toolbar) return { element: toolbar, globalTitlebar: false };
+
+    const rootRect = root.getBoundingClientRect();
+    if (!(rootRect.width > 0 && rootRect.height > 0)) return null;
+    const titlebars = Array.from(document.querySelectorAll("header.h-toolbar.draggable")).filter((candidate) => {
+      if (!(candidate instanceof HTMLElement)) return false;
+      const style = getComputedStyle(candidate);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = candidate.getBoundingClientRect();
+      return rect.width >= rootRect.width && rect.height > 0 &&
+        Math.abs(rect.left - rootRect.left) < 1 &&
+        rect.top <= rootRect.top + 1 && rect.bottom > rootRect.top;
+    });
+    if (titlebars.length !== 1) return null;
+
+    const titlebarRect = titlebars[0].getBoundingClientRect();
+    const regions = Array.from(titlebars[0].children).filter((candidate) => {
+      if (!(candidate instanceof HTMLElement)) return false;
+      const style = getComputedStyle(candidate);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = candidate.getBoundingClientRect();
+      return Math.abs(rect.left - rootRect.left) < 1 &&
+        Math.abs(rect.width - rootRect.width) < 1 &&
+        Math.abs(rect.height - titlebarRect.height) < 1;
+    });
+    if (regions.length !== 1) return null;
+
+    const hosts = Array.from(regions[0].children).filter((candidate) => {
+      if (!(candidate instanceof HTMLElement)) return false;
+      const style = getComputedStyle(candidate);
+      const rect = candidate.getBoundingClientRect();
+      return ["flex", "inline-flex"].includes(style.display) &&
+        style.visibility !== "hidden" && rect.width > 0 &&
+        Math.abs(rect.height - titlebarRect.height) < 1 &&
+        candidate.querySelectorAll("button[aria-label]").length >= 3;
+    });
+    return hosts.length === 1 ? { element: hosts[0], globalTitlebar: true } : null;
+  }
+
+  function bindUpdatePillHost(host) {
+    if (state.updatePillHost === host && host.isConnected) return;
+    releaseUpdatePillHost();
+    state.updatePillHost = host;
+    state.updatePillHostObserver = new MutationObserver(() => {
+      try {
+        syncUpdatePill();
+      } catch (error) {
+        log("error", `update pill host sync failed: ${error?.stack || error}`);
+      }
+    });
+    state.updatePillHostObserver.observe(host, { childList: true });
+    state.updatePillHostMountObservers = observeMountChain("update-pill", host);
+  }
+
+  function releaseUpdatePillHost() {
+    state.updatePillHostObserver?.disconnect();
+    state.updatePillHostObserver = null;
+    disconnectObservers(state.updatePillHostMountObservers);
+    state.updatePillHostMountObservers = [];
+    state.updatePillHost = null;
   }
 
   function createUpdatePill() {
@@ -1921,9 +2005,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return button;
   }
 
-  function syncUpdatePillMotion(button) {
+  function syncUpdatePillMotion(button, compact = false) {
     const applying = state.updateApplying;
-    const label = applying ? "Installing" : "Workflow Update";
+    const label = applying ? "Installing" : compact ? "Update" : "Workflow Update";
     button.className = `pointer-events-auto no-drag relative shrink-0 cursor-interaction rounded-full bg-chart-blue text-[10px] leading-3 font-semibold text-white shadow-sm contain-layout contain-style active:bg-chart-blue/80 enabled:hover:bg-[color-mix(in_srgb,var(--color-chart-blue)_92%,black_8%)] motion-reduce:transition-none group grid h-5 max-w-36 min-w-5 items-center justify-center overflow-visible px-2.5 transition-[grid-template-columns,background-color] duration-[220ms] ease-[cubic-bezier(0.25,0.46,0.45,0.94)] [will-change:grid-template-columns] focus-visible:transition-none ${applying ? "grid-cols-[1fr]" : "grid-cols-[0fr] hover:grid-cols-[1fr] focus-visible:grid-cols-[1fr]"}`;
     const icon = button.querySelector('[data-codex-workflow-update-icon="true"]');
     if (icon) {

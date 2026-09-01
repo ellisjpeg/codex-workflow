@@ -29,6 +29,14 @@ test("updater treats an absent parent process as already stopped", async () => {
 
 test("updater uses release ETags and accepts an unchanged response", async () => {
   const originalFetch = globalThis.fetch;
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-updater-etag-test-"));
+  const releaseRoot = join(root, "updates", "0.5.4");
+  mkdirSync(join(releaseRoot, "scripts"), { recursive: true });
+  writeFileSync(join(releaseRoot, "package.json"), `${JSON.stringify({
+    name: "codex-workflow",
+    version: "0.5.4",
+  })}\n`);
+  writeFileSync(join(releaseRoot, "scripts", "install.mjs"), "");
   let request;
   globalThis.fetch = async (url, options) => {
     request = { url, options };
@@ -38,11 +46,34 @@ test("updater uses release ETags and accepts an unchanged response", async () =>
     assert.deepEqual(
       await checkRemote(
         { releaseApi: "https://api.github.test/releases/latest" },
-        { releaseEtag: '"release-1"' },
+        {
+          releaseEtag: '"release-1"',
+          availableVersion: "0.5.4",
+          stagedSourceRoot: releaseRoot,
+        },
       ),
       { candidate: null, etag: '"release-1"', unchanged: true },
     );
     assert.equal(request.options.headers["If-None-Match"], '"release-1"');
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("updater bypasses a stale ETag when its staged release is missing", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return { status: 404, ok: false };
+  };
+  try {
+    await checkRemote(
+      { releaseApi: "https://api.github.test/releases/latest" },
+      { releaseEtag: '"release-1"', availableVersion: "0.5.4", stagedSourceRoot: null },
+    );
+    assert.equal(request.options.headers["If-None-Match"], undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

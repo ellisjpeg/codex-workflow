@@ -13,7 +13,7 @@ This is an independent community project and is not affiliated with or endorsed 
 - **Focused Interface** master switch with individual visibility controls.
 - Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
 - Optional sidebar **Settings** shortcut with **Help & Updates** moved into the account menu.
-- Native hover-reveal **Workflow Update** control in the sidebar titlebar.
+- Native hover-reveal **Workflow Update** control in the sidebar-aligned titlebar region.
 - One-click quit, guarded patch application, automatic relaunch, and logged handoff failures without a dialog.
 - Conditional, verified GitHub Release checks every five minutes.
 - Scoped sidebar and settings observers with route/remount recovery.

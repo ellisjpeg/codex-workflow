@@ -32,7 +32,7 @@ export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.
 export const supportedVersion = "26.820.60940";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.5.4";
+export const patchVersion = "0.5.5";
 
 const journalPath = join(runtimeRoot, "transaction.json");
 const backupsRoot = join(runtimeRoot, "backups");

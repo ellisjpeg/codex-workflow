@@ -2,6 +2,12 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.5 - 2026-09-01
+
+- Restored Workflow Update in the current global titlebar layout with guarded host discovery, compact hover text, and remount recovery.
+- Forced a fresh release fetch when the previously staged update is missing instead of trusting a stale ETag.
+- Removed archive symlinks during release packaging so staged releases pass the updater's link-safety checks.
+
 ## 0.5.4 - 2026-08-31
 
 - Added a Focused Interface option that moves the native Settings action to the sidebar Help slot and places Help & Updates in the account menu.

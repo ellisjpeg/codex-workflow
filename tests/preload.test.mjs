@@ -280,6 +280,88 @@ test("Workflow Update uses the native sidebar hover-reveal pill", async () => {
   }
 });
 
+test("Workflow Update follows the current global titlebar sidebar region", async () => {
+  const harness = await createHarness({
+    updateStatus: {
+      available: true,
+      installedVersion: "0.5.3",
+      availableVersion: "0.5.4",
+    },
+  });
+  try {
+    const { document, emitMutation } = harness;
+    const sidebar = document.querySelector(".app-shell-left-panel");
+    sidebar.getBoundingClientRect = () => ({
+      width: 275, height: 763, left: 0, right: 275, top: 0, bottom: 763,
+    });
+    document.querySelector("#sidebar-toolbar").remove();
+
+    const titlebar = document.querySelector("#top-toolbar");
+    titlebar.innerHTML = `
+      <div id="sidebar-titlebar-region">
+        <div id="sidebar-titlebar-controls" class="inline-flex h-full items-center pointer-events-none w-full">
+          <button aria-label="Hide sidebar"></button>
+          <button aria-label="Back"></button>
+          <button aria-label="Forward"></button>
+        </div>
+      </div>
+      <div id="main-titlebar-region"></div>
+    `;
+    titlebar.getBoundingClientRect = () => ({
+      width: 1200, height: 46, left: 0, right: 1200, top: 0, bottom: 46,
+    });
+    const region = titlebar.querySelector("#sidebar-titlebar-region");
+    region.getBoundingClientRect = () => ({
+      width: 275, height: 46, left: 0, right: 275, top: 0, bottom: 46,
+    });
+    const controls = titlebar.querySelector("#sidebar-titlebar-controls");
+    controls.style.display = "inline-flex";
+    controls.getBoundingClientRect = () => ({
+      width: 187, height: 46, left: 88, right: 275, top: 0, bottom: 46,
+    });
+    emitMutation(sidebar);
+    await flush();
+
+    const slot = document.querySelector('[data-codex-workflow-update-slot="true"]');
+    const pill = document.querySelector('[data-codex-workflow-update="true"]');
+    assert.equal(slot.parentElement, controls);
+    assert.equal(slot.className.includes("no-drag"), true);
+    assert.equal(slot.className.includes("ms-auto"), true);
+    assert.equal(pill.getAttribute("aria-label"), "Workflow Update");
+    assert.equal(
+      pill.querySelector('[data-codex-workflow-update-label="true"]').textContent,
+      "Update",
+    );
+
+    slot.remove();
+    emitMutation(controls, { removedNodes: [slot] });
+    await flush();
+    assert.equal(
+      document.querySelectorAll('[data-codex-workflow-update="true"]').length,
+      1,
+    );
+
+    const replacement = titlebar.cloneNode(true);
+    replacement.id = "replacement-top-toolbar";
+    replacement.querySelectorAll('[data-codex-workflow-update-slot="true"]').forEach((element) => element.remove());
+    replacement.getBoundingClientRect = titlebar.getBoundingClientRect;
+    const replacementRegion = replacement.querySelector("#sidebar-titlebar-region");
+    replacementRegion.getBoundingClientRect = region.getBoundingClientRect;
+    const replacementControls = replacement.querySelector("#sidebar-titlebar-controls");
+    replacementControls.getBoundingClientRect = controls.getBoundingClientRect;
+    titlebar.replaceWith(replacement);
+    emitMutation(document.body, { addedNodes: [replacement], removedNodes: [titlebar] });
+    await flush();
+
+    assert.equal(
+      replacementControls.querySelectorAll('[data-codex-workflow-update="true"]').length,
+      1,
+    );
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
 test("Workflow Update is absent when no newer Workflow release exists", async () => {
   const harness = await createHarness({ updateStatus: { available: false } });
   try {
