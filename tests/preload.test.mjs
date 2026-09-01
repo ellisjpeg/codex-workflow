@@ -294,7 +294,11 @@ test("Workflow Update follows the current global titlebar sidebar region", async
     sidebar.getBoundingClientRect = () => ({
       width: 275, height: 763, left: 0, right: 275, top: 0, bottom: 763,
     });
-    document.querySelector("#sidebar-toolbar").remove();
+    const legacyToolbar = document.querySelector("#sidebar-toolbar");
+    legacyToolbar.remove();
+    emitMutation(sidebar, { removedNodes: [legacyToolbar] });
+    await flush();
+    assert.equal(document.querySelector('[data-codex-workflow-update="true"]'), null);
 
     const titlebar = document.querySelector("#top-toolbar");
     titlebar.innerHTML = `
@@ -319,7 +323,7 @@ test("Workflow Update follows the current global titlebar sidebar region", async
     controls.getBoundingClientRect = () => ({
       width: 187, height: 46, left: 88, right: 275, top: 0, bottom: 46,
     });
-    emitMutation(sidebar);
+    emitMutation(titlebar, { addedNodes: [region] });
     await flush();
 
     const slot = document.querySelector('[data-codex-workflow-update-slot="true"]');

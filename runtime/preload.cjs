@@ -42,6 +42,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     updateApplying: false,
     updatePill: null,
     updatePillSlot: null,
+    updatePillDiscoveryObserver: null,
     updatePillHost: null,
     updatePillHostObserver: null,
     updatePillHostMountObservers: [],
@@ -444,6 +445,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.updatePillSlot?.remove();
     state.updatePillSlot = null;
     state.updatePill = null;
+    stopUpdatePillDiscovery();
     releaseUpdatePillHost();
     restoreSidebarHelpShortcut();
     state.sidebarRoot = null;
@@ -497,7 +499,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         if (kind === "settings" && state.settingsShell === root) unbindSettingsShell();
         if (kind === "update-pill" && state.updatePillHost === root) {
           releaseUpdatePillHost();
-          scheduleWork("toolbar");
+          beginUpdatePillDiscovery();
+          try {
+            syncUpdatePill();
+          } catch (error) {
+            log("error", `update pill remount sync failed: ${error?.stack || error}`);
+          }
           return;
         }
         beginDiscovery();
@@ -1846,6 +1853,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.updatePillSlot?.remove();
       state.updatePillSlot = null;
       state.updatePill = null;
+      stopUpdatePillDiscovery();
       releaseUpdatePillHost();
       return;
     }
@@ -1856,8 +1864,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.updatePillSlot = null;
       state.updatePill = null;
       releaseUpdatePillHost();
+      beginUpdatePillDiscovery();
       return;
     }
+    stopUpdatePillDiscovery();
     bindUpdatePillHost(host.element);
 
     let slot = state.updatePillSlot;
@@ -1926,6 +1936,39 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         candidate.querySelectorAll("button[aria-label]").length >= 3;
     });
     return hosts.length === 1 ? { element: hosts[0], globalTitlebar: true } : null;
+  }
+
+  function beginUpdatePillDiscovery() {
+    if (state.updatePillDiscoveryObserver) return;
+    state.updatePillDiscoveryObserver = new MutationObserver((mutations) => {
+      if (!mutations.some(mutationMayAffectUpdatePillHost)) return;
+      try {
+        syncUpdatePill();
+      } catch (error) {
+        log("error", `update pill discovery sync failed: ${error?.stack || error}`);
+      }
+    });
+    state.updatePillDiscoveryObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  function stopUpdatePillDiscovery() {
+    state.updatePillDiscoveryObserver?.disconnect();
+    state.updatePillDiscoveryObserver = null;
+  }
+
+  function mutationMayAffectUpdatePillHost(mutation) {
+    const target = mutation.target instanceof Element
+      ? mutation.target
+      : mutation.target?.parentElement;
+    if (target?.closest?.("header.h-toolbar.draggable")) return true;
+    return Array.from(mutation.addedNodes || []).some((node) => {
+      if (!(node instanceof Element)) return false;
+      return node.matches("header.h-toolbar.draggable") ||
+        Boolean(node.querySelector("header.h-toolbar.draggable"));
+    });
   }
 
   function bindUpdatePillHost(host) {

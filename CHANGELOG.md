@@ -2,6 +2,10 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.6 - 2026-09-01
+
+- Retried guarded update-control discovery when the global titlebar mounts after the sidebar, without observing unrelated renderer mutations.
+
 ## 0.5.5 - 2026-09-01
 
 - Restored Workflow Update in the current global titlebar layout with guarded host discovery, compact hover text, and remount recovery.
