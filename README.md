@@ -14,7 +14,7 @@ This is an independent community project and is not affiliated with or endorsed 
 - Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
 - Optional sidebar **Settings** shortcut with **Help & Updates** moved into the account menu.
 - Native hover-reveal **Workflow Update** control in the sidebar-aligned titlebar region.
-- One-click quit, guarded patch application, automatic relaunch, and logged handoff failures without a dialog.
+- One-click guarded runtime updates, automatic relaunch, and logged failures without a dialog.
 - Conditional, verified GitHub Release checks every five minutes.
 - Scoped sidebar and settings observers with route/remount recovery.
 - Atomic local settings persistence and visible rollback after write failures.
@@ -58,7 +58,7 @@ npm run reapply:patch
 
 Relaunch Codex and run `npm run status` again. A healthy installation reports `ok: true`, matching integrity, current runtime files, and no pending transaction.
 
-After installation, Workflow checks packaged GitHub Releases every five minutes using conditional requests. Only a verified staged release can surface the sidebar update control; local checkout or version changes are ignored. Clicking it quits ChatGPT, applies the guarded reapply transaction, and relaunches the app. The background agent uses the same transaction but never opens ChatGPT when it was already closed.
+After installation, Workflow checks packaged GitHub Releases every five minutes using conditional requests. Only a verified staged release can surface the sidebar update control; local checkout or version changes are ignored. Clicking it applies a guarded external-runtime transaction, then relaunches Codex. Releases that change the embedded loader still require a reviewed guarded reapply.
 
 ## Recovery and removal
 

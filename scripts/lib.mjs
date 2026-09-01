@@ -32,7 +32,7 @@ export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.
 export const supportedVersion = "26.820.60940";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.5.6";
+export const patchVersion = "0.5.7";
 
 const journalPath = join(runtimeRoot, "transaction.json");
 const backupsRoot = join(runtimeRoot, "backups");
@@ -41,6 +41,7 @@ const managedRuntimePaths = [
   "runtime/main.cjs",
   "runtime/preload.cjs",
   "runtime/updater.cjs",
+  "runtime/version.json",
   "update-config.json",
 ];
 
@@ -69,6 +70,15 @@ export function fileHash(targetPath) {
     closeSync(descriptor);
   }
   return hash.digest("hex");
+}
+
+export function embeddedFileHash(internalPath, targetAsar = asarPath) {
+  return createHash("sha256").update(asar.extractFile(targetAsar, internalPath)).digest("hex");
+}
+
+export function readRuntimeVersion(targetRoot = runtimeRoot) {
+  const value = readJson(join(targetRoot, "runtime", "version.json"))?.version;
+  return /^\d+\.\d+\.\d+(?:[-+].*)?$/u.test(String(value || "")) ? value : null;
 }
 
 export function plistValue(keyPath, targetPlist = infoPlistPath) {
@@ -237,6 +247,10 @@ export function installRuntimeFiles() {
   atomicReplace(join(sourceRoot, "runtime", "main.cjs"), join(runtimeDestination, "main.cjs"));
   atomicReplace(join(sourceRoot, "runtime", "preload.cjs"), join(runtimeDestination, "preload.cjs"));
   atomicReplace(join(sourceRoot, "runtime", "updater.cjs"), join(runtimeDestination, "updater.cjs"));
+  writeJsonAtomic(join(runtimeDestination, "version.json"), {
+    schemaVersion: 1,
+    version: patchVersion,
+  });
   writeJsonAtomic(join(runtimeRoot, "update-config.json"), {
     schemaVersion: 1,
     sourceRoot,

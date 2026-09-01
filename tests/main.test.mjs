@@ -139,6 +139,7 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
   const timeoutCallbacks = [];
   let quitCount = 0;
   let exitCount = 0;
+  let relaunchCount = 0;
   const context = createContext({
     setImmediate,
     setTimeout(callback, delay) {
@@ -159,6 +160,7 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
             on() {},
             quit() { quitCount += 1; },
             exit() { exitCount += 1; },
+            relaunch() { relaunchCount += 1; },
             whenReady: () => ({ then() {} }),
           },
           ipcMain: {
@@ -177,7 +179,7 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
             return {
               pid: 789,
               once(event, callback) {
-                if (event === "spawn") queueMicrotask(callback);
+                if (event === "close") queueMicrotask(() => callback(0, null));
               },
               unref() { call.unref = true; },
             };
@@ -209,10 +211,11 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
     trusted: { senderFrame: { url: "app://codex/thread" } },
     quitCount: () => quitCount,
     exitCount: () => exitCount,
+    relaunchCount: () => relaunchCount,
   };
 }
 
-test("Workflow Update launches the detached updater and quits without a dialog", async () => {
+test("Workflow Update installs the external runtime before relaunching", async () => {
   const runtimeRoot = "/tmp/codex-workflow-main-update-test";
   const stagedRoot = path.join(runtimeRoot, "updates", "0.5.0");
   const files = new Map([
@@ -229,6 +232,7 @@ test("Workflow Update launches the detached updater and quits without a dialog",
       version: "0.5.0",
     })],
     [path.join(stagedRoot, "scripts", "install.mjs"), ""],
+    [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
     ["/opt/node/bin/node", ""],
   ]);
   const harness = createUpdateHarness(files, runtimeRoot);
@@ -242,19 +246,17 @@ test("Workflow Update launches the detached updater and quits without a dialog",
   assert.equal(result.applying, true);
   assert.equal(harness.spawned.length, 1);
   assert.equal(harness.spawned[0].executable, "/opt/node/bin/node");
-  assert.equal(harness.spawned[0].options.detached, true);
+  assert.equal(harness.spawned[0].options.detached, undefined);
   assert.equal(harness.spawned[0].options.env.CODEX_WORKFLOW_ROOT, runtimeRoot);
   assert.deepEqual(
     JSON.parse(JSON.stringify(harness.spawned[0].args.slice(1))),
-    ["--apply", "--relaunch", "--parent", "456"],
+    ["--apply"],
   );
-  assert.equal(harness.spawned[0].unref, true);
-  assert.equal(harness.quitCount(), 1);
-  assert.equal(harness.timeoutCallbacks.length, 1);
-  assert.equal(harness.timeoutCallbacks[0].delay, 2000);
-  assert.equal(harness.timeoutCallbacks[0].unrefCalled, true);
-  harness.timeoutCallbacks[0].callback();
+  assert.equal(harness.spawned[0].unref, false);
+  assert.equal(harness.quitCount(), 0);
+  assert.equal(harness.relaunchCount(), 1);
   assert.equal(harness.exitCount(), 1);
+  assert.equal(harness.timeoutCallbacks.length, 0);
   await assert.rejects(
     harness.handlers.get("codex-workflow:update:install")({ senderFrame: { url: "https://example.com" } }),
     /untrusted renderer/u,
@@ -306,6 +308,7 @@ test("Workflow Update does not quit while patch recovery is pending", async () =
       version: "0.5.0",
     })],
     [path.join(stagedRoot, "scripts", "install.mjs"), ""],
+    [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
     ["/opt/node/bin/node", ""],
   ]);
   const harness = createUpdateHarness(files, runtimeRoot);

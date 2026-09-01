@@ -111,8 +111,10 @@ try {
     throw new Error("Installed package metadata failed verification");
   }
   const patchState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     patchVersion: installed.pkg.__codexWorkflow.version,
+    loaderVersion: installed.pkg.__codexWorkflow.version,
+    runtimeVersion: installed.pkg.__codexWorkflow.version,
     installedAt: new Date().toISOString(),
     source,
     installed: installed.fingerprint,

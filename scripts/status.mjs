@@ -2,11 +2,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   disabledPath,
+  embeddedFileHash,
   fileHash,
   pendingTransaction,
   patchVersion,
   preflight,
   readPatchState,
+  readRuntimeVersion,
   readSettings,
   resolveSourceBackup,
   runtimeRoot,
@@ -57,7 +59,18 @@ if (patched) {
 const versionSupported = current?.pkg.version === supportedVersion;
 const runtimeReady = runtimeFiles.every((file) => file.present) && updateConfigPresent;
 const runtimeCurrent = runtimeFiles.every((file) => file.matchesSource);
-const sourceCurrent = current?.pkg.__codexWorkflow?.version === patchVersion;
+const state = readPatchState();
+const installedWorkflowVersion = readRuntimeVersion() ||
+  state?.runtimeVersion ||
+  state?.patchVersion ||
+  current?.pkg.__codexWorkflow?.version ||
+  null;
+let loaderCurrent = false;
+try {
+  loaderCurrent = patched &&
+    embeddedFileHash("workflow-loader.cjs") === fileHash(join(sourceRoot, "loader.cjs"));
+} catch {}
+const sourceCurrent = installedWorkflowVersion === patchVersion;
 const disabled = existsSync(disabledPath);
 const action = pending
   ? recovery?.ready ? "recover" : "inspect-recovery"
@@ -67,21 +80,24 @@ const action = pending
       ? versionSupported ? "install" : "install-with-version-review"
       : !runtimeReady || !sourceBackup.present
         ? "reapply-or-restore"
-        : !sourceCurrent || !runtimeCurrent
+        : !loaderCurrent || !sourceCurrent || !runtimeCurrent
           ? "reapply"
           : disabled
             ? "enable"
             : "none";
 
 console.log(JSON.stringify({
-  ok: !pending && !error && versionSupported && patched && runtimeReady && runtimeCurrent && sourceBackup.present && sourceCurrent && !disabled,
+  ok: !pending && !error && versionSupported && patched && runtimeReady && runtimeCurrent && sourceBackup.present && loaderCurrent && sourceCurrent && !disabled,
   recommendedAction: action,
   pendingTransaction: pending ? { id: pending.id, phase: pending.phase, recovery } : null,
   error: error || null,
   appVersion: current?.pkg.version || null,
   supportedVersion,
   sourcePatchVersion: patchVersion,
+  installedWorkflowVersion,
+  appPatchVersion: current?.pkg.__codexWorkflow?.version || null,
   sourceCurrent: Boolean(sourceCurrent),
+  loaderCurrent,
   runtimeCurrent,
   enabled: !disabled,
   versionSupported: Boolean(versionSupported),
@@ -96,7 +112,7 @@ console.log(JSON.stringify({
   runtimeFiles,
   updateConfigPresent,
   settings: readSettings(),
-  state: readPatchState(),
+  state,
   signature: current ? {
     valid: current.signatureIsValid,
     warning: current.signatureIsValid ? null : "pre-existing-app-signature-invalid",

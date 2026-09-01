@@ -37,6 +37,7 @@ test("updater uses release ETags and accepts an unchanged response", async () =>
     version: "0.5.4",
   })}\n`);
   writeFileSync(join(releaseRoot, "scripts", "install.mjs"), "");
+  writeFileSync(join(releaseRoot, "scripts", "install-runtime.mjs"), "");
   let request;
   globalThis.fetch = async (url, options) => {
     request = { url, options };
@@ -102,6 +103,7 @@ test("updater selects only a matching staged release", () => {
       version: "0.5.4",
     })}\n`);
     writeFileSync(join(releaseRoot, "scripts", "install.mjs"), "");
+    writeFileSync(join(releaseRoot, "scripts", "install-runtime.mjs"), "");
 
     assert.deepEqual(
       selectStagedCandidate({
@@ -112,6 +114,7 @@ test("updater selects only a matching staged release", () => {
         root: releaseRoot,
         version: "0.5.4",
         installPath: join(releaseRoot, "scripts", "install.mjs"),
+        runtimeInstallPath: join(releaseRoot, "scripts", "install-runtime.mjs"),
       },
     );
     assert.equal(selectStagedCandidate({ sourceRoot: releaseRoot }, "0.5.3"), null);

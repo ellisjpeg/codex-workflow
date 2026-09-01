@@ -319,6 +319,7 @@ test("Workflow Update follows the current global titlebar sidebar region", async
       width: 275, height: 46, left: 0, right: 275, top: 0, bottom: 46,
     });
     const controls = titlebar.querySelector("#sidebar-titlebar-controls");
+    const nativeControls = Array.from(controls.children);
     controls.style.display = "inline-flex";
     controls.getBoundingClientRect = () => ({
       width: 187, height: 46, left: 88, right: 275, top: 0, bottom: 46,
@@ -330,7 +331,15 @@ test("Workflow Update follows the current global titlebar sidebar region", async
     const pill = document.querySelector('[data-codex-workflow-update="true"]');
     assert.equal(slot.parentElement, controls);
     assert.equal(slot.className.includes("no-drag"), true);
-    assert.equal(slot.className.includes("ms-auto"), true);
+    assert.equal(slot.className.includes("fixed"), true);
+    assert.equal(slot.className.includes("pe-3"), true);
+    assert.equal(slot.className.includes("flex-1"), false);
+    assert.equal(slot.className.includes("px-panel"), false);
+    assert.deepEqual(Array.from(controls.children).slice(0, 3), nativeControls);
+    assert.equal(slot.style.left, "0px");
+    assert.equal(slot.style.top, "0px");
+    assert.equal(slot.style.width, "275px");
+    assert.equal(slot.style.height, "46px");
     assert.equal(pill.getAttribute("aria-label"), "Workflow Update");
     assert.equal(
       pill.querySelector('[data-codex-workflow-update-label="true"]').textContent,

@@ -11,6 +11,7 @@ if (!runtimeRoot) throw new Error("CODEX_WORKFLOW_ROOT is not set");
 const configPath = path.join(runtimeRoot, "update-config.json");
 const statePath = path.join(runtimeRoot, "update-state.json");
 const patchStatePath = path.join(runtimeRoot, "state.json");
+const runtimeVersionPath = path.join(runtimeRoot, "runtime", "version.json");
 const updatesRoot = path.join(runtimeRoot, "updates");
 const logPath = path.join(runtimeRoot, "logs", "updater.log");
 const remoteIntervalMs = 5 * 60 * 1000;
@@ -68,15 +69,25 @@ function remoteCheckDue(state, now = Date.now()) {
 function sourcePackage(sourceRoot) {
   const packagePath = path.join(sourceRoot, "package.json");
   const installPath = path.join(sourceRoot, "scripts", "install.mjs");
+  const runtimeInstallPath = path.join(sourceRoot, "scripts", "install-runtime.mjs");
   const pkg = readJson(packagePath);
-  if (!pkg || pkg.name !== "codex-workflow" || !versionParts(pkg.version) || !fs.existsSync(installPath)) {
+  if (
+    !pkg ||
+    pkg.name !== "codex-workflow" ||
+    !versionParts(pkg.version) ||
+    !fs.existsSync(installPath) ||
+    !fs.existsSync(runtimeInstallPath)
+  ) {
     return null;
   }
-  return { root: sourceRoot, version: pkg.version, installPath };
+  return { root: sourceRoot, version: pkg.version, installPath, runtimeInstallPath };
 }
 
 function installedVersion() {
-  return readJson(patchStatePath)?.patchVersion || null;
+  return readJson(runtimeVersionPath)?.version ||
+    readJson(patchStatePath)?.runtimeVersion ||
+    readJson(patchStatePath)?.patchVersion ||
+    null;
 }
 
 function appIsRunning(executable) {
@@ -224,9 +235,9 @@ async function checkRemote(config, previousState) {
   return { candidate: source, etag, unchanged: false };
 }
 
-function applyCandidate(config, candidate, relaunch) {
+function applyCandidate(config, candidate) {
   appendLog("info", `Applying Workflow ${candidate.version} from ${candidate.root}`);
-  const result = spawnSync(config.nodeExecutable, [candidate.installPath, "--reapply"], {
+  const result = spawnSync(config.nodeExecutable, [candidate.runtimeInstallPath], {
     encoding: "utf8",
     env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
   });
@@ -242,10 +253,6 @@ function applyCandidate(config, candidate, relaunch) {
     stagedSourceRoot: null,
     error: null,
   });
-  if (relaunch) {
-    const opened = spawnSync("/usr/bin/open", [config.appRoot], { encoding: "utf8" });
-    if (opened.status !== 0) throw new Error("Workflow updated, but ChatGPT could not be relaunched");
-  }
   appendLog("info", `Workflow ${candidate.version} applied successfully`);
 }
 
@@ -257,9 +264,6 @@ async function run() {
   if (!fs.existsSync(config.nodeExecutable)) throw new Error("Workflow updater Node.js runtime is unavailable");
   const apply = process.argv.includes("--apply");
   const background = process.argv.includes("--background");
-  const relaunch = process.argv.includes("--relaunch");
-  const parentIndex = process.argv.indexOf("--parent");
-  const parentPid = parentIndex >= 0 ? Number(process.argv[parentIndex + 1]) : null;
   appendLog("info", `Updater started (${apply ? "apply" : background ? "background" : "check"})`);
 
   const previousState = readJson(statePath) || {};
@@ -294,20 +298,11 @@ async function run() {
     stagedSourceRoot: candidate?.root || null,
     error: checkError,
   });
-  if (!candidate || (!apply && !background)) {
+  if (!candidate || !apply) {
     appendLog("info", candidate ? `Workflow ${candidate.version} is available` : "No Workflow update is available");
     return;
   }
-
-  if (apply && parentPid) {
-    if (!await waitForProcessExit(parentPid)) {
-      throw new Error("ChatGPT did not exit in time for the Workflow update");
-    }
-  }
-  if (!await waitForAppExit(config.appExecutable)) {
-    throw new Error("ChatGPT is still running; Workflow update was not applied");
-  }
-  applyCandidate(config, candidate, relaunch);
+  applyCandidate(config, candidate);
 }
 
 if (require.main === module) {

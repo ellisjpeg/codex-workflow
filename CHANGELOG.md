@@ -2,6 +2,12 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.7 - 2026-09-01
+
+- Kept the Workflow Update control out of the native titlebar flex layout and aligned its trailing inset with native sidebar actions.
+- Applied verified feature releases through the external runtime before relaunching Codex, avoiding unnecessary app-bundle rebuilds and interrupted handoffs.
+- Stopped the background release checker from attempting installations while Codex is open.
+
 ## 0.5.6 - 2026-09-01
 
 - Retried guarded update-control discovery when the global titlebar mounts after the sidebar, without observing unrelated renderer mutations.

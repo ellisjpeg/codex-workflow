@@ -17,6 +17,7 @@ const logPath = path.join(logDir, "runtime.log");
 const updateConfigPath = path.join(runtimeRoot, "update-config.json");
 const updateStatePath = path.join(runtimeRoot, "update-state.json");
 const patchStatePath = path.join(runtimeRoot, "state.json");
+const runtimeVersionPath = path.join(runtimeRoot, "runtime", "version.json");
 const transactionPath = path.join(runtimeRoot, "transaction.json");
 const updaterPath = path.join(runtimeRoot, "runtime", "updater.cjs");
 const updateWatchers = [];
@@ -128,12 +129,14 @@ function readStagedUpdate(remote, installedVersion) {
   if (typeof remote?.stagedSourceRoot !== "string" || !remote.stagedSourceRoot) return null;
   const pkg = readJson(path.join(remote.stagedSourceRoot, "package.json"));
   const installPath = path.join(remote.stagedSourceRoot, "scripts", "install.mjs");
+  const runtimeInstallPath = path.join(remote.stagedSourceRoot, "scripts", "install-runtime.mjs");
   if (
     pkg?.name !== "codex-workflow" ||
     !versionParts(pkg.version) ||
     remote.availableVersion !== pkg.version ||
     compareVersions(pkg.version, installedVersion) <= 0 ||
-    !fs.existsSync(installPath)
+    !fs.existsSync(installPath) ||
+    !fs.existsSync(runtimeInstallPath)
   ) {
     return null;
   }
@@ -141,7 +144,10 @@ function readStagedUpdate(remote, installedVersion) {
 }
 
 function readUpdateStatus() {
-  const installedVersion = readJson(patchStatePath)?.patchVersion || null;
+  const installedVersion = readJson(runtimeVersionPath)?.version ||
+    readJson(patchStatePath)?.runtimeVersion ||
+    readJson(patchStatePath)?.patchVersion ||
+    null;
   const remote = readJson(updateStatePath);
   const staged = readStagedUpdate(remote, installedVersion);
   const blockedReason = fs.existsSync(transactionPath) ? "recovery-required" : null;
@@ -257,37 +263,29 @@ if (!globalThis.__codexWorkflowMainInstalled) {
     updateLaunchInFlight = true;
     appendLog("info", `Workflow update requested: ${status.installedVersion || "unknown"} -> ${status.availableVersion || "unknown"}`);
     try {
-      const child = spawn(config.nodeExecutable, [
-        updaterPath,
-        "--apply",
-        "--relaunch",
-        "--parent",
-        String(process.pid),
-      ], {
-        detached: true,
+      const child = spawn(config.nodeExecutable, [updaterPath, "--apply"], {
         stdio: "ignore",
         env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
       });
       await new Promise((resolve, reject) => {
         child.once("error", reject);
-        child.once("spawn", resolve);
+        child.once("close", (code, signal) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Workflow updater exited ${signal ? `with ${signal}` : `with code ${code}`}`));
+        });
       });
-      child.unref();
-      appendLog("info", `Workflow updater launched as process ${child.pid || "unknown"}`);
+      appendLog("info", `Workflow update applied by process ${child.pid || "unknown"}`);
     } catch (error) {
       updateLaunchInFlight = false;
-      appendLog("error", `Workflow updater launch failed: ${error?.stack || error}`);
+      appendLog("error", `Workflow updater failed: ${error?.stack || error}`);
       throw error;
     }
+    const appliedStatus = readUpdateStatus();
     setImmediate(() => {
-      const fallback = setTimeout(() => {
-        appendLog("error", "Graceful quit timed out; forcing exit for Workflow update");
-        app.exit(0);
-      }, 2000);
-      fallback.unref?.();
-      app.quit();
+      app.relaunch();
+      app.exit(0);
     });
-    return { ...status, applying: true };
+    return { ...appliedStatus, applying: true };
   });
   ipcMain.on("codex-workflow:log", (event, level, message) => {
     if (!isTrustedSender(event)) return;

@@ -46,6 +46,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     updatePillHost: null,
     updatePillHostObserver: null,
     updatePillHostMountObservers: [],
+    updatePillResizeObserver: null,
     customNav: null,
     settingsNav: null,
     panel: null,
@@ -183,6 +184,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function installDiscoveryHooks() {
+    window.addEventListener("resize", () => scheduleWork("toolbar"), { passive: true });
     document.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || event.ctrlKey) return;
       const shortcut = event.target instanceof Element
@@ -1877,8 +1879,20 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.updatePillSlot = slot;
     }
     slot.className = host.globalTitlebar
-      ? "pointer-events-auto no-drag ms-auto flex h-full min-w-0 flex-1 items-center justify-end px-panel"
+      ? "pointer-events-none no-drag fixed z-30 flex items-center justify-end pe-3"
       : "pointer-events-auto flex h-full w-full items-center justify-end px-panel";
+    if (host.globalTitlebar) {
+      const rootRect = root.getBoundingClientRect();
+      const titlebar = host.element.closest("header.h-toolbar.draggable");
+      const titlebarRect = titlebar?.getBoundingClientRect();
+      if (!titlebarRect) return;
+      slot.style.left = `${rootRect.left}px`;
+      slot.style.top = `${titlebarRect.top}px`;
+      slot.style.width = `${rootRect.width}px`;
+      slot.style.height = `${titlebarRect.height}px`;
+    } else {
+      slot.removeAttribute("style");
+    }
     if (slot.parentElement !== host.element) host.element.append(slot);
 
     let button = state.updatePill;
@@ -1984,6 +1998,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     });
     state.updatePillHostObserver.observe(host, { childList: true });
     state.updatePillHostMountObservers = observeMountChain("update-pill", host);
+    if (typeof ResizeObserver === "function") {
+      state.updatePillResizeObserver = new ResizeObserver(() => scheduleWork("toolbar"));
+      state.updatePillResizeObserver.observe(host);
+      if (state.sidebarRoot) state.updatePillResizeObserver.observe(state.sidebarRoot);
+    }
   }
 
   function releaseUpdatePillHost() {
@@ -1991,6 +2010,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.updatePillHostObserver = null;
     disconnectObservers(state.updatePillHostMountObservers);
     state.updatePillHostMountObservers = [];
+    state.updatePillResizeObserver?.disconnect();
+    state.updatePillResizeObserver = null;
     state.updatePillHost = null;
   }
 
