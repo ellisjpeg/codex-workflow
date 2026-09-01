@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 process.env.CODEX_WORKFLOW_ROOT = "/tmp/codex-workflow-updater-test";
 const require = createRequire(import.meta.url);
-const { checkRemote, compareVersions, remoteCheckDue, validateTarEntries, validateTarTypes, waitForProcessExit } = require("../runtime/updater.cjs");
+const { checkRemote, compareVersions, remoteCheckDue, selectStagedCandidate, validateTarEntries, validateTarTypes, waitForProcessExit } = require("../runtime/updater.cjs");
 
 test("updater compares canonical release versions", () => {
   assert.equal(compareVersions("0.5.0", "0.4.4"), 1);
@@ -37,7 +40,7 @@ test("updater uses release ETags and accepts an unchanged response", async () =>
         { releaseApi: "https://api.github.test/releases/latest" },
         { releaseEtag: '"release-1"' },
       ),
-      { candidate: null, etag: '"release-1"' },
+      { candidate: null, etag: '"release-1"', unchanged: true },
     );
     assert.equal(request.options.headers["If-None-Match"], '"release-1"');
   } finally {
@@ -51,10 +54,42 @@ test("updater treats a repository without releases as up to date", async () => {
   try {
     assert.deepEqual(
       await checkRemote({ releaseApi: "https://api.github.test/releases/latest" }, {}),
-      { candidate: null, etag: null },
+      { candidate: null, etag: null, unchanged: false },
     );
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("updater selects only a matching staged release", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-updater-test-"));
+  try {
+    const releaseRoot = join(root, "updates", "0.5.4");
+    mkdirSync(join(releaseRoot, "scripts"), { recursive: true });
+    writeFileSync(join(releaseRoot, "package.json"), `${JSON.stringify({
+      name: "codex-workflow",
+      version: "0.5.4",
+    })}\n`);
+    writeFileSync(join(releaseRoot, "scripts", "install.mjs"), "");
+
+    assert.deepEqual(
+      selectStagedCandidate({
+        availableVersion: "0.5.4",
+        stagedSourceRoot: releaseRoot,
+      }, "0.5.3"),
+      {
+        root: releaseRoot,
+        version: "0.5.4",
+        installPath: join(releaseRoot, "scripts", "install.mjs"),
+      },
+    );
+    assert.equal(selectStagedCandidate({ sourceRoot: releaseRoot }, "0.5.3"), null);
+    assert.equal(selectStagedCandidate({
+      availableVersion: "0.5.5",
+      stagedSourceRoot: releaseRoot,
+    }, "0.5.3"), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

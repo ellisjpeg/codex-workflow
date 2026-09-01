@@ -71,6 +71,7 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
       hidePullRequests: true,
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
+      replaceHelpWithSettings: true,
     },
   );
 });
@@ -84,6 +85,7 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hidePullRequests: false,
       hidePetMenuItem: 1,
       hideInviteFriendMenuItem: "yes",
+      replaceHelpWithSettings: 0,
     }),
     {
       schemaVersion: 2,
@@ -91,27 +93,52 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hidePullRequests: false,
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
+      replaceHelpWithSettings: true,
     },
   );
 });
 
-test("Workflow Update launches the detached updater and quits without a dialog", async () => {
+test("Settings activation sends a bounded trusted mouse click", () => {
+  const harness = createUpdateHarness(new Map());
+  const inputEvents = [];
+  const sender = {
+    getOwnerBrowserWindow: () => ({ getContentSize: () => [1200, 800] }),
+    getURL: () => "app://codex/thread",
+    isDestroyed: () => false,
+    sendInputEvent: (event) => inputEvents.push(event),
+  };
+  const activate = harness.handlers.get("codex-workflow:settings:activate");
+  assert.equal(activate(
+    { sender, senderFrame: { url: "app://codex/thread" } },
+    { target: "settings-item", x: 32, y: 744 },
+  ), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(inputEvents)), [
+    { type: "mouseMove", x: 32, y: 744 },
+    { type: "mouseDown", x: 32, y: 744, button: "left", clickCount: 1 },
+    { type: "mouseUp", x: 32, y: 744, button: "left", clickCount: 1 },
+  ]);
+  assert.throws(
+    () => activate(
+      { sender, senderFrame: { url: "app://codex/thread" } },
+      { target: "settings-item", x: 1200, y: 744 },
+    ),
+    /invalid Settings coordinates/u,
+  );
+  assert.throws(
+    () => activate(
+      { sender, senderFrame: { url: "https://example.com" } },
+      { target: "settings-item", x: 32, y: 744 },
+    ),
+    /untrusted renderer/u,
+  );
+});
+
+function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test") {
   const handlers = new Map();
   const spawned = [];
   const timeoutCallbacks = [];
   let quitCount = 0;
   let exitCount = 0;
-  const runtimeRoot = "/tmp/codex-workflow-main-update-test";
-  const sourceRoot = "/tmp/codex-workflow-source-test";
-  const files = new Map([
-    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
-      sourceRoot,
-      nodeExecutable: "/opt/node/bin/node",
-    })],
-    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
-    [path.join(sourceRoot, "package.json"), JSON.stringify({ version: "0.5.0" })],
-    ["/opt/node/bin/node", ""],
-  ]);
   const context = createContext({
     setImmediate,
     setTimeout(callback, delay) {
@@ -175,31 +202,120 @@ test("Workflow Update launches the detached updater and quits without a dialog",
     },
   });
   new Script(mainSource, { filename: "main.cjs" }).runInContext(context);
-  const trusted = { senderFrame: { url: "app://codex/thread" } };
-  const status = handlers.get("codex-workflow:update:get")(trusted);
+  return {
+    handlers,
+    spawned,
+    timeoutCallbacks,
+    trusted: { senderFrame: { url: "app://codex/thread" } },
+    quitCount: () => quitCount,
+    exitCount: () => exitCount,
+  };
+}
+
+test("Workflow Update launches the detached updater and quits without a dialog", async () => {
+  const runtimeRoot = "/tmp/codex-workflow-main-update-test";
+  const stagedRoot = path.join(runtimeRoot, "updates", "0.5.0");
+  const files = new Map([
+    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
+      nodeExecutable: "/opt/node/bin/node",
+    })],
+    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
+    [path.join(runtimeRoot, "update-state.json"), JSON.stringify({
+      availableVersion: "0.5.0",
+      stagedSourceRoot: stagedRoot,
+    })],
+    [path.join(stagedRoot, "package.json"), JSON.stringify({
+      name: "codex-workflow",
+      version: "0.5.0",
+    })],
+    [path.join(stagedRoot, "scripts", "install.mjs"), ""],
+    ["/opt/node/bin/node", ""],
+  ]);
+  const harness = createUpdateHarness(files, runtimeRoot);
+  const status = harness.handlers.get("codex-workflow:update:get")(harness.trusted);
   assert.equal(status.available, true);
   assert.equal(status.availableVersion, "0.5.0");
+  assert.equal(status.blockedReason, null);
 
-  const result = await handlers.get("codex-workflow:update:install")(trusted);
+  const result = await harness.handlers.get("codex-workflow:update:install")(harness.trusted);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(result.applying, true);
-  assert.equal(spawned.length, 1);
-  assert.equal(spawned[0].executable, "/opt/node/bin/node");
-  assert.equal(spawned[0].options.detached, true);
-  assert.equal(spawned[0].options.env.CODEX_WORKFLOW_ROOT, runtimeRoot);
+  assert.equal(harness.spawned.length, 1);
+  assert.equal(harness.spawned[0].executable, "/opt/node/bin/node");
+  assert.equal(harness.spawned[0].options.detached, true);
+  assert.equal(harness.spawned[0].options.env.CODEX_WORKFLOW_ROOT, runtimeRoot);
   assert.deepEqual(
-    JSON.parse(JSON.stringify(spawned[0].args.slice(1))),
+    JSON.parse(JSON.stringify(harness.spawned[0].args.slice(1))),
     ["--apply", "--relaunch", "--parent", "456"],
   );
-  assert.equal(spawned[0].unref, true);
-  assert.equal(quitCount, 1);
-  assert.equal(timeoutCallbacks.length, 1);
-  assert.equal(timeoutCallbacks[0].delay, 2000);
-  assert.equal(timeoutCallbacks[0].unrefCalled, true);
-  timeoutCallbacks[0].callback();
-  assert.equal(exitCount, 1);
+  assert.equal(harness.spawned[0].unref, true);
+  assert.equal(harness.quitCount(), 1);
+  assert.equal(harness.timeoutCallbacks.length, 1);
+  assert.equal(harness.timeoutCallbacks[0].delay, 2000);
+  assert.equal(harness.timeoutCallbacks[0].unrefCalled, true);
+  harness.timeoutCallbacks[0].callback();
+  assert.equal(harness.exitCount(), 1);
   await assert.rejects(
-    handlers.get("codex-workflow:update:install")({ senderFrame: { url: "https://example.com" } }),
+    harness.handlers.get("codex-workflow:update:install")({ senderFrame: { url: "https://example.com" } }),
     /untrusted renderer/u,
   );
+});
+
+test("Workflow Update ignores a newer local checkout", async () => {
+  const runtimeRoot = "/tmp/codex-workflow-main-local-drift-test";
+  const sourceRoot = "/tmp/codex-workflow-source-test";
+  const files = new Map([
+    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
+      sourceRoot,
+      nodeExecutable: "/opt/node/bin/node",
+    })],
+    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.5.3" })],
+    [path.join(sourceRoot, "package.json"), JSON.stringify({
+      name: "codex-workflow",
+      version: "0.5.4",
+    })],
+    [path.join(sourceRoot, "scripts", "install.mjs"), ""],
+    ["/opt/node/bin/node", ""],
+  ]);
+  const harness = createUpdateHarness(files, runtimeRoot);
+  const status = harness.handlers.get("codex-workflow:update:get")(harness.trusted);
+  assert.equal(status.available, false);
+  assert.equal(status.availableVersion, null);
+
+  const result = await harness.handlers.get("codex-workflow:update:install")(harness.trusted);
+  assert.equal(result.available, false);
+  assert.equal(harness.spawned.length, 0);
+  assert.equal(harness.quitCount(), 0);
+});
+
+test("Workflow Update does not quit while patch recovery is pending", async () => {
+  const runtimeRoot = "/tmp/codex-workflow-main-recovery-test";
+  const stagedRoot = path.join(runtimeRoot, "updates", "0.5.0");
+  const files = new Map([
+    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
+      nodeExecutable: "/opt/node/bin/node",
+    })],
+    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
+    [path.join(runtimeRoot, "transaction.json"), "{}"],
+    [path.join(runtimeRoot, "update-state.json"), JSON.stringify({
+      availableVersion: "0.5.0",
+      stagedSourceRoot: stagedRoot,
+    })],
+    [path.join(stagedRoot, "package.json"), JSON.stringify({
+      name: "codex-workflow",
+      version: "0.5.0",
+    })],
+    [path.join(stagedRoot, "scripts", "install.mjs"), ""],
+    ["/opt/node/bin/node", ""],
+  ]);
+  const harness = createUpdateHarness(files, runtimeRoot);
+  const status = harness.handlers.get("codex-workflow:update:get")(harness.trusted);
+  assert.equal(status.available, false);
+  assert.equal(status.availableVersion, "0.5.0");
+  assert.equal(status.blockedReason, "recovery-required");
+
+  const result = await harness.handlers.get("codex-workflow:update:install")(harness.trusted);
+  assert.equal(result.available, false);
+  assert.equal(harness.spawned.length, 0);
+  assert.equal(harness.quitCount(), 0);
 });

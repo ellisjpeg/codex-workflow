@@ -109,17 +109,26 @@ async function waitForAppExit(executable, timeoutMs = 15000) {
   return !appIsRunning(executable);
 }
 
-function chooseCandidate(config) {
-  const installed = installedVersion();
-  const local = sourcePackage(config.sourceRoot);
-  const remoteState = readJson(statePath);
-  const remote = remoteState?.stagedSourceRoot
-    ? sourcePackage(remoteState.stagedSourceRoot)
+function selectStagedCandidate(state, installed) {
+  const candidate = state?.stagedSourceRoot
+    ? sourcePackage(state.stagedSourceRoot)
     : null;
-  const candidates = [local, remote]
-    .filter((candidate) => candidate && compareVersions(candidate.version, installed) > 0)
-    .sort((a, b) => compareVersions(b.version, a.version));
-  return { installed, candidate: candidates[0] || null };
+  if (
+    !candidate ||
+    state.availableVersion !== candidate.version ||
+    compareVersions(candidate.version, installed) <= 0
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+function chooseCandidate() {
+  const installed = installedVersion();
+  return {
+    installed,
+    candidate: selectStagedCandidate(readJson(statePath), installed),
+  };
 }
 
 function sha256(target) {
@@ -168,15 +177,15 @@ async function checkRemote(config, previousState) {
     signal: AbortSignal.timeout(8000),
   });
   if (response.status === 304) {
-    return { candidate: null, etag: previousState?.releaseEtag || null };
+    return { candidate: null, etag: previousState?.releaseEtag || null, unchanged: true };
   }
-  if (response.status === 404) return { candidate: null, etag: null };
+  if (response.status === 404) return { candidate: null, etag: null, unchanged: false };
   if (!response.ok) throw new Error(`Workflow release check failed (${response.status})`);
   const etag = response.headers.get("etag") || null;
   const release = await response.json();
   const version = String(release.tag_name || "").replace(/^v/u, "");
   if (!versionParts(version) || compareVersions(version, installedVersion()) <= 0) {
-    return { candidate: null, etag };
+    return { candidate: null, etag, unchanged: false };
   }
   const assetName = `codex-workflow-${version}.tar.gz`;
   const asset = Array.isArray(release.assets)
@@ -208,7 +217,7 @@ async function checkRemote(config, previousState) {
     .map((entry) => path.join(releaseRoot, entry.name));
   const source = [releaseRoot, ...children].map(sourcePackage).find(Boolean);
   if (!source || source.version !== version) throw new Error("Workflow release archive has invalid contents");
-  return { candidate: source, etag };
+  return { candidate: source, etag, unchanged: false };
 }
 
 function applyCandidate(config, candidate, relaunch) {
@@ -238,7 +247,7 @@ function applyCandidate(config, candidate, relaunch) {
 
 async function run() {
   const config = readJson(configPath);
-  if (!config || config.schemaVersion !== 1 || !config.sourceRoot || !config.nodeExecutable || !config.appExecutable || !config.appRoot) {
+  if (!config || config.schemaVersion !== 1 || !config.nodeExecutable || !config.appExecutable || !config.appRoot) {
     throw new Error("Workflow updater configuration is missing or invalid");
   }
   if (!fs.existsSync(config.nodeExecutable)) throw new Error("Workflow updater Node.js runtime is unavailable");
@@ -249,10 +258,10 @@ async function run() {
   const parentPid = parentIndex >= 0 ? Number(process.argv[parentIndex + 1]) : null;
   appendLog("info", `Updater started (${apply ? "apply" : background ? "background" : "check"})`);
 
-  const localSelection = chooseCandidate(config);
   const previousState = readJson(statePath) || {};
-  const shouldCheckRemote = (!apply || !localSelection.candidate) &&
-    (apply || remoteCheckDue(previousState));
+  const installed = installedVersion();
+  const existingCandidate = selectStagedCandidate(previousState, installed);
+  const shouldCheckRemote = apply || remoteCheckDue(previousState);
   let remoteResult = null;
   let checkError = null;
   if (shouldCheckRemote) {
@@ -262,11 +271,9 @@ async function run() {
       checkError = String(error?.message || error).slice(0, 1000);
     }
   }
-  const selected = chooseCandidate(config);
-  const remoteCandidate = remoteResult?.candidate || null;
-  const candidate = remoteCandidate && (!selected.candidate || compareVersions(remoteCandidate.version, selected.candidate.version) > 0)
-    ? remoteCandidate
-    : selected.candidate;
+  let candidate = existingCandidate;
+  if (remoteResult?.candidate) candidate = remoteResult.candidate;
+  else if (remoteResult && !remoteResult.unchanged) candidate = null;
   const checkedAt = new Date().toISOString();
   writeJsonAtomic(statePath, {
     ...previousState,
@@ -278,9 +285,9 @@ async function run() {
     releaseEtag: remoteResult
       ? remoteResult.etag
       : previousState.releaseEtag || null,
-    installedVersion: selected.installed,
+    installedVersion: installed,
     availableVersion: candidate?.version || null,
-    stagedSourceRoot: remoteCandidate?.root || previousState.stagedSourceRoot || null,
+    stagedSourceRoot: candidate?.root || null,
     error: checkError,
   });
   if (!candidate || (!apply && !background)) {
@@ -313,4 +320,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { checkRemote, compareVersions, remoteCheckDue, chooseCandidate, sourcePackage, validateTarEntries, validateTarTypes, waitForProcessExit };
+module.exports = { checkRemote, compareVersions, remoteCheckDue, chooseCandidate, selectStagedCandidate, sourcePackage, validateTarEntries, validateTarTypes, waitForProcessExit };

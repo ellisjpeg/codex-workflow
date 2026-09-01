@@ -2,6 +2,14 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.4 - 2026-08-31
+
+- Added a Focused Interface option that moves the native Settings action to the sidebar Help slot and places Help & Updates in the account menu.
+- Kept the native Help popover while aligning it to the account menu, adding Back navigation, and preserving Escape, outside-click, and account-button dismissal.
+- Added pre-paint remount, exact restoration, alignment, overlap, dismissal, and persistence-rollback coverage.
+- Limited update availability and background installation to verified staged GitHub Releases instead of local checkout version changes.
+- Blocked update handoff while patch recovery is pending and made rejected stale clicks clear without quitting.
+
 ## 0.5.3 - 2026-08-31
 
 - Made the Workflow Update control explicitly interactive inside the draggable titlebar.

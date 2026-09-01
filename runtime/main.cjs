@@ -17,6 +17,7 @@ const logPath = path.join(logDir, "runtime.log");
 const updateConfigPath = path.join(runtimeRoot, "update-config.json");
 const updateStatePath = path.join(runtimeRoot, "update-state.json");
 const patchStatePath = path.join(runtimeRoot, "state.json");
+const transactionPath = path.join(runtimeRoot, "transaction.json");
 const updaterPath = path.join(runtimeRoot, "runtime", "updater.cjs");
 const updateWatchers = [];
 let updateLaunchInFlight = false;
@@ -26,6 +27,7 @@ const defaults = {
   hidePullRequests: true,
   hidePetMenuItem: true,
   hideInviteFriendMenuItem: true,
+  replaceHelpWithSettings: true,
 };
 
 fs.mkdirSync(logDir, { recursive: true });
@@ -60,6 +62,9 @@ function normaliseSettings(value) {
     hideInviteFriendMenuItem: typeof value?.hideInviteFriendMenuItem === "boolean"
       ? value.hideInviteFriendMenuItem
       : defaults.hideInviteFriendMenuItem,
+    replaceHelpWithSettings: typeof value?.replaceHelpWithSettings === "boolean"
+      ? value.replaceHelpWithSettings
+      : defaults.replaceHelpWithSettings,
   };
 }
 
@@ -119,20 +124,32 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function readStagedUpdate(remote, installedVersion) {
+  if (typeof remote?.stagedSourceRoot !== "string" || !remote.stagedSourceRoot) return null;
+  const pkg = readJson(path.join(remote.stagedSourceRoot, "package.json"));
+  const installPath = path.join(remote.stagedSourceRoot, "scripts", "install.mjs");
+  if (
+    pkg?.name !== "codex-workflow" ||
+    !versionParts(pkg.version) ||
+    remote.availableVersion !== pkg.version ||
+    compareVersions(pkg.version, installedVersion) <= 0 ||
+    !fs.existsSync(installPath)
+  ) {
+    return null;
+  }
+  return { version: pkg.version, root: remote.stagedSourceRoot };
+}
+
 function readUpdateStatus() {
-  const config = readJson(updateConfigPath);
   const installedVersion = readJson(patchStatePath)?.patchVersion || null;
-  const localVersion = config?.sourceRoot
-    ? readJson(path.join(config.sourceRoot, "package.json"))?.version || null
-    : null;
   const remote = readJson(updateStatePath);
-  const versions = [localVersion, remote?.availableVersion]
-    .filter((version) => versionParts(version) && compareVersions(version, installedVersion) > 0)
-    .sort((left, right) => compareVersions(right, left));
+  const staged = readStagedUpdate(remote, installedVersion);
+  const blockedReason = fs.existsSync(transactionPath) ? "recovery-required" : null;
   return {
-    available: versions.length > 0,
+    available: Boolean(staged) && !blockedReason,
     installedVersion,
-    availableVersion: versions[0] || null,
+    availableVersion: staged?.version || null,
+    blockedReason,
     error: remote?.error || null,
   };
 }
@@ -152,20 +169,6 @@ function watchUpdateState() {
     updateWatchers.push(watcher);
   } catch (error) {
     appendLog("error", `update state watch failed: ${error?.message || error}`);
-  }
-}
-
-function watchLocalSource() {
-  const sourceRoot = readJson(updateConfigPath)?.sourceRoot;
-  if (!sourceRoot) return;
-  const packagePath = path.join(sourceRoot, "package.json");
-  try {
-    const watcher = fs.watch(path.dirname(packagePath), { persistent: false }, (_event, filename) => {
-      if (String(filename || "") === path.basename(packagePath)) broadcastUpdateStatus();
-    });
-    updateWatchers.push(watcher);
-  } catch (error) {
-    appendLog("error", `local update watch failed: ${error?.message || error}`);
   }
 }
 
@@ -210,6 +213,33 @@ if (!globalThis.__codexWorkflowMainInstalled) {
   ipcMain.handle("codex-workflow:settings:set", (event, patch) => {
     assertTrustedSender(event);
     return writeSettings(patch);
+  });
+  ipcMain.handle("codex-workflow:settings:activate", (event, point) => {
+    assertTrustedSender(event);
+    const contents = event.sender;
+    const ownerWindow = contents?.getOwnerBrowserWindow?.();
+    const size = ownerWindow?.getContentSize?.();
+    const x = point?.x;
+    const y = point?.y;
+    const target = point?.target;
+    if (
+      contents?.isDestroyed?.() ||
+      !Array.isArray(size) ||
+      size.length !== 2 ||
+      !["account-menu", "settings-item"].includes(target) ||
+      !Number.isInteger(x) ||
+      !Number.isInteger(y) ||
+      x < 0 ||
+      y < 0 ||
+      x >= size[0] ||
+      y >= size[1]
+    ) {
+      throw new Error("Codex Workflow rejected invalid Settings coordinates");
+    }
+    contents.sendInputEvent({ type: "mouseMove", x, y });
+    contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+    contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+    return true;
   });
   ipcMain.handle("codex-workflow:update:get", (event) => {
     assertTrustedSender(event);
@@ -267,7 +297,6 @@ if (!globalThis.__codexWorkflowMainInstalled) {
   app.whenReady().then(() => {
     registerPreload(session.defaultSession, "defaultSession");
     watchUpdateState();
-    watchLocalSource();
   });
   app.on("session-created", (createdSession) => registerPreload(createdSession, "session-created"));
   app.on("web-contents-created", (_event, contents) => {

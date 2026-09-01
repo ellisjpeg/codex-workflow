@@ -32,7 +32,7 @@ export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.
 export const supportedVersion = "26.820.60940";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.5.3";
+export const patchVersion = "0.5.4";
 
 const journalPath = join(runtimeRoot, "transaction.json");
 const backupsRoot = join(runtimeRoot, "backups");
@@ -203,7 +203,7 @@ export function preflightLiveUncached({ allowVersion = false } = {}) {
   }
 }
 
-export async function buildPatchedAsar(inputAsar, outputAsar, sourceFingerprint) {
+export async function buildPatchedAsar(inputAsar, outputAsar, sourceFingerprint, targetRuntimeRoot = runtimeRoot) {
   const work = mkdtempSync(join(tmpdir(), "codex-workflow-asar-"));
   const extracted = join(work, "src");
   try {
@@ -217,7 +217,7 @@ export async function buildPatchedAsar(inputAsar, outputAsar, sourceFingerprint)
       version: patchVersion,
       appVersion: pkg.version,
       originalMain,
-      runtimeRoot,
+      runtimeRoot: targetRuntimeRoot,
       source: sourceFingerprint,
     };
     writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
@@ -258,6 +258,7 @@ export function installRuntimeFiles() {
       hidePullRequests: true,
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
+      replaceHelpWithSettings: true,
     });
   }
 }
@@ -284,10 +285,6 @@ export function installUpdaterAgent() {
     <key>CODEX_WORKFLOW_ROOT</key><string>${escapeXml(runtimeRoot)}</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>WatchPaths</key>
-  <array>
-    <string>${escapeXml(join(sourceRoot, "package.json"))}</string>
-  </array>
   <key>StartInterval</key><integer>300</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>${escapeXml(join(runtimeRoot, "logs", "updater.log"))}</string>

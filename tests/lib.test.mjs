@@ -102,8 +102,8 @@ test("runtime data uses the current macOS user profile", () => {
   );
 });
 
-test("background updater watches local changes and checks every five minutes", () => {
-  assert.match(libSource, /<key>WatchPaths<\/key>/u);
+test("background updater checks published releases every five minutes", () => {
+  assert.doesNotMatch(libSource, /<key>WatchPaths<\/key>/u);
   assert.match(libSource, /<key>StartInterval<\/key><integer>300<\/integer>/u);
   assert.doesNotMatch(libSource, /<integer>21600<\/integer>/u);
 });

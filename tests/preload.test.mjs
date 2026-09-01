@@ -12,7 +12,7 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness({ initialSettings, setSettings, updateStatus } = {}) {
+async function createHarness({ initialSettings, installUpdateResult, setSettings, updateStatus, delayedRoots = false } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <header id="top-toolbar" class="flex h-toolbar draggable">
       <div id="toolbar-actions" class="@container flex items-center">
@@ -27,7 +27,12 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
       <div id="pull-requests" class="sidebar-item" style="display: block !important" aria-hidden="false" tabindex="3">
         <a href="/pull-requests"><span class="text-fade-truncate">Pull requests</span></a>
       </div>
-      <button id="account-menu-trigger" type="button" aria-haspopup="menu">Account</button>
+      <div class="min-w-0 flex-1">
+        <button id="account-menu-trigger" type="button" aria-haspopup="menu" aria-label="Open profile menu">Account</button>
+      </div>
+      <button id="sidebar-help-trigger" type="button" aria-haspopup="menu" aria-label="Open help menu" class="size-8 shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0">
+        <svg class="icon-sm" viewBox="0 0 20 20" fill="none"><path d="native-question" fill="currentColor"></path></svg>
+      </button>
     </aside>
     <div id="settings-shell">
       <nav aria-label="Settings">
@@ -46,6 +51,12 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
   });
   const { window } = dom;
   const { document } = window;
+  const delayedSidebar = document.querySelector(".app-shell-left-panel");
+  const delayedSettingsShell = document.querySelector("#settings-shell");
+  if (delayedRoots) {
+    delayedSidebar.remove();
+    delayedSettingsShell.remove();
+  }
   const observers = [];
   const intervalCalls = [];
   const timeoutCallbacks = new Map();
@@ -62,6 +73,7 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
       hidePullRequests: true,
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
+      replaceHelpWithSettings: true,
     };
   const ipcRenderer = {
     invoke(channel, patch) {
@@ -73,7 +85,18 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
         return Promise.resolve(updateStatus || { available: false });
       }
       if (channel === "codex-workflow:update:install") {
+        if (installUpdateResult !== undefined) return Promise.resolve(installUpdateResult);
         return Promise.resolve({ ...(updateStatus || {}), applying: true });
+      }
+      if (channel === "codex-workflow:settings:activate") {
+        if (patch.target === "account-menu") {
+          document.querySelector("#account-menu-trigger")?.click();
+          return Promise.resolve(true);
+        }
+        const nativeSettings = Array.from(document.querySelectorAll('[role="menuitem"]')).find((item) =>
+          !item.hasAttribute("data-codex-workflow-help-updates") && item.textContent.includes("Settings"));
+        nativeSettings?.click();
+        return Promise.resolve(Boolean(nativeSettings));
       }
       if (setSettings) return setSettings(patch);
       persistedSettings = { ...persistedSettings, ...patch, schemaVersion: 2 };
@@ -131,7 +154,7 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
   };
   Object.defineProperty(window, "innerWidth", { value: 1200, configurable: true });
 
-  const nav = document.querySelector("nav");
+  const nav = document.querySelector("nav") || delayedSettingsShell.querySelector("nav");
   nav.addEventListener("keydown", (event) => {
     if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
     const item = event.target.closest("[data-settings-panel-slug]");
@@ -180,6 +203,18 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
     observers,
     intervalCalls,
     timeoutCallbacks,
+    runNextTimeout: () => {
+      const entry = timeoutCallbacks.entries().next().value;
+      if (!entry) return false;
+      timeoutCallbacks.delete(entry[0]);
+      entry[1]();
+      return true;
+    },
+    mountDelayedRoots: () => {
+      document.body.prepend(delayedSidebar);
+      document.body.appendChild(delayedSettingsShell);
+      emitMutation(document.body, { addedNodes: [delayedSidebar, delayedSettingsShell] });
+    },
     emitMutation,
     deliveredMutationCallbacks: () => deliveredMutationCallbacks,
     deferAnimationFrames: () => {
@@ -188,6 +223,9 @@ async function createHarness({ initialSettings, setSettings, updateStatus } = {}
     flushAnimationFrame: () => {
       const callbacks = animationFrameCallbacks.splice(0);
       for (const callback of callbacks) callback();
+    },
+    resumeAnimationFrames: () => {
+      deferAnimationFrames = false;
     },
   };
 }
@@ -254,6 +292,31 @@ test("Workflow Update is absent when no newer Workflow release exists", async ()
   }
 });
 
+test("stale Workflow Update disappears when the main process reports no update", async () => {
+  const harness = await createHarness({
+    updateStatus: {
+      available: true,
+      installedVersion: "0.5.3",
+      availableVersion: "0.5.4",
+    },
+    installUpdateResult: { available: false },
+  });
+  try {
+    const { document, invokedChannels, window } = harness;
+    const pill = document.querySelector('[data-codex-workflow-update="true"]');
+    assert.ok(pill);
+
+    pill.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await flush();
+
+    assert.ok(invokedChannels.includes("codex-workflow:update:install"));
+    assert.equal(document.querySelector('[data-codex-workflow-update="true"]'), null);
+    assert.equal(document.querySelector('[data-codex-workflow-update-slot="true"]'), null);
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
 test("Workflow participates in native keyboard navigation and clones active styling", async () => {
   const harness = await createHarness();
   try {
@@ -308,11 +371,12 @@ test("Focused Interface exposes a native customize disclosure with unique switch
     assert.equal(document.querySelector("#codex-workflow-hidePullRequests-label").textContent, "Hide Pull requests");
     assert.equal(document.querySelector("#codex-workflow-hidePetMenuItem-label").textContent, "Hide pet controls");
     assert.equal(document.querySelector("#codex-workflow-hideInviteFriendMenuItem-label").textContent, "Hide friend invite");
+    assert.equal(document.querySelector("#codex-workflow-replaceHelpWithSettings-label").textContent, "Replace Help with Settings");
 
     const switches = Array.from(document.querySelectorAll('[role="switch"]'));
-    assert.equal(switches.length, 4);
-    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-labelledby"))).size, 4);
-    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-describedby"))).size, 4);
+    assert.equal(switches.length, 5);
+    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-labelledby"))).size, 5);
+    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-describedby"))).size, 5);
   } finally {
     harness.dom.window.close();
   }
@@ -345,7 +409,16 @@ test("legacy Efficiency mode state migrates to Focused Interface", async () => {
 });
 
 test("pet controls are hidden only in the account menu and restore exactly", async () => {
-  const harness = await createHarness();
+  const harness = await createHarness({
+    initialSettings: {
+      schemaVersion: 2,
+      focusedInterface: true,
+      hidePullRequests: true,
+      hidePetMenuItem: true,
+      hideInviteFriendMenuItem: true,
+      replaceHelpWithSettings: false,
+    },
+  });
   try {
     const { document, emitMutation, nav } = harness;
     nav.querySelector('[data-settings-panel-slug="workflow"]').click();
@@ -546,6 +619,247 @@ test("account menu items are hidden before the first paint after a deferred port
   }
 });
 
+test("Help and Settings swap preserves native behavior, alignment, dismissal, and restoration", async () => {
+  const harness = await createHarness();
+  try {
+    const { document, window, emitMutation, nav } = harness;
+    const accountTrigger = document.querySelector("#account-menu-trigger");
+    const shortcut = document.querySelector("#sidebar-help-trigger");
+    let accountMenu = null;
+    let helpMenu = null;
+    let settingsOpenCount = 0;
+
+    const unmountAccount = () => {
+      if (!accountMenu) return;
+      const removed = accountMenu;
+      accountMenu = null;
+      removed.remove();
+      emitMutation(document.body, { removedNodes: [removed] });
+    };
+    const unmountHelp = () => {
+      if (!helpMenu) return;
+      const removed = helpMenu;
+      helpMenu = null;
+      removed.remove();
+      emitMutation(document.body, { removedNodes: [removed] });
+    };
+    const mountAccount = () => {
+      accountMenu = document.createElement("div");
+      accountMenu.id = "native-account-menu";
+      accountMenu.setAttribute("role", "menu");
+      accountMenu.innerHTML = `
+        <button id="native-settings-item" role="menuitem">
+          <svg class="icon-xs" viewBox="0 0 20 20"><path d="native-settings"></path></svg>
+          <span>Settings</span><span id="native-settings-shortcut">⌘,</span>
+        </button>
+        <button role="menuitem">Log out</button>
+      `;
+      accountMenu.getBoundingClientRect = () => ({
+        width: 260, height: 300, left: 24, right: 284, top: 400, bottom: 700,
+      });
+      accountMenu.querySelector("#native-settings-item").addEventListener("click", () => {
+        settingsOpenCount += 1;
+        unmountAccount();
+      });
+      document.body.appendChild(accountMenu);
+      emitMutation(document.body, { addedNodes: [accountMenu] });
+    };
+    const mountHelp = () => {
+      helpMenu = document.createElement("div");
+      helpMenu.id = "native-help-menu";
+      helpMenu.setAttribute("role", "menu");
+      helpMenu.innerHTML = `
+        <div>What’s new</div>
+        <div role="separator"></div>
+        <button role="menuitem"><svg class="icon-xs"></svg><span>Set up Chrome extension</span></button>
+        <button role="menuitem"><svg class="icon-xs"></svg><span>Keyboard shortcuts</span></button>
+        <button role="menuitem"><svg class="icon-xs"></svg><span>Help</span></button>
+      `;
+      helpMenu.getBoundingClientRect = () => {
+        const values = helpMenu.style.translate.match(/-?\d+(?:\.\d+)?/gu)?.map(Number) || [];
+        const x = values[0] || 0;
+        const y = values[1] || 0;
+        return {
+          width: 320, height: 300, left: 56 + x, right: 376 + x,
+          top: 320 + y, bottom: 620 + y,
+        };
+      };
+      document.body.appendChild(helpMenu);
+      emitMutation(document.body, { addedNodes: [helpMenu] });
+    };
+    accountTrigger.addEventListener("click", () => {
+      if (accountMenu) unmountAccount();
+      else mountAccount();
+    });
+    accountTrigger.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown") return;
+      if (accountMenu) unmountAccount();
+      else mountAccount();
+    });
+    shortcut.addEventListener("click", () => {
+      if (helpMenu) unmountHelp();
+      else mountHelp();
+    });
+    shortcut.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown") return;
+      if (helpMenu) unmountHelp();
+      else mountHelp();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (helpMenu && !helpMenu.contains(event.target) && event.target !== shortcut) unmountHelp();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") unmountHelp();
+      if (event.key === "Escape" && accountMenu) unmountAccount();
+    });
+
+    assert.equal(shortcut.getAttribute("aria-label"), "Open settings");
+    assert.equal(shortcut.className, "size-8 shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0");
+    assert.equal(shortcut.querySelector("svg").className.baseVal, "icon-sm");
+    assert.equal(shortcut.querySelectorAll("svg path").length, 2);
+    const firstGearPath = shortcut.querySelector("svg path");
+    emitMutation(shortcut);
+    await flush();
+    assert.equal(shortcut.querySelector("svg path"), firstGearPath);
+
+    shortcut.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    shortcut.dispatchEvent(new window.MouseEvent("click", { bubbles: true, button: 0 }));
+    await flush();
+    assert.equal(settingsOpenCount, 1);
+    assert.equal(accountMenu, null);
+    assert.equal(helpMenu, null);
+
+    accountTrigger.click();
+    const helpUpdates = accountMenu.querySelector('[data-codex-workflow-help-updates="true"]');
+    assert.ok(helpUpdates);
+    assert.equal(helpUpdates.getAttribute("aria-label"), "Help & Updates");
+    assert.equal(helpUpdates.textContent.includes("Settings"), false);
+    assert.equal(helpUpdates.textContent.includes("Help & Updates"), true);
+    assert.equal(helpUpdates.querySelectorAll("svg path").length, 2);
+    assert.ok(Array.from(helpUpdates.querySelectorAll("*")).some((element) =>
+      element.style.getPropertyValue("display") === "none" && element.getAttribute("aria-hidden") === "true"));
+
+    helpUpdates.click();
+    await flush();
+    assert.equal(accountMenu, null);
+    assert.ok(helpMenu);
+    assert.equal(helpMenu.getBoundingClientRect().left, 24);
+    assert.equal(helpMenu.getBoundingClientRect().bottom, 700);
+    const back = helpMenu.querySelector('[data-codex-workflow-help-back="true"]');
+    assert.ok(back);
+    assert.equal(back.getAttribute("aria-label"), "Back");
+    assert.equal(back.querySelector("svg").className.baseVal, "icon-xs");
+    assert.equal(helpMenu.querySelectorAll('[data-codex-workflow-help-back="true"]').length, 1);
+
+    back.click();
+    await flush();
+    assert.equal(helpMenu, null);
+    assert.equal(accountMenu, null);
+
+    accountTrigger.click();
+    accountMenu.querySelector('[data-codex-workflow-help-updates="true"]').click();
+    await flush();
+    document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(helpMenu, null);
+
+    accountTrigger.click();
+    accountMenu.querySelector('[data-codex-workflow-help-updates="true"]').click();
+    await flush();
+    document.body.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    assert.equal(helpMenu, null);
+
+    accountTrigger.click();
+    accountMenu.querySelector('[data-codex-workflow-help-updates="true"]').click();
+    await flush();
+    accountTrigger.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    accountTrigger.click();
+    assert.equal(helpMenu, null);
+    assert.ok(accountMenu);
+    assert.ok(accountMenu.querySelector('[data-codex-workflow-help-updates="true"]'));
+
+    const activatingMenu = accountMenu;
+    harness.deferAnimationFrames();
+    shortcut.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    shortcut.dispatchEvent(new window.MouseEvent("click", { bubbles: true, button: 0 }));
+    harness.flushAnimationFrame();
+    assert.equal(activatingMenu.style.getPropertyValue("opacity"), "0");
+    assert.equal(activatingMenu.style.getPropertyPriority("opacity"), "important");
+    harness.flushAnimationFrame();
+    harness.flushAnimationFrame();
+    await flush();
+    harness.flushAnimationFrame();
+    harness.flushAnimationFrame();
+    harness.resumeAnimationFrames();
+    assert.equal(settingsOpenCount, 2);
+    assert.equal(accountMenu, null);
+
+    shortcut.focus();
+    shortcut.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    shortcut.dispatchEvent(new window.MouseEvent("click", { bubbles: true, detail: 0 }));
+    await flush();
+    assert.equal(settingsOpenCount, 3);
+    assert.equal(accountMenu, null);
+
+    accountTrigger.click();
+    assert.ok(accountMenu.querySelector('[data-codex-workflow-help-updates="true"]'));
+
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('button[aria-controls="codex-workflow-focused-options"]').click();
+    document.querySelector('[aria-labelledby="codex-workflow-replaceHelpWithSettings-label"]').click();
+    await flush();
+    assert.equal(shortcut.getAttribute("aria-label"), "Open help menu");
+    assert.equal(shortcut.querySelector("path").getAttribute("d"), "native-question");
+    assert.equal(accountMenu.querySelector("#native-settings-item").textContent.includes("Settings"), true);
+    assert.equal(accountMenu.querySelector("#native-settings-shortcut").style.display, "");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("account-menu remounts cannot reintroduce Settings before paint", async () => {
+  const harness = await createHarness();
+  try {
+    const { document, emitMutation } = harness;
+    document.querySelector("#account-menu-trigger").click();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <button id="remounted-settings" role="menuitem">
+        <svg class="icon-xs"><path d="native-settings"></path></svg>
+        <span>Settings</span><span>⌘,</span>
+      </button>
+      <button role="menuitem">Show pet</button>
+      <button role="menuitem">Invite a friend</button>
+    `;
+    document.body.appendChild(menu);
+    emitMutation(document.body, { addedNodes: [menu] });
+
+    const item = menu.querySelector("#remounted-settings");
+    let helpUpdates = menu.querySelector('[data-codex-workflow-help-updates="true"]');
+    assert.equal(item.style.getPropertyValue("display"), "none");
+    assert.equal(helpUpdates.textContent.includes("Settings"), false);
+    assert.equal(helpUpdates.textContent.includes("Help & Updates"), true);
+
+    const replacement = document.createElement("button");
+    replacement.id = "remounted-settings-replacement";
+    replacement.setAttribute("role", "menuitem");
+    replacement.innerHTML = `
+      <svg class="icon-xs"><path d="native-settings-remount"></path></svg>
+      <span>Settings</span><span>⌘,</span>
+    `;
+    item.replaceWith(replacement);
+    emitMutation(menu, { addedNodes: [replacement], removedNodes: [item] });
+    helpUpdates = menu.querySelector('[data-codex-workflow-help-updates="true"]');
+    assert.equal(item.isConnected, false);
+    assert.equal(replacement.style.getPropertyValue("display"), "none");
+    assert.equal(helpUpdates.textContent.includes("Settings"), false);
+    assert.equal(helpUpdates.textContent.includes("Help & Updates"), true);
+    assert.equal(menu.querySelectorAll('[data-codex-workflow-help-updates="true"]').length, 1);
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
 test("Focused Interface controls all configured interface effects", async () => {
   const harness = await createHarness();
   try {
@@ -712,6 +1026,45 @@ test("failed friend invite preference persistence restores its switch and menu e
   }
 });
 
+test("failed Help and Settings preference persistence restores both native surfaces", async () => {
+  const harness = await createHarness({
+    setSettings: () => Promise.reject(new Error("fixture write failed")),
+  });
+  try {
+    const { document, emitMutation, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('button[aria-controls="codex-workflow-focused-options"]').click();
+    document.querySelector("#account-menu-trigger").click();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <button id="rollback-settings-item" role="menuitem">
+        <svg class="icon-xs"><path d="native-settings"></path></svg>
+        <span>Settings</span><span>⌘,</span>
+      </button>
+    `;
+    document.body.appendChild(menu);
+    emitMutation(document.body, { addedNodes: [menu] });
+
+    const toggle = document.querySelector('[aria-labelledby="codex-workflow-replaceHelpWithSettings-label"]');
+    const shortcut = document.querySelector("#sidebar-help-trigger");
+    assert.equal(shortcut.getAttribute("aria-label"), "Open settings");
+    assert.ok(menu.querySelector('[data-codex-workflow-help-updates="true"]'));
+
+    toggle.click();
+    await flush();
+    assert.equal(toggle.getAttribute("aria-checked"), "true");
+    assert.equal(toggle.disabled, false);
+    assert.equal(shortcut.getAttribute("aria-label"), "Open settings");
+    const restoredHelp = menu.querySelector('[data-codex-workflow-help-updates="true"]');
+    assert.ok(restoredHelp);
+    assert.equal(restoredHelp.textContent.includes("Settings"), false);
+    assert.equal(menu.querySelector("#rollback-settings-item").style.getPropertyValue("display"), "none");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
 test("failed settings persistence rolls the switch and sidebar effect back", async () => {
   const harness = await createHarness({
     setSettings: () => Promise.reject(new Error("fixture write failed")),
@@ -753,6 +1106,25 @@ test("route and native settings changes restore the original view", async () => 
     window.history.replaceState({}, "", "#projects");
     assert.equal(document.querySelector('[data-codex-workflow-panel="true"]'), null);
     assert.equal(document.querySelector("#native-panel").style.display, "");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("root discovery remains active through a slow Codex route mount", async () => {
+  const harness = await createHarness({ delayedRoots: true });
+  try {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      assert.equal(harness.runNextTimeout(), true);
+    }
+    assert.equal(harness.runNextTimeout(), false);
+    assert.ok(harness.observers.some((observer) =>
+      observer.active && observer.target === harness.document.documentElement));
+    harness.mountDelayedRoots();
+    await flush();
+    assert.equal(harness.document.querySelector("#pull-requests").style.getPropertyValue("display"), "none");
+    assert.equal(harness.document.querySelector("#sidebar-help-trigger").getAttribute("aria-label"), "Open settings");
+    assert.ok(harness.nav.querySelector('[data-settings-panel-slug="workflow"]'));
   } finally {
     harness.dom.window.close();
   }

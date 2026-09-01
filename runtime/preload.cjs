@@ -19,8 +19,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     hidePullRequests: true,
     hidePetMenuItem: true,
     hideInviteFriendMenuItem: true,
+    replaceHelpWithSettings: true,
   };
-  const discoveryDelays = [16, 50, 150, 450, 1000];
+  const discoveryDelays = [16, 50, 150, 450, 1000, 2500, 5000, 10000];
   const discoveryRootSelector = ".app-shell-left-panel, nav[aria-label='Settings'], [data-settings-panel-slug='general-settings']";
   const state = {
     settings: { ...defaults },
@@ -57,6 +58,19 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     hiddenInviteFriendMenuItemCount: -1,
     loggedAmbiguousPetMenu: false,
     loggedAmbiguousInviteFriendMenu: false,
+    loggedAmbiguousSettingsMenu: false,
+    sidebarHelpButton: null,
+    sidebarHelpSnapshot: null,
+    pendingSettingsOpen: false,
+    settingsOpenScheduled: false,
+    settingsActivationInFlight: false,
+    suppressSidebarSettingsClick: false,
+    helpOpenRequested: false,
+    helpAnchorRect: null,
+    bypassSidebarHelp: false,
+    accountSettingsSnapshots: new WeakMap(),
+    accountSettingsOriginals: new WeakMap(),
+    helpPopupSnapshots: new WeakMap(),
     customizationOpen: false,
     customizationSection: null,
     settingsWriteInFlight: false,
@@ -137,6 +151,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       hideInviteFriendMenuItem: typeof value?.hideInviteFriendMenuItem === "boolean"
         ? value.hideInviteFriendMenuItem
         : defaults.hideInviteFriendMenuItem,
+      replaceHelpWithSettings: typeof value?.replaceHelpWithSettings === "boolean"
+        ? value.replaceHelpWithSettings
+        : defaults.replaceHelpWithSettings,
     };
   }
 
@@ -164,10 +181,46 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   function installDiscoveryHooks() {
     document.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || event.ctrlKey) return;
+      const shortcut = event.target instanceof Element
+        ? event.target.closest('[data-codex-workflow-settings-shortcut="true"]')
+        : null;
+      if (shortcut && !state.bypassSidebarHelp &&
+        state.settings.focusedInterface && state.settings.replaceHelpWithSettings) {
+        suppressNextSidebarSettingsClick();
+        activateSidebarSettingsShortcut(event);
+        return;
+      }
       const target = accountMenuTriggerFromEvent(event);
       if (target) beginAccountMenuDiscovery();
     }, true);
     document.addEventListener("click", (event) => {
+      const workflowTarget = event.target instanceof Element
+        ? event.target.closest([
+          '[data-codex-workflow-settings-shortcut="true"]',
+          '[data-codex-workflow-help-updates="true"]',
+          '[data-codex-workflow-help-back="true"]',
+        ].join(", "))
+        : null;
+      if (workflowTarget?.hasAttribute("data-codex-workflow-settings-shortcut")) {
+        if (state.suppressSidebarSettingsClick) {
+          state.suppressSidebarSettingsClick = false;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        activateSidebarSettingsShortcut(event);
+        return;
+      }
+      if (workflowTarget?.hasAttribute("data-codex-workflow-help-updates")) {
+        activateHelpUpdates(workflowTarget, event);
+        return;
+      }
+      if (workflowTarget?.hasAttribute("data-codex-workflow-help-back")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        requestAnimationFrame(closeNativeHelp);
+        return;
+      }
       const target = event.target instanceof Element
         ? event.target.closest("button, a, [role='button'], [role='menuitem']")
         : null;
@@ -179,6 +232,28 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       }
     }, true);
     document.addEventListener("keydown", (event) => {
+      if (["Enter", " "].includes(event.key) && event.target instanceof Element) {
+        const workflowTarget = event.target.closest([
+          '[data-codex-workflow-settings-shortcut="true"]',
+          '[data-codex-workflow-help-updates="true"]',
+          '[data-codex-workflow-help-back="true"]',
+        ].join(", "));
+        if (workflowTarget?.hasAttribute("data-codex-workflow-settings-shortcut")) {
+          suppressNextSidebarSettingsClick();
+          activateSidebarSettingsShortcut(event);
+          return;
+        }
+        if (workflowTarget?.hasAttribute("data-codex-workflow-help-updates")) {
+          activateHelpUpdates(workflowTarget, event);
+          return;
+        }
+        if (workflowTarget?.hasAttribute("data-codex-workflow-help-back")) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          requestAnimationFrame(closeNativeHelp);
+          return;
+        }
+      }
       if ((event.metaKey || event.ctrlKey) && event.key === ",") beginDiscovery();
       if (["Enter", " ", "ArrowDown"].includes(event.key) && accountMenuTriggerFromEvent(event)) {
         beginAccountMenuDiscovery();
@@ -190,9 +265,22 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const target = event.target instanceof Element
       ? event.target.closest("button, [role='button']")
       : null;
-    return target?.matches('[aria-haspopup="menu"]') && target.closest(".app-shell-left-panel")
-      ? target
-      : null;
+    return isAccountMenuTrigger(target) ? target : null;
+  }
+
+  function isAccountMenuTrigger(target) {
+    if (!(target instanceof HTMLElement) || !target.closest(".app-shell-left-panel")) return false;
+    if (target === state.sidebarHelpButton || target.hasAttribute("data-codex-workflow-settings-shortcut")) return false;
+    const label = compactText(target.getAttribute("aria-label") || target.textContent);
+    return label === "open profile menu" || label === "account";
+  }
+
+  function findAccountMenuTrigger() {
+    const root = state.sidebarRoot;
+    if (!root?.isConnected) return null;
+    const candidates = Array.from(root.querySelectorAll("button, [role='button']"))
+      .filter(isAccountMenuTrigger);
+    return candidates.length === 1 ? candidates[0] : null;
   }
 
   function scheduleWork(...kinds) {
@@ -203,17 +291,27 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.scheduled = false;
       const dirty = state.dirty;
       state.dirty = { discovery: false, sidebar: false, settings: false, toolbar: false };
-      if (dirty.discovery) discoverRoots();
-      if (dirty.sidebar) syncPullRequests();
-      if (dirty.settings) syncSettingsPage();
-      if (dirty.toolbar) syncUpdatePill();
+      try {
+        if (dirty.discovery) discoverRoots();
+        if (dirty.sidebar) {
+          syncPullRequests();
+          syncSidebarHelpShortcut();
+        }
+        if (dirty.settings) syncSettingsPage();
+        if (dirty.toolbar) syncUpdatePill();
+      } catch (error) {
+        log("error", `scheduled renderer sync failed: ${error?.stack || error}`);
+      }
     });
   }
 
   function beginAccountMenuDiscovery() {
     stopAccountMenuDiscovery();
     state.accountMenuDiscoveryObserver = new MutationObserver((mutations) => {
-      if (mutations.some(mutationMayContainAccountMenu)) syncAccountMenuItems();
+      if (mutations.some(mutationMayContainAccountMenu)) {
+        syncAccountMenuItems();
+        syncHelpPopup();
+      }
     });
     state.accountMenuDiscoveryObserver.observe(document.body, {
       attributes: true,
@@ -222,8 +320,13 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       childList: true,
       subtree: true,
     });
-    state.accountMenuDiscoveryTimer = setTimeout(stopAccountMenuDiscovery, 1500);
+    state.accountMenuDiscoveryTimer = setTimeout(() => {
+      state.pendingSettingsOpen = false;
+      state.settingsOpenScheduled = false;
+      stopAccountMenuDiscovery();
+    }, 1500);
     syncAccountMenuItems();
+    syncHelpPopup();
   }
 
   function stopAccountMenuDiscovery() {
@@ -283,7 +386,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
 
     if (state.discoveryAttempt >= discoveryDelays.length) {
-      stopDiscovery();
       return;
     }
     const delay = discoveryDelays[state.discoveryAttempt];
@@ -339,6 +441,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.updatePillSlot?.remove();
     state.updatePillSlot = null;
     state.updatePill = null;
+    restoreSidebarHelpShortcut();
     state.sidebarRoot = null;
   }
 
@@ -400,6 +503,85 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function disconnectObservers(observers) {
     for (const observer of observers) observer.disconnect();
+  }
+
+  const settingsGearPaths = [
+    "M9.99944 7.24939C11.5169 7.2495 12.7473 8.47995 12.7475 9.99744C12.7475 11.5151 11.517 12.7454 9.99944 12.7455C8.48176 12.7455 7.2514 11.5151 7.2514 9.99744C7.25155 8.47988 8.48186 7.24939 9.99944 7.24939ZM9.99944 8.57947C9.2164 8.57947 8.58163 9.21442 8.58148 9.99744C8.58148 10.7806 9.2163 11.4154 9.99944 11.4154C10.7825 11.4153 11.4174 10.7805 11.4174 9.99744C11.4173 9.21449 10.7824 8.57958 9.99944 8.57947Z",
+    "M10.6391 1.67517C11.2939 1.67532 11.8991 2.02577 12.226 2.59314L13.2485 4.36755H15.2963C15.9505 4.36758 16.555 4.71709 16.8823 5.28357L17.5219 6.39001C17.8489 6.95668 17.8481 7.65542 17.5209 8.22205L16.4975 9.99451L17.5239 11.7689C17.8519 12.3357 17.8521 13.0347 17.5248 13.6019L16.8862 14.7084C16.559 15.2747 15.9543 15.6243 15.3002 15.6244H13.2514L12.2299 17.3988C11.9029 17.9663 11.297 18.3168 10.642 18.3168L9.3637 18.3158C8.71064 18.3155 8.10718 17.9678 7.77972 17.4027L6.74847 15.6234L4.69964 15.6244C4.04558 15.6242 3.44087 15.2747 3.1137 14.7084L2.47503 13.6019C2.14791 13.0349 2.14836 12.3366 2.47601 11.7699L3.50237 9.99548L2.47894 8.22205C2.15175 7.65533 2.15174 6.95673 2.47894 6.39001L3.11761 5.28259C3.44458 4.71663 4.04894 4.36813 4.70257 4.36755L6.75042 4.36658L7.77581 2.59119C8.10301 2.02476 8.7076 1.67527 9.36175 1.67517H10.6391ZM9.36273 3.00623C9.1835 3.00623 9.01679 3.10199 8.92718 3.2572L7.82659 5.16345C7.63652 5.49253 7.28473 5.69529 6.90472 5.69568L4.70355 5.69763C4.52451 5.69782 4.3585 5.79355 4.26898 5.94861L3.6303 7.05505C3.54091 7.2102 3.54077 7.40192 3.6303 7.55701L4.73089 9.46326C4.92108 9.7929 4.92135 10.1992 4.73089 10.5287L3.62737 12.4359C3.5378 12.591 3.53792 12.7817 3.62737 12.9369L4.26605 14.0433C4.35567 14.1982 4.52067 14.2932 4.69964 14.2933L6.90276 14.2943C7.28242 14.2946 7.63335 14.497 7.82366 14.8256L8.93011 16.7357C9.01984 16.8905 9.18578 16.9857 9.36468 16.9857H10.642C10.8213 16.9857 10.987 16.89 11.0766 16.7347L12.1752 14.8275C12.3653 14.4975 12.7182 14.2943 13.0991 14.2943H15.3002C15.4794 14.2942 15.6452 14.1985 15.7348 14.0433L16.3725 12.9379C16.4621 12.7826 16.4621 12.5911 16.3725 12.4359L15.27 10.5287C15.1032 10.2404 15.0808 9.89331 15.2055 9.59021L15.269 9.46326L16.3696 7.55701C16.4591 7.40189 16.459 7.21022 16.3696 7.05505L15.7309 5.94861C15.6412 5.79363 15.4754 5.69863 15.2963 5.69861L13.0951 5.69763L12.9535 5.68884C12.6751 5.65158 12.4217 5.50519 12.2504 5.28259L12.1723 5.16443L11.0737 3.2572C10.9841 3.10175 10.8175 3.00525 10.6381 3.00525L9.36273 3.00623Z",
+  ];
+  const helpQuestionPaths = [
+    "M16.585 10C16.585 6.3632 13.6368 3.41504 10 3.41504C6.3632 3.41504 3.41504 6.3632 3.41504 10C3.41504 13.6368 6.3632 16.585 10 16.585C13.6368 16.585 16.585 13.6368 16.585 10ZM17.915 10C17.915 14.3713 14.3713 17.915 10 17.915C5.62867 17.915 2.08496 14.3713 2.08496 10C2.08496 5.62867 5.62867 2.08496 10 2.08496C14.3713 2.08496 17.915 5.62867 17.915 10Z",
+    "M9.81735 11.5962C9.3582 11.5962 9.08812 11.2829 9.08812 10.84V10.7643C9.08812 10.1269 9.41762 9.7056 10.055 9.33288C10.7519 8.91695 10.9625 8.64686 10.9625 8.1499C10.9625 7.62053 10.552 7.25321 9.9578 7.25321C9.42843 7.25321 9.07191 7.51249 8.89906 7.99325C8.76401 8.33896 8.52093 8.49021 8.19142 8.49021C7.76469 8.49021 7.5 8.22552 7.5 7.81499C7.5 7.58271 7.55402 7.37745 7.66205 7.17218C8.00776 6.45915 8.87205 6 10.0334 6C11.5675 6 12.5993 6.84267 12.5993 8.10128C12.5993 8.91695 12.2049 9.47333 11.4433 9.92167C10.7248 10.3376 10.5628 10.5699 10.4926 11.0236C10.4115 11.3856 10.2009 11.5962 9.81735 11.5962ZM9.82816 14C9.342 14 8.94767 13.6273 8.94767 13.1519C8.94767 12.6766 9.342 12.3038 9.82816 12.3038C10.3197 12.3038 10.714 12.6766 10.714 13.1519C10.714 13.6273 10.3197 14 9.82816 14Z",
+  ];
+
+  function applyFilledIcon(svg, paths) {
+    if (!(svg instanceof SVGElement)) return;
+    if (svg.getAttribute("viewBox") !== "0 0 20 20") svg.setAttribute("viewBox", "0 0 20 20");
+    if (svg.getAttribute("fill") !== "none") svg.setAttribute("fill", "none");
+    if (svg.hasAttribute("stroke")) svg.removeAttribute("stroke");
+    if (svg.hasAttribute("stroke-width")) svg.removeAttribute("stroke-width");
+    const children = Array.from(svg.children);
+    const matches = svg.childNodes.length === paths.length &&
+      children.length === paths.length &&
+      paths.every((d, index) => {
+        const path = children[index];
+        return path instanceof SVGElement &&
+          path.localName === "path" &&
+          path.getAttribute("d") === d &&
+          path.getAttribute("fill") === "currentColor" &&
+          path.getAttribute("fill-rule") === "evenodd" &&
+          path.getAttribute("clip-rule") === "evenodd";
+      });
+    if (matches) return;
+    svg.replaceChildren(...paths.map((d) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", "currentColor");
+      path.setAttribute("fill-rule", "evenodd");
+      path.setAttribute("clip-rule", "evenodd");
+      return path;
+    }));
+  }
+
+  function applyBackIcon(svg) {
+    if (!(svg instanceof SVGElement)) return;
+    const native = findNativeBackIcon();
+    if (native) {
+      const className = svg.getAttribute("class");
+      for (const attribute of Array.from(svg.attributes)) {
+        if (attribute.name !== "class") svg.removeAttribute(attribute.name);
+      }
+      for (const attribute of Array.from(native.attributes)) {
+        if (!["class", "id", "aria-label"].includes(attribute.name)) {
+          svg.setAttribute(attribute.name, attribute.value);
+        }
+      }
+      if (className != null) svg.setAttribute("class", className);
+      svg.innerHTML = native.innerHTML;
+      return;
+    }
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.replaceChildren(...["m12 19-7-7 7-7", "M19 12H5"].map((d) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      return path;
+    }));
+  }
+
+  function findNativeBackIcon() {
+    const root = state.sidebarRoot;
+    if (!root?.isConnected) return null;
+    const buttons = Array.from(root.querySelectorAll("button"));
+    const button = buttons.find((candidate) => {
+      const label = compactText(candidate.getAttribute("aria-label") || candidate.textContent);
+      return label === "back" || label === "go back";
+    });
+    return button?.querySelector("svg") || null;
   }
 
   function syncPullRequests() {
@@ -489,7 +671,147 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       });
   }
 
+  function syncSidebarHelpShortcut() {
+    const root = state.sidebarRoot;
+    if (!root?.isConnected) return;
+    const enabled = state.settings.focusedInterface && state.settings.replaceHelpWithSettings;
+    if (!enabled) {
+      restoreSidebarHelpShortcut();
+      return;
+    }
+
+    const owned = root.querySelector('[data-codex-workflow-settings-shortcut="true"]');
+    const native = Array.from(root.querySelectorAll('button[aria-label="Open help menu"]'));
+    const button = owned || (native.length === 1 ? native[0] : null);
+    if (!(button instanceof HTMLButtonElement)) return;
+    if (state.sidebarHelpButton && state.sidebarHelpButton !== button) restoreSidebarHelpShortcut();
+    if (!state.sidebarHelpSnapshot || state.sidebarHelpButton !== button) {
+      state.sidebarHelpSnapshot = {
+        innerHTML: button.innerHTML,
+        ariaLabel: button.getAttribute("aria-label"),
+        hadAriaLabel: button.hasAttribute("aria-label"),
+        title: button.getAttribute("title"),
+        hadTitle: button.hasAttribute("title"),
+      };
+      state.sidebarHelpButton = button;
+      button.addEventListener("click", onSidebarSettingsClick, true);
+    }
+    button.dataset.codexWorkflowSettingsShortcut = "true";
+    button.setAttribute("aria-label", "Open settings");
+    button.setAttribute("title", "Settings");
+    const svg = button.querySelector("svg");
+    if (svg) applyFilledIcon(svg, settingsGearPaths);
+  }
+
+  function restoreSidebarHelpShortcut() {
+    const button = state.sidebarHelpButton;
+    const snapshot = state.sidebarHelpSnapshot;
+    if (button?.isConnected && snapshot) {
+      button.innerHTML = snapshot.innerHTML;
+      if (snapshot.hadAriaLabel) button.setAttribute("aria-label", snapshot.ariaLabel || "");
+      else button.removeAttribute("aria-label");
+      if (snapshot.hadTitle) button.setAttribute("title", snapshot.title || "");
+      else button.removeAttribute("title");
+      button.removeAttribute("data-codex-workflow-settings-shortcut");
+      button.removeEventListener("click", onSidebarSettingsClick, true);
+    }
+    state.sidebarHelpButton = null;
+    state.sidebarHelpSnapshot = null;
+  }
+
+  function onSidebarSettingsClick(event) {
+    if (state.bypassSidebarHelp) return;
+    activateSidebarSettingsShortcut(event);
+  }
+
+  function suppressNextSidebarSettingsClick() {
+    state.suppressSidebarSettingsClick = true;
+    setTimeout(() => {
+      state.suppressSidebarSettingsClick = false;
+    }, 0);
+  }
+
+  function activateSidebarSettingsShortcut(event) {
+    if (state.bypassSidebarHelp) return;
+    if (!(state.settings.focusedInterface && state.settings.replaceHelpWithSettings)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    requestAnimationFrame(openNativeSettings);
+  }
+
+  function openNativeSettings() {
+    const items = findAccountSettingsItems().filter((item) => {
+      const menu = item.closest('[role="menu"]');
+      const rect = menu?.getBoundingClientRect();
+      return rect && rect.width > 0 && rect.height > 0;
+    });
+    if (items.length === 1) {
+      clickNativeSettingsItem(items[0]);
+      return;
+    }
+    if (items.length > 1) return;
+    const trigger = findAccountMenuTrigger();
+    if (!trigger) return;
+    state.pendingSettingsOpen = true;
+    beginAccountMenuDiscovery();
+    invokeTrustedSettingsClick(trigger, "account-menu").catch((error) => {
+      state.pendingSettingsOpen = false;
+      log("error", `Account menu activation failed: ${error?.message || error}`);
+      beginDiscovery();
+    });
+  }
+
+  function clickNativeSettingsItem(item) {
+    if (state.settingsActivationInFlight) return;
+    state.pendingSettingsOpen = false;
+    state.settingsOpenScheduled = false;
+    state.settingsActivationInFlight = true;
+    const menu = item.closest('[role="menu"]');
+    const menuOpacity = menu instanceof HTMLElement
+      ? {
+        value: menu.style.getPropertyValue("opacity"),
+        priority: menu.style.getPropertyPriority("opacity"),
+      }
+      : null;
+    if (menuOpacity) menu.style.setProperty("opacity", "0", "important");
+    const snapshot = state.accountSettingsSnapshots.get(item);
+    if (snapshot?.clone) restoreAccountSettingsItem(snapshot.clone);
+    const finish = () => {
+      state.settingsActivationInFlight = false;
+      if (menu instanceof HTMLElement && menu.isConnected) syncAccountSettingsItem();
+      if (menuOpacity && menu instanceof HTMLElement) {
+        if (menuOpacity.value) menu.style.setProperty("opacity", menuOpacity.value, menuOpacity.priority);
+        else menu.style.removeProperty("opacity");
+      }
+      if (menu instanceof HTMLElement && menu.isConnected) beginAccountMenuDiscovery();
+      else beginDiscovery();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!item.isConnected) {
+        finish();
+        return;
+      }
+      item.focus({ preventScroll: true });
+      invokeTrustedSettingsClick(item, "settings-item").catch((error) => {
+        log("error", `Settings activation failed: ${error?.message || error}`);
+      }).finally(() => {
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+      });
+    }));
+  }
+
+  function invokeTrustedSettingsClick(element, target) {
+    const rect = element.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    if (!(rect.width > 0 && rect.height > 0 && Number.isFinite(x) && Number.isFinite(y))) {
+      return Promise.reject(new Error(`Invalid ${target} target bounds`));
+    }
+    return ipcRenderer.invoke("codex-workflow:settings:activate", { target, x, y });
+  }
+
   function syncAccountMenuItems() {
+    const settingsReady = syncAccountSettingsItem();
     const petReady = syncAccountMenuItem({
       settingKey: "hidePetMenuItem",
       labels: ["show pet", "hide pet"],
@@ -508,7 +830,212 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       hiddenCountStateKey: "hiddenInviteFriendMenuItemCount",
       logLabel: "Friend invite menu",
     });
-    if (petReady && inviteReady) stopAccountMenuDiscovery();
+    const keepWatchingSettings = state.settings.focusedInterface &&
+      state.settings.replaceHelpWithSettings;
+    if (settingsReady && petReady && inviteReady && !state.helpOpenRequested && !keepWatchingSettings) {
+      stopAccountMenuDiscovery();
+    }
+  }
+
+  function syncAccountSettingsItem() {
+    const shouldReplace = state.settings.focusedInterface && state.settings.replaceHelpWithSettings;
+    const matching = findAccountSettingsItems();
+    const owned = Array.from(document.querySelectorAll('[data-codex-workflow-help-updates="true"]'));
+
+    if (state.settingsActivationInFlight) return true;
+
+    if (matching.length > 1) {
+      if (!state.loggedAmbiguousSettingsMenu) {
+        state.loggedAmbiguousSettingsMenu = true;
+        log("error", `Settings menu target ambiguous: ${matching.length} candidates`);
+      }
+      return false;
+    }
+    state.loggedAmbiguousSettingsMenu = false;
+
+    if (state.pendingSettingsOpen && matching.length === 1) {
+      clickNativeSettingsItem(matching[0]);
+      return true;
+    }
+
+    if (!shouldReplace) {
+      for (const item of owned) restoreAccountSettingsItem(item);
+      return true;
+    }
+    if (matching.length !== 1) return false;
+    transformAccountSettingsItem(matching[0], owned);
+    return true;
+  }
+
+  function transformAccountSettingsItem(item, ownedItems) {
+    if (!(item instanceof HTMLElement)) return;
+    let snapshot = state.accountSettingsSnapshots.get(item);
+    const menu = item.closest('[role="menu"]');
+    for (const owned of ownedItems) {
+      if (owned === snapshot?.clone) continue;
+      const original = state.accountSettingsOriginals.get(owned);
+      if (!original?.isConnected || original === item || (menu && owned.closest('[role="menu"]') === menu)) {
+        restoreAccountSettingsItem(owned);
+      }
+    }
+    if (!snapshot) {
+      snapshot = {
+        nativeHTML: item.innerHTML,
+        display: item.style.getPropertyValue("display"),
+        displayPriority: item.style.getPropertyPriority("display"),
+        hadAriaHidden: item.hasAttribute("aria-hidden"),
+        ariaHidden: item.getAttribute("aria-hidden"),
+        hadTabindex: item.hasAttribute("tabindex"),
+        tabindex: item.getAttribute("tabindex"),
+        clone: null,
+      };
+      state.accountSettingsSnapshots.set(item, snapshot);
+    }
+    if (!snapshot.clone?.isConnected || snapshot.nativeHTML !== item.innerHTML) {
+      snapshot.clone?.remove();
+      snapshot.nativeHTML = item.innerHTML;
+      snapshot.clone = item.cloneNode(true);
+      for (const element of [snapshot.clone, ...snapshot.clone.querySelectorAll("*")]) {
+        element.removeAttribute("id");
+        element.removeAttribute("aria-controls");
+        element.removeAttribute("aria-expanded");
+        element.removeAttribute("data-highlighted");
+        element.removeAttribute("data-state");
+      }
+      snapshot.clone.addEventListener("click", onHelpUpdatesClick, true);
+      snapshot.clone.addEventListener("keydown", onHelpUpdatesKeyDown, true);
+      state.accountSettingsOriginals.set(snapshot.clone, item);
+      item.after(snapshot.clone);
+    }
+    item.style.setProperty("display", "none", "important");
+    item.setAttribute("aria-hidden", "true");
+    item.setAttribute("tabindex", "-1");
+    const clone = snapshot.clone;
+    clone.dataset.codexWorkflowHelpUpdates = "true";
+    clone.setAttribute("aria-label", "Help & Updates");
+    clone.removeAttribute("aria-hidden");
+    const svg = clone.querySelector("svg");
+    if (svg) applyFilledIcon(svg, helpQuestionPaths);
+    const label = findExactTextNode(clone, ["settings", "help & updates"]);
+    if (label && label.nodeValue !== "Help & Updates") label.nodeValue = "Help & Updates";
+    const shortcut = findExactTextNode(clone, ["⌘,"]);
+    if (shortcut?.parentElement) {
+      shortcut.parentElement.style.setProperty("display", "none", "important");
+      shortcut.parentElement.setAttribute("aria-hidden", "true");
+    }
+  }
+
+  function restoreAccountSettingsItem(item) {
+    if (!(item instanceof HTMLElement)) return;
+    const original = state.accountSettingsOriginals.get(item);
+    const snapshot = original ? state.accountSettingsSnapshots.get(original) : null;
+    if (original && snapshot) {
+      item.remove();
+      if (snapshot.display) original.style.setProperty("display", snapshot.display, snapshot.displayPriority);
+      else original.style.removeProperty("display");
+      if (snapshot.hadAriaHidden) original.setAttribute("aria-hidden", snapshot.ariaHidden || "");
+      else original.removeAttribute("aria-hidden");
+      if (snapshot.hadTabindex) original.setAttribute("tabindex", snapshot.tabindex || "");
+      else original.removeAttribute("tabindex");
+      state.accountSettingsOriginals.delete(item);
+      state.accountSettingsSnapshots.delete(original);
+      return;
+    }
+    item.removeAttribute("data-codex-workflow-help-updates");
+  }
+
+  function onHelpUpdatesKeyDown(event) {
+    if (["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      event.currentTarget.click();
+    }
+  }
+
+  function onHelpUpdatesClick(event) {
+    activateHelpUpdates(event.currentTarget, event);
+  }
+
+  function activateHelpUpdates(item, event) {
+    if (!(state.settings.focusedInterface && state.settings.replaceHelpWithSettings)) return;
+    const menu = item instanceof Element ? item.closest('[role="menu"]') : null;
+    const labelledBy = menu instanceof HTMLElement ? menu.getAttribute("aria-labelledby") : null;
+    const labelledTrigger = labelledBy ? document.getElementById(labelledBy) : null;
+    const accountTrigger = labelledTrigger instanceof HTMLElement &&
+      labelledTrigger.matches("button, [role='button']") &&
+      labelledTrigger.closest(".app-shell-left-panel")
+      ? labelledTrigger
+      : findAccountMenuTrigger();
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const helpTrigger = findSidebarHelpShortcut();
+    if (!(menu instanceof HTMLElement) || !accountTrigger || !helpTrigger) return;
+    const rect = menu.getBoundingClientRect();
+    state.helpAnchorRect = { left: rect.left, bottom: rect.bottom };
+    state.helpOpenRequested = true;
+    requestAnimationFrame(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape",
+        code: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }));
+      requestAnimationFrame(() => openHelpAfterAccountMenuCloses(menu));
+    });
+  }
+
+  function openHelpAfterAccountMenuCloses(menu, attempt = 0) {
+    if (menu.isConnected) {
+      if (attempt >= 60) {
+        state.helpOpenRequested = false;
+        return;
+      }
+      requestAnimationFrame(() => openHelpAfterAccountMenuCloses(menu, attempt + 1));
+      return;
+    }
+    requestAnimationFrame(() => requestAnimationFrame(openHelpAfterAccountFocusSettles));
+  }
+
+  function openHelpAfterAccountFocusSettles() {
+    openNativeHelp();
+    beginAccountMenuDiscovery();
+    requestAnimationFrame(syncRequestedHelpPopup);
+  }
+
+  function syncRequestedHelpPopup(attempt = 0) {
+    syncHelpPopup();
+    if (!state.helpOpenRequested) return;
+    if (attempt >= 20) {
+      state.helpOpenRequested = false;
+      return;
+    }
+    requestAnimationFrame(() => syncRequestedHelpPopup(attempt + 1));
+  }
+
+  function openNativeHelp() {
+    const button = findSidebarHelpShortcut();
+    if (!button) return;
+    state.bypassSidebarHelp = true;
+    try {
+      openNativeMenuTrigger(button);
+    } finally {
+      state.bypassSidebarHelp = false;
+    }
+  }
+
+  function openNativeMenuTrigger(button) {
+    button.focus({ preventScroll: true });
+    button.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "ArrowDown",
+      composed: true,
+      key: "ArrowDown",
+    }));
+  }
+
+  function findSidebarHelpShortcut() {
+    const button = state.sidebarRoot?.querySelector('[data-codex-workflow-settings-shortcut="true"]');
+    return button instanceof HTMLButtonElement ? button : null;
   }
 
   function syncAccountMenuItem({
@@ -599,14 +1126,30 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   function findAccountMenuItems(expectedLabels) {
     const matches = [];
     for (const menu of document.querySelectorAll('[role="menu"]')) {
-      if (!(menu instanceof HTMLElement) || menu.closest("[cmdk-root]")) continue;
+      if (!isAccountMenu(menu)) continue;
       const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
-      if (!items.some((item) => menuItemHasLabel(item, "settings"))) continue;
       for (const item of items) {
         if (expectedLabels.some((label) => menuItemHasLabel(item, label))) matches.push(item);
       }
     }
     return matches;
+  }
+
+  function findAccountSettingsItems() {
+    const matches = [];
+    for (const menu of document.querySelectorAll('[role="menu"]')) {
+      if (!isAccountMenu(menu)) continue;
+      for (const item of menu.querySelectorAll('[role="menuitem"]')) {
+        if (!item.hasAttribute("data-codex-workflow-help-updates") && menuItemHasLabel(item, "settings")) matches.push(item);
+      }
+    }
+    return matches;
+  }
+
+  function isAccountMenu(menu) {
+    if (!(menu instanceof HTMLElement) || menu.closest("[cmdk-root]")) return false;
+    return Array.from(menu.querySelectorAll('[role="menuitem"]')).some((item) =>
+      item.hasAttribute("data-codex-workflow-help-updates") || menuItemHasLabel(item, "settings"));
   }
 
   function menuItemHasLabel(element, expected) {
@@ -616,6 +1159,156 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       if (compactText(walker.currentNode.nodeValue) === expected) return true;
     }
     return false;
+  }
+
+  function findExactTextNode(element, labels) {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      if (labels.includes(compactText(walker.currentNode.nodeValue))) return walker.currentNode;
+    }
+    return null;
+  }
+
+  function syncHelpPopup() {
+    const enabled = state.settings.focusedInterface && state.settings.replaceHelpWithSettings;
+    if (!enabled) {
+      restoreOwnedHelpPopups();
+      state.helpOpenRequested = false;
+      state.helpAnchorRect = null;
+      return;
+    }
+    const popups = findHelpPopups();
+    if (popups.length !== 1) return;
+    const popup = popups[0];
+    if (!state.helpOpenRequested && !popup.hasAttribute("data-codex-workflow-help-popup")) return;
+    decorateHelpPopup(popup);
+    state.helpOpenRequested = false;
+  }
+
+  function findHelpPopups() {
+    return Array.from(document.querySelectorAll('[role="menu"]')).filter((menu) => {
+      if (!(menu instanceof HTMLElement) || isAccountMenu(menu) || menu.closest("[cmdk-root]")) return false;
+      const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+      const hasWhatsNew = Boolean(findExactTextNode(menu, ["what's new", "what’s new"]));
+      return hasWhatsNew &&
+        items.some((item) => menuItemHasLabel(item, "keyboard shortcuts")) &&
+        items.some((item) => menuItemHasLabel(item, "help"));
+    });
+  }
+
+  function decorateHelpPopup(popup) {
+    if (!state.helpPopupSnapshots.has(popup)) {
+      state.helpPopupSnapshots.set(popup, {
+        translate: popup.style.getPropertyValue("translate"),
+        translatePriority: popup.style.getPropertyPriority("translate"),
+        hadTranslate: popup.style.getPropertyValue("translate") !== "",
+      });
+      popup.dataset.codexWorkflowHelpPopup = "true";
+    }
+    if (!popup.querySelector('[data-codex-workflow-help-back="true"]')) {
+      insertHelpBackItem(popup);
+    }
+    alignHelpPopup(popup);
+    requestAnimationFrame(() => {
+      if (popup.isConnected && popup.hasAttribute("data-codex-workflow-help-popup")) {
+        alignHelpPopup(popup);
+      }
+    });
+  }
+
+  function alignHelpPopup(popup) {
+    const anchor = state.helpAnchorRect;
+    if (!anchor) return;
+    const rect = popup.getBoundingClientRect();
+    const currentX = Number(popup.dataset.codexWorkflowHelpTranslateX || 0);
+    const currentY = Number(popup.dataset.codexWorkflowHelpTranslateY || 0);
+    const nextX = currentX + anchor.left - rect.left;
+    const nextY = currentY + anchor.bottom - rect.bottom;
+    if (![nextX, nextY].every(Number.isFinite)) return;
+    const translate = `${nextX}px ${nextY}px`;
+    const translateX = String(nextX);
+    const translateY = String(nextY);
+    if (popup.style.getPropertyValue("translate") !== translate) {
+      popup.style.setProperty("translate", translate);
+    }
+    if (popup.dataset.codexWorkflowHelpTranslateX !== translateX) {
+      popup.dataset.codexWorkflowHelpTranslateX = translateX;
+    }
+    if (popup.dataset.codexWorkflowHelpTranslateY !== translateY) {
+      popup.dataset.codexWorkflowHelpTranslateY = translateY;
+    }
+  }
+
+  function insertHelpBackItem(popup) {
+    const template = Array.from(popup.querySelectorAll('[role="menuitem"]'))
+      .find((item) => menuItemHasLabel(item, "keyboard shortcuts"));
+    if (!(template instanceof HTMLElement)) return;
+    const back = template.cloneNode(true);
+    for (const element of [back, ...back.querySelectorAll("*")]) {
+      element.removeAttribute("id");
+      element.removeAttribute("aria-controls");
+      element.removeAttribute("aria-expanded");
+      element.removeAttribute("data-highlighted");
+      element.removeAttribute("data-state");
+    }
+    back.dataset.codexWorkflowHelpBack = "true";
+    back.setAttribute("aria-label", "Back");
+    if (back instanceof HTMLButtonElement) back.type = "button";
+    const label = findExactTextNode(back, ["keyboard shortcuts"]);
+    if (label) label.nodeValue = "Back";
+    const svg = back.querySelector("svg");
+    if (svg) applyBackIcon(svg);
+    back.addEventListener("click", onHelpBackClick, true);
+    back.addEventListener("keydown", onHelpBackKeyDown, true);
+
+    const separatorTemplate = popup.querySelector('[role="separator"]');
+    const separator = separatorTemplate?.cloneNode(true) || null;
+    if (separator instanceof HTMLElement) {
+      separator.removeAttribute("id");
+      separator.dataset.codexWorkflowHelpBackSeparator = "true";
+      popup.prepend(separator);
+    }
+    popup.prepend(back);
+  }
+
+  function onHelpBackKeyDown(event) {
+    if (["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      event.currentTarget.click();
+    }
+  }
+
+  function onHelpBackClick(event) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    requestAnimationFrame(closeNativeHelp);
+  }
+
+  function closeNativeHelp() {
+    state.helpOpenRequested = false;
+    document.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      code: "Escape",
+      bubbles: true,
+      cancelable: true,
+    }));
+  }
+
+  function restoreOwnedHelpPopups() {
+    for (const popup of document.querySelectorAll('[data-codex-workflow-help-popup="true"]')) {
+      const snapshot = state.helpPopupSnapshots.get(popup);
+      if (snapshot?.hadTranslate) {
+        popup.style.setProperty("translate", snapshot.translate, snapshot.translatePriority);
+      } else {
+        popup.style.removeProperty("translate");
+      }
+      popup.querySelector('[data-codex-workflow-help-back="true"]')?.remove();
+      popup.querySelector('[data-codex-workflow-help-back-separator="true"]')?.remove();
+      popup.removeAttribute("data-codex-workflow-help-translate-x");
+      popup.removeAttribute("data-codex-workflow-help-translate-y");
+      popup.removeAttribute("data-codex-workflow-help-popup");
+      state.helpPopupSnapshots.delete(popup);
+    }
   }
 
   function syncSettingsPage() {
@@ -875,7 +1568,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const header = div("flex justify-between gap-4 min-h-toolbar items-center pb-1.5");
     const titleStack = div("flex min-w-0 flex-1 flex-col gap-0.5");
     const title = div("font-medium text-default text-base");
-    title.textContent = "Hidden items";
+    title.textContent = "Focused Interface options";
     titleStack.appendChild(title);
     header.appendChild(titleStack);
 
@@ -897,6 +1590,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         key: "hideInviteFriendMenuItem",
         label: "Hide friend invite",
         description: "Remove Invite a friend from the account menu.",
+        requiresFocusedInterface: true,
+      }),
+      renderSettingRow({
+        key: "replaceHelpWithSettings",
+        label: "Replace Help with Settings",
+        description: "Use a Settings shortcut in the sidebar and move Help & Updates to the account menu.",
         requiresFocusedInterface: true,
       }),
     );
@@ -1035,7 +1734,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function syncFocusedInterfaceEffects() {
     syncPullRequests();
+    syncSidebarHelpShortcut();
     syncAccountMenuItems();
+    syncHelpPopup();
   }
 
   function muteNativeActiveNav(nav) {
@@ -1207,7 +1908,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.updateApplying = true;
       syncUpdatePill();
       try {
-        await ipcRenderer.invoke("codex-workflow:update:install");
+        const status = await ipcRenderer.invoke("codex-workflow:update:install");
+        state.updateStatus = status || { available: false };
+        state.updateApplying = Boolean(status?.applying);
+        syncUpdatePill();
       } catch (error) {
         state.updateApplying = false;
         syncUpdatePill();
