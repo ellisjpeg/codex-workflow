@@ -32,7 +32,9 @@ export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.
 export const supportedVersion = "26.820.60940";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.5.8";
+export const patchVersion = "0.5.9";
+export const adhocEntitlementsPath = join(sourceRoot, "scripts", "adhoc.entitlements");
+export const appleSignatureBackupName = "AppleSignature";
 
 const journalPath = join(runtimeRoot, "transaction.json");
 const backupsRoot = join(runtimeRoot, "backups");
@@ -91,10 +93,85 @@ export function setPlistValue(keyPath, value, targetPlist = infoPlistPath) {
   execFileSync("/usr/libexec/PlistBuddy", ["-c", `Set :${keyPath} ${value}`, targetPlist]);
 }
 
-export function signatureIsValid() {
-  return spawnSync("codesign", ["--verify", "--deep", "--strict", appRoot], {
+export function signatureIsValid(targetApp = appRoot) {
+  return spawnSync("codesign", ["--verify", "--deep", "--strict", targetApp], {
     stdio: "ignore",
   }).status === 0;
+}
+
+export function resignPatchedAppArgs(targetApp = appRoot) {
+  return [
+    "--force",
+    "--deep",
+    "--sign",
+    "-",
+    "--options",
+    "runtime",
+    "--entitlements",
+    adhocEntitlementsPath,
+    targetApp,
+  ];
+}
+
+export function stashOpenAIProvisionProfile(targetApp = appRoot) {
+  const profile = join(targetApp, "Contents", "embedded.provisionprofile");
+  const stashed = join(targetApp, "Contents", "embedded.provisionprofile.openai");
+  if (existsSync(profile)) renameSync(profile, stashed);
+}
+
+export function backupAppleSignature(backupDir, targetApp = appRoot) {
+  const dest = join(backupDir, appleSignatureBackupName);
+  if (existsSync(join(dest, "_CodeSignature", "CodeResources"))) return dest;
+  mkdirSync(dest, { recursive: true });
+  const srcSig = join(targetApp, "Contents", "_CodeSignature");
+  if (existsSync(join(srcSig, "CodeResources"))) {
+    cpSync(srcSig, join(dest, "_CodeSignature"), { recursive: true });
+  }
+  for (const name of ["embedded.provisionprofile", "embedded.provisionprofile.openai"]) {
+    const src = join(targetApp, "Contents", name);
+    if (existsSync(src) && !existsSync(join(dest, "embedded.provisionprofile"))) {
+      copyFileDurably(src, join(dest, "embedded.provisionprofile"));
+    }
+  }
+  const contentsCodeResources = join(targetApp, "Contents", "CodeResources");
+  if (existsSync(contentsCodeResources)) {
+    copyFileDurably(contentsCodeResources, join(dest, "Contents-CodeResources"));
+  }
+  return dest;
+}
+
+export function restoreAppleSignature(backupDir, targetApp = appRoot) {
+  const signatureBackup = join(backupDir, appleSignatureBackupName);
+  const srcSig = join(signatureBackup, "_CodeSignature");
+  if (!existsSync(join(srcSig, "CodeResources"))) return false;
+  const destSig = join(targetApp, "Contents", "_CodeSignature");
+  rmSync(destSig, { recursive: true, force: true });
+  cpSync(srcSig, destSig, { recursive: true });
+  const srcContentsCodeResources = join(signatureBackup, "Contents-CodeResources");
+  if (existsSync(srcContentsCodeResources)) {
+    copyFileDurably(srcContentsCodeResources, join(targetApp, "Contents", "CodeResources"));
+  }
+  const srcProfile = join(signatureBackup, "embedded.provisionprofile");
+  if (existsSync(srcProfile)) {
+    copyFileDurably(srcProfile, join(targetApp, "Contents", "embedded.provisionprofile"));
+  }
+  const stashed = join(targetApp, "Contents", "embedded.provisionprofile.openai");
+  if (existsSync(stashed)) rmSync(stashed, { force: true });
+  return true;
+}
+
+export function resignPatchedApp(targetApp = appRoot) {
+  if (!existsSync(adhocEntitlementsPath)) {
+    throw new Error("Workflow ad-hoc entitlements file is missing");
+  }
+  stashOpenAIProvisionProfile(targetApp);
+  const result = spawnSync("codesign", resignPatchedAppArgs(targetApp), { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || "codesign failed").trim() || "codesign failed");
+  }
+  if (!signatureIsValid(targetApp)) {
+    throw new Error("Ad-hoc re-sign did not produce a valid application signature");
+  }
 }
 
 export function appIsRunning() {
@@ -345,6 +422,7 @@ export function ensureSourceBackup(source) {
     if (!manifest || manifest.source?.asarSha256 !== source.asarSha256 || !existsSync(backupAsar) || !existsSync(backupPlist)) {
       throw new Error(`Source backup is incomplete or does not match ${formatFingerprint(source)}`);
     }
+    backupAppleSignature(backupDir);
     return resolveSourceBackup(source);
   }
   assertNoSymlink(backupsRoot, "backup root");
@@ -353,6 +431,7 @@ export function ensureSourceBackup(source) {
   assertManagedDirectory(backupsRoot, backupDir, "source backup");
   copyFileDurably(asarPath, backupAsar);
   copyFileDurably(infoPlistPath, backupPlist);
+  backupAppleSignature(backupDir);
   const manifest = {
     schemaVersion: 1,
     createdAt: new Date().toISOString(),
@@ -385,6 +464,47 @@ export function resolveSourceBackup(source) {
   return { backupDir, backupAsar, backupPlist, manifestPath, manifest };
 }
 
+function snapshotBundleSignature(transactionDir, targetApp = appRoot) {
+  const dest = join(transactionDir, "rollback-AppleSignature");
+  const srcSig = join(targetApp, "Contents", "_CodeSignature");
+  const hadBundleSignature = existsSync(join(srcSig, "CodeResources"));
+  mkdirSync(dest, { recursive: true });
+  if (hadBundleSignature) {
+    cpSync(srcSig, join(dest, "_CodeSignature"), { recursive: true });
+  }
+  for (const name of ["embedded.provisionprofile", "embedded.provisionprofile.openai"]) {
+    const src = join(targetApp, "Contents", name);
+    if (existsSync(src)) copyFileDurably(src, join(dest, name));
+  }
+  const contentsCodeResources = join(targetApp, "Contents", "CodeResources");
+  if (existsSync(contentsCodeResources)) {
+    copyFileDurably(contentsCodeResources, join(dest, "Contents-CodeResources"));
+  }
+  return { rollbackAppleSignature: dest, hadBundleSignature };
+}
+
+function restoreBundleSignatureSnapshot(snapshotDir, hadBundleSignature, targetApp = appRoot) {
+  const srcSig = join(snapshotDir, "_CodeSignature");
+  if (hadBundleSignature && !existsSync(join(srcSig, "CodeResources"))) {
+    throw new Error("Workflow patch signature rollback snapshot is incomplete");
+  }
+  const contents = join(targetApp, "Contents");
+  const destSig = join(contents, "_CodeSignature");
+  rmSync(destSig, { recursive: true, force: true });
+  if (hadBundleSignature) cpSync(srcSig, destSig, { recursive: true });
+  rmSync(join(contents, "CodeResources"), { force: true });
+  const srcContentsCodeResources = join(snapshotDir, "Contents-CodeResources");
+  if (existsSync(srcContentsCodeResources)) {
+    copyFileDurably(srcContentsCodeResources, join(contents, "CodeResources"));
+  }
+  for (const name of ["embedded.provisionprofile", "embedded.provisionprofile.openai"]) {
+    rmSync(join(contents, name), { force: true });
+    const src = join(snapshotDir, name);
+    if (existsSync(src)) copyFileDurably(src, join(contents, name));
+  }
+  return true;
+}
+
 export function createTransaction() {
   mkdirSync(runtimeRoot, { recursive: true });
   if (existsSync(journalPath)) {
@@ -398,6 +518,7 @@ export function createTransaction() {
   try {
     copyFileDurably(asarPath, rollbackAsar);
     copyFileDurably(infoPlistPath, rollbackPlist);
+    const signatureSnapshot = snapshotBundleSignature(transactionDir);
     const runtimeFiles = managedRuntimePaths.map((relativePath) => {
       const target = join(runtimeRoot, relativePath);
       const rollback = join(transactionDir, "rollback-runtime", relativePath);
@@ -414,6 +535,7 @@ export function createTransaction() {
       rollbackAsar,
       rollbackPlist,
       runtimeFiles,
+      ...signatureSnapshot,
     };
     writeJsonAtomic(journalPath, journal);
     return journal;
@@ -455,6 +577,13 @@ export function transactionRecoveryStatus(journal) {
   }
   const missing = [journal.rollbackAsar, journal.rollbackPlist]
     .filter((target) => !existsSync(target));
+  if (journal.rollbackAppleSignature !== undefined) {
+    if (!existsSync(journal.rollbackAppleSignature)) missing.push(journal.rollbackAppleSignature);
+    if (journal.hadBundleSignature
+      && !existsSync(join(journal.rollbackAppleSignature, "_CodeSignature", "CodeResources"))) {
+      missing.push(join(journal.rollbackAppleSignature, "_CodeSignature", "CodeResources"));
+    }
+  }
   for (const entry of journal.runtimeFiles || []) {
     if (!entry.existed) continue;
     const rollback = join(journal.transactionDir, "rollback-runtime", entry.relativePath);
@@ -475,6 +604,7 @@ export function recoverTransaction(journal, {
   targetAsar = asarPath,
   targetPlist = infoPlistPath,
   targetRuntimeRoot = runtimeRoot,
+  targetApp = targetAsar === asarPath ? appRoot : null,
   verifyRollback = () => preflight(journal.rollbackAsar, journal.rollbackPlist, { allowVersion: true }),
   verifyRestored = () => {
     if (targetAsar === asarPath && targetPlist === infoPlistPath) {
@@ -491,6 +621,9 @@ export function recoverTransaction(journal, {
   verifyRollback();
   restoreFilePair(journal.rollbackAsar, journal.rollbackPlist, targetAsar, targetPlist);
   restoreRuntimeFiles(journal, targetRuntimeRoot);
+  if (journal.rollbackAppleSignature !== undefined && targetApp !== null) {
+    restoreBundleSignatureSnapshot(journal.rollbackAppleSignature, journal.hadBundleSignature, targetApp);
+  }
   verifyRestored();
   finish(journal);
   return { recovered: true, id: journal.id, phase: journal.phase };
@@ -645,16 +778,26 @@ export function validateTransactionJournal(journal) {
   if (!/^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(journal.id)) {
     throw new Error("Workflow patch transaction journal has an invalid id");
   }
-  if (!["prepared", "runtime-installed", "asar-replaced", "plist-replaced", "asar-restored", "plist-restored"].includes(journal.phase)) {
+  if (!["prepared", "runtime-installed", "asar-replaced", "plist-replaced", "signed", "asar-restored", "plist-restored"].includes(journal.phase)) {
     throw new Error("Workflow patch transaction journal has an invalid phase");
   }
   const expectedDir = join(runtimeRoot, "transactions", journal.id);
   const expectedAsar = join(expectedDir, "rollback.asar");
   const expectedPlist = join(expectedDir, "rollback.Info.plist");
+  const expectedSignature = join(expectedDir, "rollback-AppleSignature");
+  const hasSignaturePath = Object.hasOwn(journal, "rollbackAppleSignature");
+  const hasSignatureFlag = Object.hasOwn(journal, "hadBundleSignature");
+  if (hasSignaturePath !== hasSignatureFlag
+    || (hasSignaturePath && (typeof journal.rollbackAppleSignature !== "string"
+      || typeof journal.hadBundleSignature !== "boolean"))) {
+    throw new Error("Workflow patch transaction journal has invalid signature rollback metadata");
+  }
   if (
     resolve(journal.transactionDir) !== resolve(expectedDir) ||
     resolve(journal.rollbackAsar) !== resolve(expectedAsar) ||
-    resolve(journal.rollbackPlist) !== resolve(expectedPlist)
+    resolve(journal.rollbackPlist) !== resolve(expectedPlist) ||
+    (hasSignaturePath &&
+      resolve(journal.rollbackAppleSignature) !== resolve(expectedSignature))
   ) {
     throw new Error("Workflow patch transaction journal contains unsafe paths");
   }
@@ -667,6 +810,12 @@ export function validateTransactionJournal(journal) {
   for (const target of [journal.rollbackAsar, journal.rollbackPlist]) {
     assertNoSymlink(target, "transaction rollback file");
     if (existsSync(target)) assertManagedFile(journal.transactionDir, target, "transaction rollback file");
+  }
+  if (hasSignaturePath) {
+    assertNoSymlink(journal.rollbackAppleSignature, "signature rollback directory");
+    if (existsSync(journal.rollbackAppleSignature)) {
+      assertManagedDirectory(journal.transactionDir, journal.rollbackAppleSignature, "signature rollback directory");
+    }
   }
   if (journal.runtimeFiles !== undefined) {
     if (!Array.isArray(journal.runtimeFiles)) {

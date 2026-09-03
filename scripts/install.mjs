@@ -9,7 +9,9 @@ import {
   buildPatchedAsar,
   completeTransaction,
   createTransaction,
+  backupAppleSignature,
   ensureSourceBackup,
+  resignPatchedApp,
   headerHash,
   infoPlistPath,
   installRuntimeFiles,
@@ -63,6 +65,7 @@ if (!source?.asarSha256 || !source?.headerSha256 || !source?.version || !source?
 
 if (alreadyPatched) resolveSourceBackup(source);
 else if (!dryRun) ensureSourceBackup(source);
+if (!dryRun) backupAppleSignature(resolveSourceBackup(source).backupDir);
 
 const warnings = [
   ...current.signatureIsValid ? [] : ["pre-existing-app-signature-invalid"],
@@ -105,6 +108,8 @@ try {
   transaction = setTransactionPhase(transaction, "asar-replaced");
   atomicReplace(patchedPlist, infoPlistPath);
   transaction = setTransactionPhase(transaction, "plist-replaced");
+  resignPatchedApp();
+  transaction = setTransactionPhase(transaction, "signed");
 
   const installed = preflightLiveUncached({ allowVersion });
   if (installed.pkg.main !== "workflow-loader.cjs" || installed.pkg.__codexWorkflow?.source?.asarSha256 !== source.asarSha256) {

@@ -2,6 +2,11 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.9 - 2026-09-02
+
+- After replacing ASAR and Info.plist, ad-hoc re-sign ChatGPT/Codex so macOS will launch the patched app.
+- Keep a copy of the original Apple signature and restore it on uninstall.
+
 ## 0.5.8 - 2026-09-01
 
 - Open Settings from the sidebar gear through Codex's native `Cmd+,` command, removing the profile-menu click race and synthetic pointer hover.

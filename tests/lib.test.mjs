@@ -5,10 +5,14 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  adhocEntitlementsPath,
   atomicReplace,
+  backupAppleSignature,
   headerHash,
   preflight,
   recoverTransaction,
+  resignPatchedAppArgs,
+  restoreAppleSignature,
   restoreFilePair,
   restoreRuntimeFiles,
   runtimeRoot,
@@ -65,6 +69,56 @@ function fixtureJournal(overrides = {}) {
     ...overrides,
   };
 }
+
+test("ad-hoc re-sign uses a local signature and Electron-safe entitlements", () => {
+  const entitlements = readFileSync(adhocEntitlementsPath, "utf8");
+  assert.match(entitlements, /com\.apple\.security\.cs\.allow-jit/u);
+  assert.match(entitlements, /com\.apple\.security\.cs\.disable-library-validation/u);
+  assert.deepEqual(resignPatchedAppArgs("/Applications/ChatGPT.app"), [
+    "--force",
+    "--deep",
+    "--sign",
+    "-",
+    "--options",
+    "runtime",
+    "--entitlements",
+    adhocEntitlementsPath,
+    "/Applications/ChatGPT.app",
+  ]);
+  const installSource = readFileSync(new URL("../scripts/install.mjs", import.meta.url), "utf8");
+  assert.match(installSource, /resignPatchedApp\(\)/u);
+  const uninstallSource = readFileSync(new URL("../scripts/uninstall.mjs", import.meta.url), "utf8");
+  assert.match(uninstallSource, /restoreAppleSignature\(/u);
+});
+
+test("Apple signature backup is copied once and restored without consuming the backup", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-sign-"));
+  try {
+    const app = join(root, "ChatGPT.app");
+    const backupDir = join(root, "backup");
+    mkdirSync(join(app, "Contents", "_CodeSignature"), { recursive: true });
+    writeFileSync(join(app, "Contents", "_CodeSignature", "CodeResources"), "original-sig");
+    writeFileSync(join(app, "Contents", "CodeResources"), "original-contents-resources");
+    writeFileSync(join(app, "Contents", "embedded.provisionprofile"), "openai-profile");
+    backupAppleSignature(backupDir, app);
+    writeFileSync(join(app, "Contents", "_CodeSignature", "CodeResources"), "adhoc-sig");
+    writeFileSync(join(app, "Contents", "CodeResources"), "adhoc-contents-resources");
+    writeFileSync(join(app, "Contents", "embedded.provisionprofile.openai"), "stashed");
+    rmSync(join(app, "Contents", "embedded.provisionprofile"), { force: true });
+    backupAppleSignature(backupDir, app);
+    assert.equal(
+      readFileSync(join(backupDir, "AppleSignature", "_CodeSignature", "CodeResources"), "utf8"),
+      "original-sig",
+    );
+    assert.equal(restoreAppleSignature(backupDir, app), true);
+    assert.equal(readFileSync(join(app, "Contents", "_CodeSignature", "CodeResources"), "utf8"), "original-sig");
+    assert.equal(readFileSync(join(app, "Contents", "CodeResources"), "utf8"), "original-contents-resources");
+    assert.equal(readFileSync(join(app, "Contents", "embedded.provisionprofile"), "utf8"), "openai-profile");
+    assert.equal(existsSync(join(app, "Contents", "embedded.provisionprofile.openai")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("atomicReplace swaps a file without consuming its source", () => {
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
@@ -159,6 +213,17 @@ test("transaction journals reject paths outside the managed transaction", () => 
   );
 });
 
+test("transaction journals require complete signature rollback metadata", () => {
+  const journal = fixtureJournal();
+  assert.throws(
+    () => validateTransactionJournal({
+      ...journal,
+      rollbackAppleSignature: join(journal.transactionDir, "rollback-AppleSignature"),
+    }),
+    /invalid signature rollback metadata/u,
+  );
+});
+
 test("transaction journals require the complete managed runtime set", () => {
   assert.throws(
     () => validateTransactionJournal(fixtureJournal({
@@ -211,6 +276,7 @@ test("interrupted transaction phases restore a verified ASAR pair and runtime sn
       "runtime-installed",
       "asar-replaced",
       "plist-replaced",
+      "signed",
       "asar-restored",
       "plist-restored",
     ]) {
@@ -244,6 +310,53 @@ test("interrupted transaction phases restore a verified ASAR pair and runtime sn
       assert.equal(existsSync(join(targetRuntimeRoot, "runtime", "preload.cjs")), false);
       assert.equal(completed, true);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("transaction recovery restores the complete signature-side snapshot", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-sign-recovery-"));
+  try {
+    const stock = await createAsarPair(root, "stock", "stock");
+    const patched = await createAsarPair(root, "patched", "patched");
+    const targetAsar = join(root, "target.asar");
+    const targetPlist = join(root, "target.Info.plist");
+    const targetApp = join(root, "ChatGPT.app");
+    const transactionDir = join(root, "transaction");
+    const signatureSnapshot = join(transactionDir, "rollback-AppleSignature");
+    mkdirSync(join(signatureSnapshot, "_CodeSignature"), { recursive: true });
+    mkdirSync(join(targetApp, "Contents", "_CodeSignature"), { recursive: true });
+    cpSync(patched.targetAsar, targetAsar);
+    cpSync(patched.targetPlist, targetPlist);
+    writeFileSync(join(signatureSnapshot, "_CodeSignature", "CodeResources"), "original-sig");
+    writeFileSync(join(signatureSnapshot, "Contents-CodeResources"), "original-contents-resources");
+    writeFileSync(join(signatureSnapshot, "embedded.provisionprofile"), "openai-profile");
+    writeFileSync(join(targetApp, "Contents", "_CodeSignature", "CodeResources"), "adhoc-sig");
+    writeFileSync(join(targetApp, "Contents", "CodeResources"), "adhoc-contents-resources");
+    writeFileSync(join(targetApp, "Contents", "embedded.provisionprofile.openai"), "stashed-profile");
+
+    recoverTransaction({
+      id: "fixture-signature-recovery",
+      phase: "signed",
+      transactionDir,
+      rollbackAsar: stock.targetAsar,
+      rollbackPlist: stock.targetPlist,
+      rollbackAppleSignature: signatureSnapshot,
+      hadBundleSignature: true,
+      runtimeFiles: [],
+    }, {
+      targetAsar,
+      targetPlist,
+      targetRuntimeRoot: root,
+      targetApp,
+      finish: () => {},
+    });
+
+    assert.equal(readFileSync(join(targetApp, "Contents", "_CodeSignature", "CodeResources"), "utf8"), "original-sig");
+    assert.equal(readFileSync(join(targetApp, "Contents", "CodeResources"), "utf8"), "original-contents-resources");
+    assert.equal(readFileSync(join(targetApp, "Contents", "embedded.provisionprofile"), "utf8"), "openai-profile");
+    assert.equal(existsSync(join(targetApp, "Contents", "embedded.provisionprofile.openai")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

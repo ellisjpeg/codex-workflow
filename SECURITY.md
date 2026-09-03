@@ -18,4 +18,4 @@ Include the smallest reproducible example, affected Workflow version, Codex vers
 - Settings, runtime files, logs, backups, and transaction records are local to the current macOS user.
 - The project does not collect telemetry or transmit settings.
 
-Modifying an application bundle can affect macOS code-signature status. ASAR integrity and code signing are checked and reported as separate properties.
+Modifying an application bundle invalidates its original Apple code signature. Workflow ad-hoc re-signs after install so the app can launch, preserves the original signature in the source backup, and reports ASAR integrity separately.

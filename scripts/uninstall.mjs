@@ -10,6 +10,7 @@ import {
   preflightLiveUncached,
   recoverPendingTransaction,
   resolveSourceBackup,
+  restoreAppleSignature,
   setTransactionPhase,
   uninstallUpdaterAgent,
   writePatchState,
@@ -33,6 +34,7 @@ try {
   transaction = setTransactionPhase(transaction, "asar-restored");
   atomicReplace(backup.backupPlist, infoPlistPath);
   transaction = setTransactionPhase(transaction, "plist-restored");
+  restoreAppleSignature(backup.backupDir);
   const restored = preflightLiveUncached({ allowVersion: true });
   if (restored.fingerprint.asarSha256 !== source.asarSha256) {
     throw new Error("Restored ASAR hash does not match the verified source backup");

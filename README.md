@@ -85,11 +85,12 @@ Release tags build a self-contained `codex-workflow-<version>.tar.gz` asset. The
 ## Safety notes
 
 - The patch modifies `/Applications/ChatGPT.app`; keep a current backup and use only the guarded commands.
+- After install, Workflow ad-hoc re-signs the patched app so macOS will launch it. Uninstall restores the original Apple signature when that backup exists.
 - Never use `--allow-version` without reviewing the new Codex build.
 - Quit Codex before install, reapply, recovery, or uninstall.
 - Settings, logs, backups, and transactions remain local to the current macOS user.
 - The background updater contacts only the configured GitHub Releases API and can be removed with the normal uninstall command.
-- Modifying an installed app may affect its macOS code-signature status. Workflow reports signature and ASAR integrity separately.
+- Modifying an installed app invalidates its original Apple code signature. Workflow now ad-hoc re-signs after install so the app can launch, and reports signature and ASAR integrity separately.
 
 ## Development
 
