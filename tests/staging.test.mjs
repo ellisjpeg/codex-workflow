@@ -500,6 +500,109 @@ test("launch proves DevTools ownership and stop signals only the persisted proce
   }
 });
 
+test("launch accepts its owned listener after the old ten-second deadline", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  let now = 0;
+  let running = true;
+  const signals = [];
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const identity = launchedIdentity(manifest, 43125);
+    const launched = await launchStaging(manifest.manifest, {
+      assertPortAvailable() {},
+      listAppProcesses: () => [],
+      now: () => now,
+      readAnyProcessIdentity: (processId) => ({
+        processId,
+        processGroupId: identity.processGroupId,
+        startedAt: identity.startedAt,
+      }),
+      readPortListeners: () => now >= 16600 ? [{
+        processId: identity.processId,
+        command: "staging",
+        addresses: [`127.0.0.1:${fixturePort}`],
+      }] : [],
+      readProcessIdentity: () => running ? identity : null,
+      signatureIsValid: () => true,
+      sleep: async (milliseconds) => { now += milliseconds; },
+      spawnApp: () => ({ pid: identity.processId, unref() {} }),
+    });
+    assert.equal(now, 16600);
+    assert.equal(launched.status, "running");
+
+    await stopStaging(manifest.manifest, {
+      listAppProcesses: () => [],
+      readProcessIdentity: () => running ? identity : null,
+      signalProcessGroup(processGroupId, signal) {
+        signals.push({ processGroupId, signal });
+        running = false;
+      },
+      waitForExit: async () => !running,
+    });
+    assert.deepEqual(signals, [{ processGroupId: identity.processGroupId, signal: "SIGTERM" }]);
+    restoreStaging(manifest.manifest, {
+      listAppProcesses: () => [],
+      resignPatchedApp() {},
+      signatureIsValid: () => true,
+    });
+    cleanupStaging(manifest.manifest, { listAppProcesses: () => [] });
+    assert.equal(existsSync(manifest.root), false);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("launch times out a never-ready listener and cleans its exact process", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  let now = 0;
+  let running = true;
+  const signals = [];
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const identity = launchedIdentity(manifest, 43126);
+    await assert.rejects(
+      launchStaging(manifest.manifest, {
+        assertPortAvailable() {},
+        listAppProcesses: () => [],
+        now: () => now,
+        readPortListeners: () => [],
+        readProcessIdentity: () => running ? identity : null,
+        signatureIsValid: () => true,
+        sleep: async (milliseconds) => { now += milliseconds; },
+        spawnApp: () => ({ pid: identity.processId, unref() {} }),
+        signalProcessGroup(processGroupId, signal) {
+          signals.push({ processGroupId, signal });
+          running = false;
+        },
+        waitForExit: async () => !running,
+      }),
+      /Staging DevTools listener did not become ready/u,
+    );
+    assert.equal(now, 30000);
+    assert.deepEqual(signals, [{ processGroupId: identity.processGroupId, signal: "SIGTERM" }]);
+    assert.equal(readJson(manifest.manifest).status, "stopped");
+    restoreStaging(manifest.manifest, {
+      listAppProcesses: () => [],
+      resignPatchedApp() {},
+      signatureIsValid: () => true,
+    });
+    cleanupStaging(manifest.manifest, { listAppProcesses: () => [] });
+    assert.equal(existsSync(manifest.root), false);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("launch rejects a foreign DevTools listener and safely stops its identified process group", async () => {
   const fixture = await createStockFixture();
   const state = {};

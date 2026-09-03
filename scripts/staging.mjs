@@ -646,6 +646,7 @@ function lifecycleOperations(hooks = {}) {
     signatureIsValid: hooks.signatureIsValid || signatureIsValid,
     signal: hooks.signal || null,
     sleep: hooks.sleep || delay,
+    now: hooks.now || Date.now,
     spawnApp: hooks.spawnApp || ((executable, args, options) => spawn(executable, args, options)),
   };
   operations.waitForExit = hooks.waitForExit || ((identity, timeoutMs) =>
@@ -690,8 +691,8 @@ async function waitForIdentityExit(identity, operations, timeoutMs = 15000) {
   return false;
 }
 
-async function waitForOwnedListener(manifest, identity, operations, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
+async function waitForOwnedListener(manifest, identity, operations, timeoutMs = 30000) {
+  const deadline = operations.now() + timeoutMs;
   do {
     throwIfInterrupted(operations.signal);
     assertMatchingProcessIdentity(
@@ -706,7 +707,7 @@ async function waitForOwnedListener(manifest, identity, operations, timeoutMs = 
     );
     if (ownership) return ownership;
     await operations.sleep(100);
-  } while (Date.now() < deadline);
+  } while (operations.now() < deadline);
   throw new Error("Staging DevTools listener did not become ready");
 }
 
