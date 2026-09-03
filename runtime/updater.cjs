@@ -63,6 +63,12 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function releaseVersionEligible(version, installed, allowEqual = false) {
+  if (!versionParts(version) || !versionParts(installed)) return false;
+  const comparison = compareVersions(version, installed);
+  return comparison > 0 || (allowEqual && comparison === 0);
+}
+
 function remoteCheckDue(state, now = Date.now()) {
   const nextCheckAt = Date.parse(state?.nextRemoteCheckAt || "");
   if (Number.isFinite(nextCheckAt)) return now >= nextCheckAt;
@@ -158,6 +164,14 @@ function compatibilityMatches(candidate, identity) {
     compatibility.packageName === identity.packageName;
 }
 
+function eligibleReleaseCandidate(candidate, installed, identity, allowEqual = false) {
+  return candidate &&
+    releaseVersionEligible(candidate.version, installed, allowEqual) &&
+    compatibilityMatches(candidate, identity)
+    ? candidate
+    : null;
+}
+
 function selectStagedCandidate(state, installed, identity = null) {
   const candidate = state?.stagedSourceRoot
     ? sourcePackage(state.stagedSourceRoot)
@@ -165,8 +179,7 @@ function selectStagedCandidate(state, installed, identity = null) {
   if (
     !candidate ||
     state.availableVersion !== candidate.version ||
-    compareVersions(candidate.version, installed) <= 0 ||
-    !compatibilityMatches(candidate, identity)
+    !eligibleReleaseCandidate(candidate, installed, identity)
   ) {
     return null;
   }
@@ -271,7 +284,7 @@ async function checkRemote(config, previousState) {
   const etag = response.headers.get("etag") || null;
   const release = await response.json();
   const version = String(release.tag_name || "").replace(/^v/u, "");
-  if (!versionParts(version) || compareVersions(version, installedVersion()) <= 0) {
+  if (!releaseVersionEligible(version, installedVersion(), config.autoRepairCodexUpdates === true)) {
     return { candidate: null, etag, releaseVersion: versionParts(version) ? version : null, unchanged: false };
   }
   const assetName = `codex-workflow-${version}.tar.gz`;
@@ -501,11 +514,13 @@ async function run() {
   }
   if (remoteResult?.candidate) stagedRelease = remoteResult.candidate;
   else if (remoteResult && !remoteResult.unchanged) stagedRelease = null;
-  const candidate = stagedRelease &&
-    compareVersions(stagedRelease.version, installed) > 0 &&
-    compatibilityMatches(stagedRelease, identity)
-    ? stagedRelease
-    : null;
+  const candidate = eligibleReleaseCandidate(stagedRelease, installed, identity);
+  const automaticRepairCandidate = eligibleReleaseCandidate(
+    stagedRelease,
+    installed,
+    identity,
+    config.autoRepairCodexUpdates === true,
+  );
   const checkedAt = new Date();
   const failureCount = shouldCheckRemote
     ? checkError ? Math.min(Number(previousState.remoteFailureCount || 0) + 1, 9) : 0
@@ -537,8 +552,8 @@ async function run() {
     stagedSourceRoot: stagedRelease?.root || null,
     error: shouldCheckRemote ? checkError : previousState.error || null,
   });
-  if (background && candidate) {
-    await applyAutomaticRepair(config, candidate, identity, previousState);
+  if (background && automaticRepairCandidate) {
+    await applyAutomaticRepair(config, automaticRepairCandidate, identity, previousState);
     return;
   }
   if (!candidate || !apply) {
@@ -568,6 +583,8 @@ module.exports = {
   checkRemote,
   compareVersions,
   compatibilityMatches,
+  eligibleReleaseCandidate,
+  releaseVersionEligible,
   remoteBackoffMs,
   remoteCheckDue,
   chooseCandidate,

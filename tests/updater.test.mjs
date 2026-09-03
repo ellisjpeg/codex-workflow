@@ -13,6 +13,8 @@ const {
   checkRemote,
   compareVersions,
   compatibilityMatches,
+  eligibleReleaseCandidate,
+  releaseVersionEligible,
   remoteBackoffMs,
   remoteCheckDue,
   selectStagedCandidate,
@@ -220,11 +222,12 @@ test("automatic repair is exact-build guarded and attempted once", () => {
   }
 });
 
-test("automatic repair installs, verifies, and relaunches exactly once", async () => {
+test("equal-version release repairs a verified stock app exactly once", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-auto-apply-test-"));
   try {
     writeRelease(root, "0.5.11");
     const candidate = sourcePackage(root);
+    const installed = "0.5.11";
     const identity = {
       version: "26.901.20858",
       build: "7658",
@@ -249,9 +252,12 @@ test("automatic repair installs, verifies, and relaunches exactly once", async (
     const calls = [];
     const written = [];
     let state = {};
+    const repairCandidate = eligibleReleaseCandidate(candidate, installed, identity, true);
+    assert.equal(releaseVersionEligible(candidate.version, installed, true), true);
+    assert.equal(repairCandidate, candidate);
     assert.equal(await applyAutomaticRepair(
       { autoRepairCodexUpdates: true, nodeExecutable: "/opt/node", appRoot: "/Applications/ChatGPT.app" },
-      candidate,
+      repairCandidate,
       identity,
       state,
       {
@@ -281,6 +287,30 @@ test("automatic repair installs, verifies, and relaunches exactly once", async (
     ]);
     assert.equal(state.availableVersion, null);
     assert.equal(state.stagedSourceRoot, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("equal-version release is not an ordinary update or a mismatched-build repair", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-equal-version-guard-test-"));
+  try {
+    writeRelease(root, "0.5.11");
+    const candidate = sourcePackage(root);
+    const identity = {
+      version: "26.901.20858",
+      build: "7658",
+      bundleIdentifier: "com.openai.codex",
+      packageName: "openai-codex-electron",
+    };
+    assert.equal(releaseVersionEligible(candidate.version, candidate.version, false), false);
+    assert.equal(eligibleReleaseCandidate(candidate, candidate.version, identity, false), null);
+    assert.equal(eligibleReleaseCandidate(
+      candidate,
+      candidate.version,
+      { ...identity, build: "7659" },
+      true,
+    ), null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
