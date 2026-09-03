@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import * as asar from "@electron/asar";
 import {
+  appendFileSync,
   chmodSync,
   cpSync,
   existsSync,
@@ -26,7 +27,9 @@ import {
 } from "../scripts/lib.mjs";
 import {
   cleanupStaging,
+  listenerOwnershipForProcess,
   launchStaging,
+  parseLsofRecords,
   prepareStaging,
   restoreStaging,
   stopStaging,
@@ -35,6 +38,7 @@ import {
   stagingBaseRoot,
   stagingBundleIdentifier,
   stagingExecutableName,
+  stagingEnvironment,
   stagingLayout,
   stagingName,
   stagingPrefix,
@@ -140,6 +144,8 @@ test("staging layout isolates every mutable root under one generated temporary d
   assert.equal(layout.executable, join(layout.app, "Contents", "MacOS", stagingExecutableName));
   assert.equal(layout.devToolsPort, 49258);
   assert.equal(new Set([
+    layout.home,
+    layout.temporary,
     layout.userData,
     layout.codexHome,
     layout.workflowRoot,
@@ -149,7 +155,7 @@ test("staging layout isolates every mutable root under one generated temporary d
     layout.updates,
     layout.updateState,
     layout.backups,
-  ]).size, 9);
+  ]).size, 11);
   for (const target of Object.values(layout).filter((value) => typeof value === "string")) {
     assert.ok(target === root || target.startsWith(`${root}/`));
   }
@@ -157,6 +163,43 @@ test("staging layout isolates every mutable root under one generated temporary d
   assert.ok(
     Buffer.byteLength(join(layout.codexHome, "ipc", "ipc.sock")) <= stagingUnixSocketPathMaxBytes,
   );
+});
+
+test("staging launch environment is allowlisted and isolates shell startup files", () => {
+  const root = mkdtempSync(join(stagingBaseRoot, stagingPrefix));
+  const layout = stagingLayout(root, fixturePort);
+  const hostHome = join(root, "host-home");
+  try {
+    mkdirSync(hostHome);
+    mkdirSync(layout.home, { recursive: true });
+    mkdirSync(layout.temporary, { recursive: true });
+    writeFileSync(join(hostHome, ".zshenv"), "export REVIEW_SECRET_TOKEN=restored-by-shell\n");
+    const environment = stagingEnvironment(layout, {
+      HOME: hostHome,
+      ZDOTDIR: hostHome,
+      USER: "fixture-user",
+      LOGNAME: "fixture-user",
+      LANG: "en_GB.UTF-8",
+      SSH_AUTH_SOCK: "/private/tmp/agent.sock",
+      API_TOKEN: "host-token",
+      AWS_SECRET_ACCESS_KEY: "host-key",
+      CODEX_SESSION_ID: "host-session",
+    });
+    assert.equal(environment.HOME, layout.home);
+    assert.equal(environment.ZDOTDIR, layout.home);
+    assert.equal(environment.TMPDIR, layout.temporary);
+    assert.equal(environment.XDG_CONFIG_HOME, join(layout.home, ".config"));
+    assert.equal(environment.USER, "fixture-user");
+    assert.equal(environment.LANG, "en_GB.UTF-8");
+    for (const name of ["SSH_AUTH_SOCK", "API_TOKEN", "AWS_SECRET_ACCESS_KEY", "CODEX_SESSION_ID"]) {
+      assert.equal(Object.hasOwn(environment, name), false);
+    }
+    const shell = spawnSync("/bin/zsh", ["-lic", "env"], { env: environment, encoding: "utf8" });
+    assert.equal(shell.status, 0, shell.stderr);
+    assert.doesNotMatch(shell.stdout, /host-token|host-key|host-session|restored-by-shell/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("managed staging paths reject traversal and symlink redirection", () => {
@@ -207,6 +250,38 @@ test("staging root and DevTools guards reject production, nesting, and unsafe po
   );
 });
 
+test("DevTools ownership rejects wildcard and non-loopback listeners", () => {
+  assert.deepEqual(
+    parseLsofRecords(`p43120\ncCodex\nf24\ntIPv4\nn127.0.0.1:${fixturePort}\n`),
+    [{
+      processId: 43120,
+      command: "Codex",
+      addresses: [`127.0.0.1:${fixturePort}`],
+    }],
+  );
+  const identity = {
+    processId: 43120,
+    processGroupId: 43120,
+    startedAt: "Thu Sep  3 12:00:00 2026",
+    executable: "/private/tmp/staging",
+  };
+  for (const address of [
+    `*:${fixturePort}`,
+    `0.0.0.0:${fixturePort}`,
+    `192.168.1.20:${fixturePort}`,
+  ]) {
+    assert.throws(
+      () => listenerOwnershipForProcess(
+        [{ processId: identity.processId, command: "staging", addresses: [address] }],
+        identity,
+        fixturePort,
+        (processId) => ({ ...identity, processId }),
+      ),
+      /not bound exclusively to loopback/u,
+    );
+  }
+});
+
 test("prepare clones once, builds only the verified clone, and installs a fail-closed updater", async () => {
   const fixture = await createStockFixture();
   const state = { buildInputs: [] };
@@ -246,6 +321,36 @@ test("prepare clones once, builds only the verified clone, and installs a fail-c
   } finally {
     if (manifest?.root && existsSync(manifest.root)) {
       rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("launch rejects a post-prepare ASAR fingerprint change before spawning", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  let spawnCalled = false;
+  try {
+    manifest = await prepareFixture(fixture, state);
+    appendFileSync(manifest.asar, "post-prepare mutation");
+    await assert.rejects(
+      launchStaging(manifest.manifest, {
+        spawnApp() {
+          spawnCalled = true;
+        },
+      }),
+      /Prepared staging asarSha256 fingerprint changed before launch/u,
+    );
+    assert.equal(spawnCalled, false);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      const restored = restoreStaging(manifest.manifest, {
+        listAppProcesses: () => [],
+        resignPatchedApp() {},
+        signatureIsValid: () => true,
+      });
+      cleanupStaging(restored.manifest, { listAppProcesses: () => [] });
     }
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -315,6 +420,7 @@ test("launch proves DevTools ownership and stop signals only the persisted proce
     const identity = launchedIdentity(manifest);
     const events = [];
     const signals = [];
+    let launchEnvironment;
     let running = true;
     const launched = await launchStaging(manifest.manifest, {
       assertPortAvailable(port) {
@@ -326,16 +432,31 @@ test("launch proves DevTools ownership and stop signals only the persisted proce
         processGroupId: identity.processGroupId,
         startedAt: identity.startedAt,
       }),
-      readPortListeners: () => [{ processId: identity.processId, command: "staging" }],
+      readPortListeners: () => [{
+        processId: identity.processId,
+        command: "staging",
+        addresses: [`127.0.0.1:${fixturePort}`],
+      }],
       readProcessIdentity: () => running ? identity : null,
+      hostEnvironment: {
+        USER: "fixture-user",
+        SSH_AUTH_SOCK: "/private/tmp/agent.sock",
+        REVIEW_API_TOKEN: "host-token",
+      },
       signatureIsValid: () => true,
       sleep: async () => {},
-      spawnApp() {
+      spawnApp(_executable, _args, options) {
         events.push("spawn");
+        launchEnvironment = options.env;
         return { pid: identity.processId, unref() {} };
       },
     });
     assert.deepEqual(events, [`port:${fixturePort}`, "spawn"]);
+    assert.equal(launchEnvironment.HOME, manifest.home);
+    assert.equal(launchEnvironment.ZDOTDIR, manifest.home);
+    assert.equal(launchEnvironment.CODEX_HOME, manifest.codexHome);
+    assert.equal(launchEnvironment.SSH_AUTH_SOCK, undefined);
+    assert.equal(launchEnvironment.REVIEW_API_TOKEN, undefined);
     assert.deepEqual(launched.processIdentity, identity);
     assert.equal(launched.listenerOwnership.port, fixturePort);
     assert.deepEqual(launched.listenerOwnership.listeners.map((entry) => entry.processId), [
@@ -383,7 +504,11 @@ test("launch rejects a foreign DevTools listener and safely stops its identified
           processGroupId: 99999,
           startedAt: "Thu Sep  3 12:00:01 2026",
         }),
-        readPortListeners: () => [{ processId: 99999, command: "foreign" }],
+        readPortListeners: () => [{
+          processId: 99999,
+          command: "foreign",
+          addresses: [`127.0.0.1:${fixturePort}`],
+        }],
         readProcessIdentity: () => running ? identity : null,
         signatureIsValid: () => true,
         sleep: async () => {},
@@ -423,7 +548,11 @@ test("stop rejects PID reuse before the first signal and rechecks before escalat
         processGroupId: identity.processGroupId,
         startedAt: identity.startedAt,
       }),
-      readPortListeners: () => [{ processId: identity.processId, command: "staging" }],
+      readPortListeners: () => [{
+        processId: identity.processId,
+        command: "staging",
+        addresses: [`127.0.0.1:${fixturePort}`],
+      }],
       readProcessIdentity: () => identity,
       signatureIsValid: () => true,
       sleep: async () => {},

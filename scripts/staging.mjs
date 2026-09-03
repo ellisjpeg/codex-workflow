@@ -84,7 +84,7 @@ export function assertManagedStagingPath(targetRoot, targetPath, label = "manage
 
 export function assertStagingLayoutManaged(layout) {
   for (const key of [
-    "app", "asar", "plist", "executable", "userData", "codexHome", "workflowRoot",
+    "app", "asar", "plist", "executable", "home", "temporary", "userData", "codexHome", "workflowRoot",
     "settings", "logs", "journal", "updates", "updateState", "backups", "sourceBackup",
     "processLog", "manifest",
   ]) {
@@ -106,6 +106,8 @@ export function stagingLayout(targetRoot, devToolsPort) {
     asar: join(app, "Contents", "Resources", "app.asar"),
     plist: join(app, "Contents", "Info.plist"),
     executable: join(app, "Contents", "MacOS", stagingExecutableName),
+    home: join(root, "state", "home"),
+    temporary: join(root, "state", "tmp"),
     userData: join(root, "state", "user-data"),
     codexHome: join(root, "state", "codex-home"),
     workflowRoot,
@@ -169,9 +171,52 @@ export function assertMatchingSourceSnapshot(captured, cloned) {
   return cloned;
 }
 
+export function assertInstalledFingerprint(manifest) {
+  const current = fingerprint(manifest.asar);
+  for (const field of ["version", "build", "asarSha256", "headerSha256"]) {
+    if (manifest.installed?.[field] !== current[field]) {
+      throw new Error(`Prepared staging ${field} fingerprint changed before launch`);
+    }
+  }
+  return current;
+}
+
+export function stagingEnvironment(layout, hostEnvironment = process.env) {
+  const environment = {
+    HOME: layout.home,
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    SHELL: "/bin/zsh",
+    TMPDIR: layout.temporary,
+    ZDOTDIR: layout.home,
+    BASH_ENV: "/dev/null",
+    ENV: "/dev/null",
+    XDG_CACHE_HOME: join(layout.home, ".cache"),
+    XDG_CONFIG_HOME: join(layout.home, ".config"),
+    XDG_DATA_HOME: join(layout.home, ".local", "share"),
+    CODEX_HOME: layout.codexHome,
+    CODEX_ELECTRON_USER_DATA_PATH: layout.userData,
+    CODEX_WORKFLOW_ROOT: layout.workflowRoot,
+    CODEX_SPARKLE_ENABLED: "false",
+    CODEX_ELECTRON_PRIMARY_RUNTIME_UPDATE_MODE: "manual",
+  };
+  for (const key of ["USER", "LOGNAME"]) {
+    if (/^[a-z0-9._-]{1,64}$/iu.test(hostEnvironment[key] || "")) {
+      environment[key] = hostEnvironment[key];
+    }
+  }
+  for (const key of ["LANG", "LC_ALL", "LC_CTYPE"]) {
+    if (/^[a-z0-9_.@-]{1,64}$/iu.test(hostEnvironment[key] || "")) {
+      environment[key] = hostEnvironment[key];
+    }
+  }
+  return environment;
+}
+
 function installStagingRuntime(layout, source) {
   assertStagingLayoutManaged(layout);
   for (const target of [
+    layout.home,
+    layout.temporary,
     layout.userData,
     layout.codexHome,
     layout.logs,
@@ -426,7 +471,7 @@ function readManifest(manifestPath) {
     throw new Error("Staging manifest is outside its validated root");
   }
   for (const key of [
-    "app", "asar", "plist", "executable", "userData", "codexHome", "workflowRoot",
+    "app", "asar", "plist", "executable", "home", "temporary", "userData", "codexHome", "workflowRoot",
     "settings", "logs", "journal", "updates", "updateState", "backups", "sourceBackup",
     "processLog", "manifest",
   ]) {
@@ -444,17 +489,23 @@ function readManifest(manifestPath) {
 }
 
 function lsofRecords(args) {
-  const result = spawnSync("/usr/sbin/lsof", ["-nP", "-Fpct", ...args], { encoding: "utf8" });
+  const result = spawnSync("/usr/sbin/lsof", ["-nP", "-Fpcn", ...args], { encoding: "utf8" });
   if (result.status === 1) return [];
   if (result.status !== 0) throw new Error("Could not inspect staging processes");
+  return parseLsofRecords(result.stdout);
+}
+
+export function parseLsofRecords(output) {
   const records = [];
   let record = null;
-  for (const line of result.stdout.split("\n")) {
+  for (const line of output.split("\n")) {
     if (line.startsWith("p")) {
-      record = { processId: Number(line.slice(1)), command: null };
+      record = { processId: Number(line.slice(1)), command: null, addresses: [] };
       records.push(record);
     } else if (record && line.startsWith("c")) {
       record.command = line.slice(1);
+    } else if (record && line.startsWith("n")) {
+      record.addresses.push(line.slice(1));
     }
   }
   return records.filter((entry) => Number.isSafeInteger(entry.processId));
@@ -524,9 +575,28 @@ function portListenerRecords(port) {
   return lsofRecords(["-a", `-iTCP:${port}`, "-sTCP:LISTEN"]);
 }
 
-export function listenerOwnershipForProcess(records, processIdentity, readIdentity = processStartIdentity) {
+function isLoopbackListener(address, port) {
+  const endpoint = String(address || "").replace(/\s+\(LISTEN\)$/u, "");
+  if (endpoint === `[::1]:${port}`) return true;
+  const ipv4 = endpoint.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+):(\d+)$/u);
+  return Boolean(ipv4) &&
+    Number(ipv4[1]) === 127 &&
+    ipv4.slice(1, 5).every((part) => Number(part) <= 255) &&
+    Number(ipv4[5]) === port;
+}
+
+export function listenerOwnershipForProcess(
+  records,
+  processIdentity,
+  port,
+  readIdentity = processStartIdentity,
+) {
   const processIds = [...new Set(records.map((entry) => entry.processId))];
   if (!processIds.length) return null;
+  const addresses = records.flatMap((entry) => entry.addresses || []);
+  if (!addresses.length || addresses.some((address) => !isLoopbackListener(address, port))) {
+    throw new Error("Staging DevTools listener is not bound exclusively to loopback");
+  }
   const listeners = processIds.map((processId) => readIdentity(processId));
   if (
     listeners.some((identity) => !identity) ||
@@ -536,6 +606,7 @@ export function listenerOwnershipForProcess(records, processIdentity, readIdenti
   }
   return {
     processGroupId: processIdentity.processGroupId,
+    addresses,
     listeners,
   };
 }
@@ -602,6 +673,7 @@ async function waitForOwnedListener(manifest, identity, operations, timeoutMs = 
     const ownership = listenerOwnershipForProcess(
       operations.readPortListeners(manifest.devToolsPort),
       identity,
+      manifest.devToolsPort,
       operations.readAnyProcessIdentity,
     );
     if (ownership) return ownership;
@@ -634,6 +706,7 @@ async function terminateExactProcess(manifest, identity, operations) {
 
 export async function launchStaging(manifestPath, hooks = {}) {
   const manifest = readManifest(manifestPath);
+  assertInstalledFingerprint(manifest);
   const operations = lifecycleOperations(hooks);
   verifyStagingApp(manifest, manifest.source, { signatureCheck: operations.signatureIsValid });
   const existing = operations.listAppProcesses(manifest.root);
@@ -653,14 +726,7 @@ export async function launchStaging(manifestPath, hooks = {}) {
     ], {
       detached: true,
       stdio: ["ignore", logDescriptor, logDescriptor],
-      env: {
-        ...process.env,
-        CODEX_HOME: manifest.codexHome,
-        CODEX_ELECTRON_USER_DATA_PATH: manifest.userData,
-        CODEX_WORKFLOW_ROOT: manifest.workflowRoot,
-        CODEX_SPARKLE_ENABLED: "false",
-        CODEX_ELECTRON_PRIMARY_RUNTIME_UPDATE_MODE: "manual",
-      },
+      env: stagingEnvironment(manifest, hooks.hostEnvironment ?? process.env),
     });
     closeSync(logDescriptor);
     child.once?.("error", (error) => {
