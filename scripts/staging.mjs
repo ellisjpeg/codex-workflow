@@ -251,6 +251,7 @@ function installStagingRuntime(layout, source) {
     appExecutable: layout.executable,
     releaseApi: null,
     updatesDisabled: true,
+    autoRepairCodexUpdates: false,
   });
   writeJsonAtomic(layout.updateState, {
     schemaVersion: 1,
@@ -519,17 +520,37 @@ function processStartIdentity(processId) {
   const result = spawnSync(
     "/bin/ps",
     ["-p", String(processId), "-o", "pgid=", "-o", "lstart="],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: { LANG: "C", LC_ALL: "C" } },
   );
   if (result.status === 1 || !result.stdout.trim()) return null;
   if (result.status !== 0) throw new Error("Could not inspect staging process birth identity");
   const match = result.stdout.match(/^\s*(\d+)\s+(.+?)\s*$/u);
   if (!match) throw new Error("Could not parse staging process birth identity");
+  const startedAt = processStartToken(match[2]);
+  if (!startedAt) throw new Error("Could not canonicalize staging process birth identity");
   return {
     processId,
     processGroupId: Number(match[1]),
-    startedAt: match[2],
+    startedAt,
   };
+}
+
+export function processStartToken(value) {
+  const text = String(value || "").trim().replace(/\s+/gu, " ");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/u.test(text)) return text;
+  const months = new Map([
+    ["Jan", "01"], ["Feb", "02"], ["Mar", "03"], ["Apr", "04"],
+    ["May", "05"], ["Jun", "06"], ["Jul", "07"], ["Aug", "08"],
+    ["Sep", "09"], ["Oct", "10"], ["Nov", "11"], ["Dec", "12"],
+  ]);
+  const match = text.match(
+    /^(?:[A-Za-z]{3} )?(?:([A-Za-z]{3}) (\d{1,2})|(\d{1,2}) ([A-Za-z]{3})) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/u,
+  );
+  if (!match) return null;
+  const month = months.get(match[1] || match[4]);
+  const day = match[2] || match[3];
+  if (!month || Number(day) < 1 || Number(day) > 31) return null;
+  return `${match[8]}-${month}-${String(day).padStart(2, "0")}T${match[5]}:${match[6]}:${match[7]}`;
 }
 
 export function readProcessIdentity(processId, executable) {
@@ -545,7 +566,8 @@ export function processIdentityMatches(expected, current) {
   return Boolean(expected && current) &&
     expected.processId === current.processId &&
     expected.processGroupId === current.processGroupId &&
-    expected.startedAt === current.startedAt &&
+    processStartToken(expected.startedAt) !== null &&
+    processStartToken(expected.startedAt) === processStartToken(current.startedAt) &&
     expected.executable === current.executable;
 }
 
@@ -562,8 +584,7 @@ function persistedProcessIdentity(manifest) {
     !identity ||
     identity.processId !== manifest.processId ||
     identity.processGroupId !== identity.processId ||
-    typeof identity.startedAt !== "string" ||
-    !identity.startedAt ||
+    processStartToken(identity.startedAt) === null ||
     identity.executable !== manifest.executable
   ) {
     throw new Error("Staging manifest has no valid process birth or process-group identity");
@@ -623,12 +644,18 @@ function lifecycleOperations(hooks = {}) {
     signalProcessGroup: hooks.signalProcessGroup || ((processGroupId, signal) =>
       process.kill(-processGroupId, signal)),
     signatureIsValid: hooks.signatureIsValid || signatureIsValid,
+    signal: hooks.signal || null,
     sleep: hooks.sleep || delay,
     spawnApp: hooks.spawnApp || ((executable, args, options) => spawn(executable, args, options)),
   };
   operations.waitForExit = hooks.waitForExit || ((identity, timeoutMs) =>
     waitForIdentityExit(identity, operations, timeoutMs));
   return operations;
+}
+
+function throwIfInterrupted(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error("Staging launch interrupted");
 }
 
 async function waitForLaunchedIdentity(
@@ -666,6 +693,7 @@ async function waitForIdentityExit(identity, operations, timeoutMs = 15000) {
 async function waitForOwnedListener(manifest, identity, operations, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   do {
+    throwIfInterrupted(operations.signal);
     assertMatchingProcessIdentity(
       identity,
       operations.readProcessIdentity(identity.processId, identity.executable),
@@ -742,6 +770,14 @@ export async function launchStaging(manifestPath, hooks = {}) {
     if (!identity || identity.processGroupId !== child.pid) {
       throw new Error("Staging launch did not create the expected isolated process group");
     }
+    writeJsonAtomic(manifest.manifest, {
+      ...manifest,
+      status: "launching",
+      processId: child.pid,
+      processIdentity: identity,
+      launchedAt: new Date().toISOString(),
+      listenerOwnership: null,
+    });
     const listenerOwnership = await waitForOwnedListener(manifest, identity, operations);
     assertMatchingProcessIdentity(
       identity,
@@ -767,6 +803,11 @@ export async function launchStaging(manifestPath, hooks = {}) {
         identity ||= operations.readProcessIdentity(child.pid, manifest.executable);
         if (identity) {
           await terminateExactProcess(manifest, identity, operations);
+          stoppedManifest({
+            ...manifest,
+            processId: identity.processId,
+            processIdentity: identity,
+          });
         } else if (operations.listAppProcesses(manifest.root).length) {
           throw new Error("Launched staging process could not be identified safely for cleanup");
         }

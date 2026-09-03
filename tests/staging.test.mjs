@@ -31,6 +31,8 @@ import {
   launchStaging,
   parseLsofRecords,
   prepareStaging,
+  processIdentityMatches,
+  processStartToken,
   restoreStaging,
   stopStaging,
   assertStagingRoot,
@@ -200,6 +202,18 @@ test("staging launch environment is allowlisted and isolates shell startup files
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("process birth identity ignores locale-only lstart formatting", () => {
+  const british = "Thu  3 Sep 20:09:05 2026";
+  const cLocale = "Thu Sep  3 20:09:05 2026";
+  assert.equal(processStartToken(british), "2026-09-03T20:09:05");
+  assert.equal(processStartToken(cLocale), "2026-09-03T20:09:05");
+  assert.equal(processStartToken("2026-09-03T20:09:05"), "2026-09-03T20:09:05");
+  assert.equal(processIdentityMatches(
+    { processId: 42, processGroupId: 42, startedAt: british, executable: "/tmp/app" },
+    { processId: 42, processGroupId: 42, startedAt: cLocale, executable: "/tmp/app" },
+  ), true);
 });
 
 test("managed staging paths reject traversal and symlink redirection", () => {
@@ -523,8 +537,53 @@ test("launch rejects a foreign DevTools listener and safely stops its identified
     );
     assert.deepEqual(signals, [{ processGroupId: identity.processGroupId, signal: "SIGTERM" }]);
     const persisted = readJson(manifest.manifest);
-    assert.equal(persisted.status, "prepared");
+    assert.equal(persisted.status, "stopped");
     assert.equal(persisted.processId, null);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("interrupted terminal launch stops, restores, and removes isolated staging", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const identity = launchedIdentity(manifest, 43124);
+    const controller = new AbortController();
+    const signals = [];
+    let running = true;
+    await assert.rejects(
+      launchStaging(manifest.manifest, {
+        assertPortAvailable() {},
+        listAppProcesses: () => [],
+        readPortListeners: () => [],
+        readProcessIdentity: () => running ? identity : null,
+        signal: controller.signal,
+        signalProcessGroup(processGroupId, signal) {
+          signals.push({ processGroupId, signal });
+          running = false;
+        },
+        signatureIsValid: () => true,
+        sleep: async () => controller.abort(new Error("Interrupted by SIGHUP")),
+        spawnApp: () => ({ pid: identity.processId, unref() {} }),
+        waitForExit: async () => !running,
+      }),
+      /Interrupted by SIGHUP/u,
+    );
+    assert.deepEqual(signals, [{ processGroupId: identity.processGroupId, signal: "SIGTERM" }]);
+    assert.equal(readJson(manifest.manifest).status, "stopped");
+    restoreStaging(manifest.manifest, {
+      listAppProcesses: () => [],
+      resignPatchedApp() {},
+      signatureIsValid: () => true,
+    });
+    cleanupStaging(manifest.manifest, { listAppProcesses: () => [] });
+    assert.equal(existsSync(manifest.root), false);
   } finally {
     if (manifest?.root && existsSync(manifest.root)) {
       rmSync(manifest.root, { recursive: true, force: true });

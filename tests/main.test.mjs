@@ -133,6 +133,8 @@ test("Settings activation sends the native shortcut without moving the pointer",
 
 function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test") {
   const handlers = new Map();
+  const appListeners = new Map();
+  const readyCallbacks = [];
   const spawned = [];
   const timeoutCallbacks = [];
   let quitCount = 0;
@@ -155,11 +157,11 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
         return {
           app: {
             getVersion: () => "test",
-            on() {},
+            on(event, callback) { appListeners.set(event, callback); },
             quit() { quitCount += 1; },
             exit() { exitCount += 1; },
             relaunch() { relaunchCount += 1; },
-            whenReady: () => ({ then() {} }),
+            whenReady: () => ({ then(callback) { readyCallbacks.push(callback); } }),
           },
           ipcMain: {
             handle(channel, handler) { handlers.set(channel, handler); },
@@ -196,6 +198,7 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
             throw new Error(`Unexpected read: ${target}`);
           },
           statSync() { return { size: 0 }; },
+          watch() { return { close() {} }; },
         };
       }
       throw new Error(`Unexpected require: ${name}`);
@@ -204,6 +207,8 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
   new Script(mainSource, { filename: "main.cjs" }).runInContext(context);
   return {
     handlers,
+    appListeners,
+    readyCallbacks,
     spawned,
     timeoutCallbacks,
     trusted: { senderFrame: { url: "app://codex/thread" } },
@@ -213,12 +218,28 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
   };
 }
 
+const compatibilityConfig = {
+  codexVersion: "26.901.20858",
+  codexBuild: "7658",
+  bundleIdentifier: "com.openai.codex",
+  packageName: "openai-codex-electron",
+};
+
+function releaseManifest(version) {
+  return JSON.stringify({
+    schemaVersion: 1,
+    workflowVersion: version,
+    ...compatibilityConfig,
+  });
+}
+
 test("Workflow Update installs the external runtime before relaunching", async () => {
   const runtimeRoot = "/tmp/codex-workflow-main-update-test";
   const stagedRoot = path.join(runtimeRoot, "updates", "0.5.0");
   const files = new Map([
     [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
       nodeExecutable: "/opt/node/bin/node",
+      ...compatibilityConfig,
     })],
     [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
     [path.join(runtimeRoot, "update-state.json"), JSON.stringify({
@@ -229,6 +250,7 @@ test("Workflow Update installs the external runtime before relaunching", async (
       name: "codex-workflow",
       version: "0.5.0",
     })],
+    [path.join(stagedRoot, "workflow-compatibility.json"), releaseManifest("0.5.0")],
     [path.join(stagedRoot, "scripts", "install.mjs"), ""],
     [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
     ["/opt/node/bin/node", ""],
@@ -261,6 +283,32 @@ test("Workflow Update installs the external runtime before relaunching", async (
   );
 });
 
+test("update discovery runs at startup and visibility only when backoff is due", async () => {
+  const runtimeRoot = "/tmp/codex-workflow-main-check-test";
+  const files = new Map([
+    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
+      nodeExecutable: "/opt/node/bin/node",
+      ...compatibilityConfig,
+    })],
+    [path.join(runtimeRoot, "update-state.json"), JSON.stringify({})],
+    ["/opt/node/bin/node", ""],
+  ]);
+  const harness = createUpdateHarness(files, runtimeRoot);
+  assert.equal(harness.readyCallbacks.length, 1);
+  harness.readyCallbacks[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.spawned.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.spawned[0].args)), [
+    path.join(runtimeRoot, "runtime", "updater.cjs"),
+    "--check",
+  ]);
+  files.set(path.join(runtimeRoot, "update-state.json"), JSON.stringify({
+    nextRemoteCheckAt: new Date(Date.now() + 60_000).toISOString(),
+  }));
+  harness.appListeners.get("browser-window-focus")();
+  assert.equal(harness.spawned.length, 1);
+});
+
 test("Workflow Update ignores a newer local checkout", async () => {
   const runtimeRoot = "/tmp/codex-workflow-main-local-drift-test";
   const sourceRoot = "/tmp/codex-workflow-source-test";
@@ -268,6 +316,7 @@ test("Workflow Update ignores a newer local checkout", async () => {
     [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
       sourceRoot,
       nodeExecutable: "/opt/node/bin/node",
+      ...compatibilityConfig,
     })],
     [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.5.3" })],
     [path.join(sourceRoot, "package.json"), JSON.stringify({
@@ -295,6 +344,7 @@ test("Workflow Update is unavailable when isolated staging disables updates", as
     [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
       nodeExecutable: "/opt/node/bin/node",
       updatesDisabled: true,
+      ...compatibilityConfig,
     })],
     [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.5.10" })],
     [path.join(runtimeRoot, "update-state.json"), JSON.stringify({
@@ -305,6 +355,7 @@ test("Workflow Update is unavailable when isolated staging disables updates", as
       name: "codex-workflow",
       version: "0.5.11",
     })],
+    [path.join(stagedRoot, "workflow-compatibility.json"), releaseManifest("0.5.11")],
     [path.join(stagedRoot, "scripts", "install.mjs"), ""],
     [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
     ["/opt/node/bin/node", ""],
@@ -328,6 +379,7 @@ test("Workflow Update does not quit while patch recovery is pending", async () =
   const files = new Map([
     [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
       nodeExecutable: "/opt/node/bin/node",
+      ...compatibilityConfig,
     })],
     [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
     [path.join(runtimeRoot, "transaction.json"), "{}"],
@@ -339,6 +391,7 @@ test("Workflow Update does not quit while patch recovery is pending", async () =
       name: "codex-workflow",
       version: "0.5.0",
     })],
+    [path.join(stagedRoot, "workflow-compatibility.json"), releaseManifest("0.5.0")],
     [path.join(stagedRoot, "scripts", "install.mjs"), ""],
     [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
     ["/opt/node/bin/node", ""],

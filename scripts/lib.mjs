@@ -29,11 +29,13 @@ export const infoPlistPath = join(appRoot, "Contents", "Info.plist");
 export const runtimeRoot = join(homedir(), "Library", "Application Support", "Codex Workflow");
 export const disabledPath = join(runtimeRoot, "DISABLED");
 export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.ellisjpeg.codex-workflow-updater.plist");
-export const supportedVersion = "26.901.20858";
-export const supportedBuild = "7658";
-export const expectedBundleIdentifier = "com.openai.codex";
-export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.5.10";
+export const compatibilityManifestPath = join(sourceRoot, "workflow-compatibility.json");
+export const compatibilityManifest = readCompatibilityManifest(compatibilityManifestPath);
+export const supportedVersion = compatibilityManifest.codexVersion;
+export const supportedBuild = compatibilityManifest.codexBuild;
+export const expectedBundleIdentifier = compatibilityManifest.bundleIdentifier;
+export const expectedPackageName = compatibilityManifest.packageName;
+export const patchVersion = compatibilityManifest.workflowVersion;
 export const adhocEntitlementsPath = join(sourceRoot, "scripts", "adhoc.entitlements");
 export const appleSignatureBackupName = "AppleSignature";
 
@@ -47,6 +49,21 @@ const managedRuntimePaths = [
   "runtime/version.json",
   "update-config.json",
 ];
+
+export function readCompatibilityManifest(targetPath) {
+  const value = JSON.parse(readFileSync(targetPath, "utf8"));
+  if (
+    value?.schemaVersion !== 1 ||
+    !/^\d+\.\d+\.\d+(?:[-+].*)?$/u.test(String(value.workflowVersion || "")) ||
+    !/^[a-z0-9][a-z0-9._+-]{0,127}$/iu.test(String(value.codexVersion || "")) ||
+    !/^[a-z0-9][a-z0-9._+-]{0,127}$/iu.test(String(value.codexBuild || "")) ||
+    !/^[a-z0-9][a-z0-9.-]{1,127}$/iu.test(String(value.bundleIdentifier || "")) ||
+    !/^[a-z0-9][a-z0-9._-]{1,127}$/iu.test(String(value.packageName || ""))
+  ) {
+    throw new Error("Workflow compatibility manifest is invalid");
+  }
+  return value;
+}
 
 export function readPackage(targetAsar = asarPath) {
   return JSON.parse(asar.extractFile(targetAsar, "package.json").toString("utf8"));
@@ -333,7 +350,7 @@ export async function buildPatchedAsar(inputAsar, outputAsar, sourceFingerprint,
   }
 }
 
-export function installRuntimeFiles() {
+export function installRuntimeFiles({ autoRepairCodexUpdates } = {}) {
   const runtimeDestination = join(runtimeRoot, "runtime");
   mkdirSync(runtimeDestination, { recursive: true });
   atomicReplace(join(sourceRoot, "runtime", "main.cjs"), join(runtimeDestination, "main.cjs"));
@@ -343,6 +360,10 @@ export function installRuntimeFiles() {
     schemaVersion: 1,
     version: patchVersion,
   });
+  const previousUpdateConfig = readJson(join(runtimeRoot, "update-config.json"));
+  const automaticRepair = typeof autoRepairCodexUpdates === "boolean"
+    ? autoRepairCodexUpdates
+    : previousUpdateConfig?.autoRepairCodexUpdates === true;
   writeJsonAtomic(join(runtimeRoot, "update-config.json"), {
     schemaVersion: 1,
     sourceRoot,
@@ -355,6 +376,11 @@ export function installRuntimeFiles() {
       plistValue("CFBundleExecutable", infoPlistPath),
     ),
     releaseApi: "https://api.github.com/repos/ellisjpeg/codex-workflow/releases/latest",
+    codexVersion: supportedVersion,
+    codexBuild: supportedBuild,
+    bundleIdentifier: expectedBundleIdentifier,
+    packageName: expectedPackageName,
+    autoRepairCodexUpdates: automaticRepair,
   });
   const settingsPath = join(runtimeRoot, "settings.json");
   if (!existsSync(settingsPath)) {

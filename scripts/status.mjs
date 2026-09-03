@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   disabledPath,
@@ -29,6 +29,15 @@ const runtimeFiles = ["main.cjs", "preload.cjs", "updater.cjs"].map((name) => {
   return { name, present, matchesSource };
 });
 const updateConfigPresent = existsSync(join(runtimeRoot, "update-config.json"));
+const readJson = (target) => {
+  try {
+    return JSON.parse(readFileSync(target, "utf8"));
+  } catch {
+    return null;
+  }
+};
+const updateConfig = readJson(join(runtimeRoot, "update-config.json"));
+const updateState = readJson(join(runtimeRoot, "update-state.json"));
 let pending;
 let pendingError;
 try {
@@ -118,6 +127,13 @@ console.log(JSON.stringify({
   } : null,
   runtimeFiles,
   updateConfigPresent,
+  autoRepairCodexUpdates: updateConfig?.autoRepairCodexUpdates === true,
+  updateCheck: updateState ? {
+    remoteCheckedAt: updateState.remoteCheckedAt || null,
+    nextRemoteCheckAt: updateState.nextRemoteCheckAt || null,
+    remoteFailureCount: Number(updateState.remoteFailureCount || 0),
+    automaticRepair: updateState.automaticRepair || null,
+  } : null,
   settings: readSettings(),
   state,
   signature: current ? {

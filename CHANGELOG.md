@@ -2,6 +2,13 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.11 - 2026-09-03
+
+- Added one bounded `npm run setup` flow with concise output, `y`/`yes` or agent approval, one isolated staging launch, signal-safe cleanup, one guarded install, and one relaunch.
+- Replaced locale-formatted staging process identity with canonical birth tokens, persisted launch ownership before DevTools readiness, and covered terminal interruption cleanup.
+- Triggered release discovery at startup and app focus while retaining ETags, a five-minute floor, and exponential failure backoff capped at one hour.
+- Added release compatibility manifests and opt-in, exact-build automatic repair after Codex replaces the app, reusing the existing journal, backup, signing, verification, and recovery guards.
+
 ## 0.5.10 - 2026-09-03
 
 - Re-audited and guarded Codex Desktop `26.901.20858` build `7658` without changing the existing native DOM integration.

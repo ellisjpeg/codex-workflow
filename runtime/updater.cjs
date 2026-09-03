@@ -15,6 +15,8 @@ const runtimeVersionPath = path.join(runtimeRoot, "runtime", "version.json");
 const updatesRoot = path.join(runtimeRoot, "updates");
 const logPath = path.join(runtimeRoot, "logs", "updater.log");
 const remoteIntervalMs = 5 * 60 * 1000;
+const maximumBackoffMs = 60 * 60 * 1000;
+const compatibilityManifestName = "workflow-compatibility.json";
 
 function appendLog(level, message) {
   try {
@@ -62,25 +64,51 @@ function compareVersions(left, right) {
 }
 
 function remoteCheckDue(state, now = Date.now()) {
+  const nextCheckAt = Date.parse(state?.nextRemoteCheckAt || "");
+  if (Number.isFinite(nextCheckAt)) return now >= nextCheckAt;
   const checkedAt = Date.parse(state?.remoteCheckedAt || "");
   return !Number.isFinite(checkedAt) || now - checkedAt >= remoteIntervalMs;
+}
+
+function remoteBackoffMs(failureCount) {
+  const exponent = Math.max(0, Math.min(Number(failureCount) - 1, 8));
+  return Math.min(remoteIntervalMs * (2 ** exponent), maximumBackoffMs);
+}
+
+function compatibilityManifest(sourceRoot, workflowVersion) {
+  const value = readJson(path.join(sourceRoot, compatibilityManifestName));
+  if (
+    value?.schemaVersion !== 1 ||
+    value.workflowVersion !== workflowVersion ||
+    !/^[a-z0-9][a-z0-9._+-]{0,127}$/iu.test(String(value.codexVersion || "")) ||
+    !/^[a-z0-9][a-z0-9._+-]{0,127}$/iu.test(String(value.codexBuild || "")) ||
+    !/^[a-z0-9][a-z0-9.-]{1,127}$/iu.test(String(value.bundleIdentifier || "")) ||
+    !/^[a-z0-9][a-z0-9._-]{1,127}$/iu.test(String(value.packageName || ""))
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function sourcePackage(sourceRoot) {
   const packagePath = path.join(sourceRoot, "package.json");
   const installPath = path.join(sourceRoot, "scripts", "install.mjs");
   const runtimeInstallPath = path.join(sourceRoot, "scripts", "install-runtime.mjs");
+  const statusPath = path.join(sourceRoot, "scripts", "status.mjs");
   const pkg = readJson(packagePath);
+  const compatibility = compatibilityManifest(sourceRoot, pkg?.version);
   if (
     !pkg ||
     pkg.name !== "codex-workflow" ||
     !versionParts(pkg.version) ||
+    !compatibility ||
     !fs.existsSync(installPath) ||
-    !fs.existsSync(runtimeInstallPath)
+    !fs.existsSync(runtimeInstallPath) ||
+    !fs.existsSync(statusPath)
   ) {
     return null;
   }
-  return { root: sourceRoot, version: pkg.version, installPath, runtimeInstallPath };
+  return { root: sourceRoot, version: pkg.version, installPath, runtimeInstallPath, statusPath, compatibility };
 }
 
 function installedVersion() {
@@ -120,14 +148,25 @@ async function waitForAppExit(executable, timeoutMs = 15000) {
   return !appIsRunning(executable);
 }
 
-function selectStagedCandidate(state, installed) {
+function compatibilityMatches(candidate, identity) {
+  if (!identity) return true;
+  const compatibility = candidate?.compatibility;
+  return Boolean(compatibility) &&
+    compatibility.codexVersion === identity.version &&
+    compatibility.codexBuild === identity.build &&
+    compatibility.bundleIdentifier === identity.bundleIdentifier &&
+    compatibility.packageName === identity.packageName;
+}
+
+function selectStagedCandidate(state, installed, identity = null) {
   const candidate = state?.stagedSourceRoot
     ? sourcePackage(state.stagedSourceRoot)
     : null;
   if (
     !candidate ||
     state.availableVersion !== candidate.version ||
-    compareVersions(candidate.version, installed) <= 0
+    compareVersions(candidate.version, installed) <= 0 ||
+    !compatibilityMatches(candidate, identity)
   ) {
     return null;
   }
@@ -139,6 +178,27 @@ function chooseCandidate() {
   return {
     installed,
     candidate: selectStagedCandidate(readJson(statePath), installed),
+  };
+}
+
+function plistValue(target, key) {
+  const result = spawnSync("/usr/libexec/PlistBuddy", ["-c", `Print :${key}`, target], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0 || !result.stdout.trim()) {
+    throw new Error(`Could not inspect Codex ${key}`);
+  }
+  return result.stdout.trim();
+}
+
+function liveAppIdentity(config) {
+  const plist = path.join(config.appRoot, "Contents", "Info.plist");
+  if (!fs.existsSync(plist)) throw new Error("Codex Info.plist is unavailable");
+  return {
+    version: plistValue(plist, "CFBundleShortVersionString"),
+    build: plistValue(plist, "CFBundleVersion"),
+    bundleIdentifier: plistValue(plist, "CFBundleIdentifier"),
+    packageName: config.packageName,
   };
 }
 
@@ -183,7 +243,12 @@ async function checkRemote(config, previousState) {
   const staged = previousState?.stagedSourceRoot
     ? sourcePackage(previousState.stagedSourceRoot)
     : null;
-  const canReuseCachedRelease = staged && staged.version === previousState.availableVersion;
+  const cachedReleaseVersion = previousState?.releaseVersion || previousState?.availableVersion;
+  const canReuseCachedRelease = Boolean(
+    (staged && staged.version === cachedReleaseVersion) ||
+    (versionParts(cachedReleaseVersion) && versionParts(installedVersion()) &&
+      compareVersions(cachedReleaseVersion, installedVersion()) <= 0),
+  );
   if (canReuseCachedRelease && typeof previousState?.releaseEtag === "string" && previousState.releaseEtag) {
     headers["If-None-Match"] = previousState.releaseEtag;
   }
@@ -192,15 +257,22 @@ async function checkRemote(config, previousState) {
     signal: AbortSignal.timeout(8000),
   });
   if (response.status === 304) {
-    return { candidate: null, etag: previousState?.releaseEtag || null, unchanged: true };
+    return {
+      candidate: null,
+      etag: previousState?.releaseEtag || null,
+      releaseVersion: cachedReleaseVersion || null,
+      unchanged: true,
+    };
   }
-  if (response.status === 404) return { candidate: null, etag: null, unchanged: false };
+  if (response.status === 404) {
+    return { candidate: null, etag: null, releaseVersion: null, unchanged: false };
+  }
   if (!response.ok) throw new Error(`Workflow release check failed (${response.status})`);
   const etag = response.headers.get("etag") || null;
   const release = await response.json();
   const version = String(release.tag_name || "").replace(/^v/u, "");
   if (!versionParts(version) || compareVersions(version, installedVersion()) <= 0) {
-    return { candidate: null, etag, unchanged: false };
+    return { candidate: null, etag, releaseVersion: versionParts(version) ? version : null, unchanged: false };
   }
   const assetName = `codex-workflow-${version}.tar.gz`;
   const asset = Array.isArray(release.assets)
@@ -232,7 +304,7 @@ async function checkRemote(config, previousState) {
     .map((entry) => path.join(releaseRoot, entry.name));
   const source = [releaseRoot, ...children].map(sourcePackage).find(Boolean);
   if (!source || source.version !== version) throw new Error("Workflow release archive has invalid contents");
-  return { candidate: source, etag, unchanged: false };
+  return { candidate: source, etag, releaseVersion: version, unchanged: false };
 }
 
 function applyCandidate(config, candidate) {
@@ -256,9 +328,154 @@ function applyCandidate(config, candidate) {
   appendLog("info", `Workflow ${candidate.version} applied successfully`);
 }
 
+function inspectCandidateStatus(config, candidate) {
+  const result = spawnSync(config.nodeExecutable, [candidate.statusPath], {
+    encoding: "utf8",
+    env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
+  });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || "Workflow status inspection failed").trim());
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    throw new Error("Workflow status inspection returned invalid output");
+  }
+}
+
+function automaticRepairDecision(config, candidate, identity, status, previousState) {
+  const key = candidate && identity
+    ? `${candidate.version}:${identity.version}:${identity.build}:${status?.integrity?.computed || "unknown"}`
+    : null;
+  if (config?.autoRepairCodexUpdates !== true) return { eligible: false, reason: "disabled", key };
+  if (!candidate || !compatibilityMatches(candidate, identity)) {
+    return { eligible: false, reason: "no-compatible-release", key };
+  }
+  if (status?.pendingTransaction || status?.error) {
+    return { eligible: false, reason: "recovery-required", key };
+  }
+  if (status?.patched) return { eligible: false, reason: "already-patched", key };
+  if (status?.recommendedAction !== "install") {
+    return { eligible: false, reason: "unsupported-state", key };
+  }
+  if (
+    previousState?.automaticRepair?.key === key &&
+    ["applying", "failed", "installed-relaunch-failed"].includes(previousState.automaticRepair.status)
+  ) {
+    return { eligible: false, reason: "attempt-already-recorded", key };
+  }
+  return { eligible: true, reason: null, key };
+}
+
+function bundleInUse(targetRoot) {
+  const result = spawnSync("/usr/sbin/lsof", ["-nP", "+D", targetRoot], { stdio: "ignore" });
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  throw new Error("Could not verify Codex bundle quiescence");
+}
+
+async function waitForBundleQuiescence(config, timeoutMs = 15000) {
+  if (appIsRunning(config.appExecutable)) return false;
+  const deadline = Date.now() + timeoutMs;
+  let quietReads = 0;
+  do {
+    if (appIsRunning(config.appExecutable) || bundleInUse(config.appRoot)) {
+      quietReads = 0;
+    } else {
+      quietReads += 1;
+      if (quietReads === 2) return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  return false;
+}
+
+async function applyAutomaticRepair(config, candidate, identity, previousState, hooks = {}) {
+  const inspect = hooks.inspectCandidateStatus || inspectCandidateStatus;
+  const waitForQuiet = hooks.waitForBundleQuiescence || waitForBundleQuiescence;
+  const runProcess = hooks.spawnSync || spawnSync;
+  const readState = hooks.readState || (() => readJson(statePath) || {});
+  const writeState = hooks.writeState || ((value) => writeJsonAtomic(statePath, value));
+  const before = inspect(config, candidate);
+  const decision = automaticRepairDecision(config, candidate, identity, before, previousState);
+  if (!decision.eligible) {
+    if (decision.reason !== "disabled" && decision.reason !== "already-patched") {
+      appendLog("info", `Automatic repair skipped: ${decision.reason}`);
+    }
+    return false;
+  }
+  if (!await waitForQuiet(config)) {
+    appendLog("info", "Automatic repair deferred until the Codex bundle is quiescent");
+    writeState({
+      ...readState(),
+      automaticRepair: { key: decision.key, status: "waiting", updatedAt: new Date().toISOString() },
+    });
+    return false;
+  }
+  writeState({
+    ...readState(),
+    automaticRepair: { key: decision.key, status: "applying", updatedAt: new Date().toISOString() },
+  });
+  appendLog("info", `Automatically restoring Workflow ${candidate.version} for Codex ${identity.version} (${identity.build})`);
+  try {
+    const applied = runProcess(config.nodeExecutable, [candidate.installPath, "--auto-repair"], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
+    });
+    if (applied.status !== 0) {
+      throw new Error((applied.stderr || applied.stdout || "Automatic Workflow repair failed").trim());
+    }
+    const verified = inspect(config, candidate);
+    if (
+      !verified.ok ||
+      !verified.patched ||
+      verified.pendingTransaction ||
+      verified.appVersion !== identity.version ||
+      verified.appBuild !== identity.build ||
+      verified.integrity?.matches !== true ||
+      verified.signature?.valid !== true
+    ) {
+      throw new Error("Automatic Workflow repair did not pass installed hash, integrity, and signature verification");
+    }
+    const opened = runProcess("/usr/bin/open", [config.appRoot], { encoding: "utf8" });
+    const finalStatus = opened.status === 0 ? "relaunched" : "installed-relaunch-failed";
+    const error = opened.status === 0
+      ? null
+      : (opened.stderr || opened.stdout || "Codex could not be relaunched").trim();
+    writeState({
+      ...readState(),
+      installedVersion: candidate.version,
+      availableVersion: null,
+      stagedSourceRoot: null,
+      error,
+      automaticRepair: { key: decision.key, status: finalStatus, updatedAt: new Date().toISOString() },
+    });
+    if (error) {
+      appendLog("error", `Workflow was restored but Codex could not be relaunched: ${error}`);
+      return false;
+    }
+    appendLog("info", `Workflow ${candidate.version} restored and Codex relaunched`);
+    return true;
+  } catch (error) {
+    writeState({
+      ...readState(),
+      error: String(error?.stack || error).slice(0, 4000),
+      automaticRepair: { key: decision.key, status: "failed", updatedAt: new Date().toISOString() },
+    });
+    throw error;
+  }
+}
+
 async function run() {
   const config = readJson(configPath);
-  if (!config || config.schemaVersion !== 1 || !config.nodeExecutable || !config.appExecutable || !config.appRoot) {
+  if (
+    !config ||
+    config.schemaVersion !== 1 ||
+    !config.nodeExecutable ||
+    !config.appExecutable ||
+    !config.appRoot ||
+    !config.packageName
+  ) {
     throw new Error("Workflow updater configuration is missing or invalid");
   }
   if (!fs.existsSync(config.nodeExecutable)) throw new Error("Workflow updater Node.js runtime is unavailable");
@@ -268,7 +485,10 @@ async function run() {
 
   const previousState = readJson(statePath) || {};
   const installed = installedVersion();
-  const existingCandidate = selectStagedCandidate(previousState, installed);
+  const identity = liveAppIdentity(config);
+  let stagedRelease = previousState.stagedSourceRoot
+    ? sourcePackage(previousState.stagedSourceRoot)
+    : null;
   const shouldCheckRemote = apply || remoteCheckDue(previousState);
   let remoteResult = null;
   let checkError = null;
@@ -279,25 +499,48 @@ async function run() {
       checkError = String(error?.message || error).slice(0, 1000);
     }
   }
-  let candidate = existingCandidate;
-  if (remoteResult?.candidate) candidate = remoteResult.candidate;
-  else if (remoteResult && !remoteResult.unchanged) candidate = null;
-  const checkedAt = new Date().toISOString();
+  if (remoteResult?.candidate) stagedRelease = remoteResult.candidate;
+  else if (remoteResult && !remoteResult.unchanged) stagedRelease = null;
+  const candidate = stagedRelease &&
+    compareVersions(stagedRelease.version, installed) > 0 &&
+    compatibilityMatches(stagedRelease, identity)
+    ? stagedRelease
+    : null;
+  const checkedAt = new Date();
+  const failureCount = shouldCheckRemote
+    ? checkError ? Math.min(Number(previousState.remoteFailureCount || 0) + 1, 9) : 0
+    : Number(previousState.remoteFailureCount || 0);
   writeJsonAtomic(statePath, {
     ...previousState,
     schemaVersion: 1,
-    checkedAt,
+    checkedAt: checkedAt.toISOString(),
+    remoteAttemptedAt: shouldCheckRemote
+      ? checkedAt.toISOString()
+      : previousState.remoteAttemptedAt || null,
     remoteCheckedAt: shouldCheckRemote && !checkError
-      ? checkedAt
+      ? checkedAt.toISOString()
       : previousState.remoteCheckedAt || null,
+    nextRemoteCheckAt: shouldCheckRemote
+      ? new Date(checkedAt.getTime() + remoteBackoffMs(failureCount)).toISOString()
+      : previousState.nextRemoteCheckAt || null,
+    remoteFailureCount: failureCount,
     releaseEtag: remoteResult
       ? remoteResult.etag
       : previousState.releaseEtag || null,
+    releaseVersion: remoteResult
+      ? remoteResult.releaseVersion
+      : previousState.releaseVersion || stagedRelease?.version || null,
     installedVersion: installed,
     availableVersion: candidate?.version || null,
-    stagedSourceRoot: candidate?.root || null,
-    error: checkError,
+    availableCodexVersion: candidate?.compatibility.codexVersion || null,
+    availableCodexBuild: candidate?.compatibility.codexBuild || null,
+    stagedSourceRoot: stagedRelease?.root || null,
+    error: shouldCheckRemote ? checkError : previousState.error || null,
   });
+  if (background && candidate) {
+    await applyAutomaticRepair(config, candidate, identity, previousState);
+    return;
+  }
   if (!candidate || !apply) {
     appendLog("info", candidate ? `Workflow ${candidate.version} is available` : "No Workflow update is available");
     return;
@@ -319,4 +562,18 @@ if (require.main === module) {
   });
 }
 
-module.exports = { checkRemote, compareVersions, remoteCheckDue, chooseCandidate, selectStagedCandidate, sourcePackage, validateTarEntries, validateTarTypes, waitForProcessExit };
+module.exports = {
+  automaticRepairDecision,
+  applyAutomaticRepair,
+  checkRemote,
+  compareVersions,
+  compatibilityMatches,
+  remoteBackoffMs,
+  remoteCheckDue,
+  chooseCandidate,
+  selectStagedCandidate,
+  sourcePackage,
+  validateTarEntries,
+  validateTarTypes,
+  waitForProcessExit,
+};

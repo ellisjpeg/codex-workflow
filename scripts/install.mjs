@@ -34,6 +34,12 @@ const dryRun = process.argv.includes("--dry-run");
 const recoverOnly = process.argv.includes("--recover");
 const reapply = process.argv.includes("--reapply");
 const liveInstall = process.argv.includes("--live-install");
+const enableAutoRepair = process.argv.includes("--auto-repair");
+const disableAutoRepair = process.argv.includes("--no-auto-repair");
+
+if (enableAutoRepair && disableAutoRepair) {
+  throw new Error("Choose either --auto-repair or --no-auto-repair");
+}
 
 if (liveInstall) {
   throw new Error("--live-install is not supported; quit ChatGPT/Codex before applying the patch");
@@ -80,6 +86,9 @@ if (dryRun) {
     alreadyPatched,
     source,
     currentIntegrity: current.expectedIntegrity,
+    autoRepairCodexUpdates: enableAutoRepair
+      ? true
+      : disableAutoRepair ? false : undefined,
     warnings,
   }, null, 2));
   process.exit(0);
@@ -102,7 +111,11 @@ try {
   setPlistValue("ElectronAsarIntegrity:Resources/app.asar:hash", patchedIntegrity, patchedPlist);
 
   transaction = createTransaction();
-  installRuntimeFiles();
+  installRuntimeFiles({
+    autoRepairCodexUpdates: enableAutoRepair
+      ? true
+      : disableAutoRepair ? false : undefined,
+  });
   transaction = setTransactionPhase(transaction, "runtime-installed");
   atomicReplace(patchedAsar, asarPath);
   transaction = setTransactionPhase(transaction, "asar-replaced");

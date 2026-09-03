@@ -14,8 +14,9 @@ This is an independent community project and is not affiliated with or endorsed 
 - Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
 - Optional sidebar **Settings** shortcut with **Help & Updates** moved into the account menu.
 - Native hover-reveal **Workflow Update** control in the sidebar-aligned titlebar region.
-- One-click guarded runtime updates, automatic relaunch, and logged failures without a dialog.
-- Conditional, verified GitHub Release checks every five minutes.
+- One-click guarded runtime updates in the Workflow sidebar pill, with automatic relaunch and logged failures.
+- Immediate startup/visibility checks plus five-minute conditional GitHub Release checks with bounded backoff.
+- Optional exact-build automatic repair after a Codex Desktop replacement.
 - Scoped sidebar and settings observers with route/remount recovery.
 - Atomic local settings persistence and visible rollback after write failures.
 - Version, bundle identity, ASAR integrity, backup, transaction, recovery, and uninstall guards.
@@ -34,31 +35,22 @@ The installer intentionally refuses unreviewed Codex versions and builds. A desk
 git clone https://github.com/ellisjpeg/codex-workflow.git
 cd codex-workflow
 npm ci
-npm run check
-npm run status
+npm run setup -- --auto-repair
 ```
 
-Use the action reported by `npm run status`:
+The setup command runs each source/status/preflight gate once, opens at most one isolated staging app, accepts `y` or `yes`, removes staging on normal exit, cancellation, `HUP`, `INT`, or `TERM`, waits for Codex to quit, installs once, verifies the result, and relaunches once. Detailed output is kept in the reported temporary log only when a step fails.
+
+Automatic repair is opt-in. Omit `--auto-repair` to install without it. An agent or other noninteractive runner can provide the same explicit approval with:
 
 ```sh
-# Supported stock installation
-npm run install:patch -- --dry-run
-
-# Existing Workflow installation
-npm run reapply:patch -- --dry-run
+npm run setup -- --yes --auto-repair
 ```
 
-Quit Codex Desktop before running the corresponding command without `--dry-run`:
+The command is idempotent: if Workflow is already current it reports that state without launching or reinstalling anything. Recovery and unsupported states stop for inspection instead of being guessed through.
 
-```sh
-npm run install:patch
-# or
-npm run reapply:patch
-```
+After installation, Workflow checks packaged GitHub Releases at app startup and when the app becomes active, then no more often than every five minutes. Checks use ETags and exponential failure backoff capped at one hour. Only a verified staged release whose compatibility manifest matches the exact Codex version/build can surface the existing Workflow sidebar update pill; local checkout or commit drift is ignored. Clicking the pill applies a guarded external-runtime transaction, then relaunches Codex. Releases that change the embedded loader still require a reviewed guarded reapply.
 
-Relaunch Codex and run `npm run status` again. A healthy installation reports `ok: true`, matching integrity, current runtime files, and no pending transaction.
-
-After installation, Workflow checks packaged GitHub Releases every five minutes using conditional requests. Only a verified staged release can surface the sidebar update control; local checkout or version changes are ignored. Clicking it applies a guarded external-runtime transaction, then relaunches Codex. Releases that change the embedded loader still require a reviewed guarded reapply.
+When `--auto-repair` was selected, the machine-local background agent can detect that Codex replaced the patched app with a stock exact-build installation. It waits for the app and bundle to become quiescent, requires a verified release manifest for that exact Codex version/build, runs the normal journaled installer once, verifies runtime hashes, ASAR integrity, and the ad-hoc signature, then relaunches once. An unknown build, pending recovery, failed attempt, or running app stops or defers safely; it never uses `--allow-version` or consumes the source backup.
 
 ## Recovery and removal
 
@@ -87,6 +79,7 @@ Release tags build a self-contained `codex-workflow-<version>.tar.gz` asset. The
 - The patch modifies `/Applications/ChatGPT.app`; keep a current backup and use only the guarded commands.
 - After install, Workflow ad-hoc re-signs the patched app so macOS will launch it. Uninstall restores the original Apple signature when that backup exists.
 - Never use `--allow-version` without reviewing the new Codex build.
+- Automatic post-update repair is disabled unless installation used `--auto-repair`.
 - Quit Codex before install, reapply, recovery, or uninstall.
 - Settings, logs, backups, and transactions remain local to the current macOS user.
 - The background updater contacts only the configured GitHub Releases API and can be removed with the normal uninstall command.

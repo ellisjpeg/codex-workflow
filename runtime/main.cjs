@@ -22,6 +22,7 @@ const transactionPath = path.join(runtimeRoot, "transaction.json");
 const updaterPath = path.join(runtimeRoot, "runtime", "updater.cjs");
 const updateWatchers = [];
 let updateLaunchInFlight = false;
+let updateCheckInFlight = false;
 const defaults = {
   schemaVersion: 2,
   focusedInterface: true,
@@ -125,15 +126,22 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function readStagedUpdate(remote, installedVersion) {
+function readStagedUpdate(remote, installedVersion, updateConfig) {
   if (typeof remote?.stagedSourceRoot !== "string" || !remote.stagedSourceRoot) return null;
   const pkg = readJson(path.join(remote.stagedSourceRoot, "package.json"));
+  const compatibility = readJson(path.join(remote.stagedSourceRoot, "workflow-compatibility.json"));
   const installPath = path.join(remote.stagedSourceRoot, "scripts", "install.mjs");
   const runtimeInstallPath = path.join(remote.stagedSourceRoot, "scripts", "install-runtime.mjs");
   if (
     pkg?.name !== "codex-workflow" ||
     !versionParts(pkg.version) ||
     remote.availableVersion !== pkg.version ||
+    compatibility?.schemaVersion !== 1 ||
+    compatibility.workflowVersion !== pkg.version ||
+    compatibility.codexVersion !== updateConfig?.codexVersion ||
+    compatibility.codexBuild !== updateConfig?.codexBuild ||
+    compatibility.bundleIdentifier !== updateConfig?.bundleIdentifier ||
+    compatibility.packageName !== updateConfig?.packageName ||
     compareVersions(pkg.version, installedVersion) <= 0 ||
     !fs.existsSync(installPath) ||
     !fs.existsSync(runtimeInstallPath)
@@ -150,7 +158,7 @@ function readUpdateStatus() {
     null;
   const updateConfig = readJson(updateConfigPath);
   const remote = readJson(updateStatePath);
-  const staged = readStagedUpdate(remote, installedVersion);
+  const staged = readStagedUpdate(remote, installedVersion, updateConfig);
   const blockedReason = updateConfig?.updatesDisabled === true
     ? "updates-disabled"
     : fs.existsSync(transactionPath) ? "recovery-required" : null;
@@ -161,6 +169,41 @@ function readUpdateStatus() {
     blockedReason,
     error: remote?.error || null,
   };
+}
+
+function updateCheckDue() {
+  const remote = readJson(updateStatePath) || {};
+  const nextCheckAt = Date.parse(remote.nextRemoteCheckAt || "");
+  if (Number.isFinite(nextCheckAt)) return Date.now() >= nextCheckAt;
+  const checkedAt = Date.parse(remote.remoteCheckedAt || "");
+  return !Number.isFinite(checkedAt) || Date.now() - checkedAt >= 5 * 60 * 1000;
+}
+
+function triggerUpdateCheck() {
+  if (updateCheckInFlight || !updateCheckDue()) return;
+  const config = readJson(updateConfigPath);
+  if (!config?.nodeExecutable || !fs.existsSync(config.nodeExecutable)) return;
+  updateCheckInFlight = true;
+  let finished = false;
+  const finish = (error) => {
+    if (finished) return;
+    finished = true;
+    updateCheckInFlight = false;
+    if (error) appendLog("error", `Workflow update check failed: ${error}`);
+    broadcastUpdateStatus();
+  };
+  try {
+    const child = spawn(config.nodeExecutable, [updaterPath, "--check"], {
+      stdio: "ignore",
+      env: { ...process.env, CODEX_WORKFLOW_ROOT: runtimeRoot },
+    });
+    child.once("error", (error) => finish(error?.message || error));
+    child.once("close", (code, signal) => finish(
+      code === 0 ? null : signal ? `signal ${signal}` : `exit ${code}`,
+    ));
+  } catch (error) {
+    finish(error?.message || error);
+  }
 }
 
 function broadcastUpdateStatus() {
@@ -281,7 +324,9 @@ if (!globalThis.__codexWorkflowMainInstalled) {
   app.whenReady().then(() => {
     registerPreload(session.defaultSession, "defaultSession");
     watchUpdateState();
+    triggerUpdateCheck();
   });
+  app.on("browser-window-focus", triggerUpdateCheck);
   app.on("session-created", (createdSession) => registerPreload(createdSession, "session-created"));
   app.on("web-contents-created", (_event, contents) => {
     appendLog("info", `web contents created: ${contents.id} ${contents.getType()}`);
