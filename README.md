@@ -23,10 +23,10 @@ This is an independent community project and is not affiliated with or endorsed 
 ## Compatibility
 
 - macOS
-- Codex Desktop `26.820.60940` (build `7119`)
+- Codex Desktop `26.901.20858` (build `7658`)
 - Node.js 24 or newer
 
-The installer intentionally refuses unreviewed Codex versions. A desktop update may change internal routes, DOM structure, preload behavior, or ASAR metadata even when the interface looks similar.
+The installer intentionally refuses unreviewed Codex versions and builds. A desktop update may change internal routes, DOM structure, preload behavior, or ASAR metadata even when the interface looks similar.
 
 ## Install
 
@@ -101,6 +101,8 @@ npm run status
 ```
 
 Pull requests should include focused regression coverage and must not install into the contributor's live Codex app as part of automated tests. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+Maintainers can prepare one isolated live-test clone with `npm run staging -- prepare --port <unique-port>`. The emitted manifest is required by the `launch`, `stop`, `restore`, and `cleanup` subcommands. The helper creates its own bundle identity, executable, user data, `CODEX_HOME`, Workflow runtime, settings, logs, updates, backups, and transaction path under one short validated `/private/tmp` root. It guards the macOS Unix-socket path limit, disables Sparkle, and never installs a LaunchAgent.
 
 ## License
 

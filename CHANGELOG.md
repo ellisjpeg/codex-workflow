@@ -2,6 +2,11 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.10 - 2026-09-03
+
+- Re-audited and guarded Codex Desktop `26.901.20858` build `7658` without changing the existing native DOM integration.
+- Added a validated disposable-staging helper with separate app identity, process, user data, short socket-safe `CODEX_HOME`, Workflow state, and updater isolation.
+
 ## 0.5.9 - 2026-09-02
 
 - After replacing ASAR and Info.plist, ad-hoc re-sign ChatGPT/Codex so macOS will launch the patched app.

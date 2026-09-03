@@ -13,6 +13,7 @@ import {
   resolveSourceBackup,
   runtimeRoot,
   sourceRoot,
+  supportedBuild,
   supportedVersion,
   transactionRecoveryStatus,
 } from "./lib.mjs";
@@ -57,6 +58,7 @@ if (patched) {
 }
 
 const versionSupported = current?.pkg.version === supportedVersion;
+const buildSupported = String(current?.pkg.codexBuildNumber || "unknown") === supportedBuild;
 const runtimeReady = runtimeFiles.every((file) => file.present) && updateConfigPresent;
 const runtimeCurrent = runtimeFiles.every((file) => file.matchesSource);
 const state = readPatchState();
@@ -77,22 +79,26 @@ const action = pending
   : error
     ? "inspect"
     : !patched
-      ? versionSupported ? "install" : "install-with-version-review"
-      : !runtimeReady || !sourceBackup.present
-        ? "reapply-or-restore"
-        : !loaderCurrent || !sourceCurrent || !runtimeCurrent
-          ? "reapply"
-          : disabled
-            ? "enable"
-            : "none";
+      ? versionSupported && buildSupported ? "install" : "install-with-version-review"
+      : !versionSupported || !buildSupported
+        ? "inspect"
+        : !runtimeReady || !sourceBackup.present
+          ? "reapply-or-restore"
+          : !loaderCurrent || !sourceCurrent || !runtimeCurrent
+            ? "reapply"
+            : disabled
+              ? "enable"
+              : "none";
 
 console.log(JSON.stringify({
-  ok: !pending && !error && versionSupported && patched && runtimeReady && runtimeCurrent && sourceBackup.present && loaderCurrent && sourceCurrent && !disabled,
+  ok: !pending && !error && versionSupported && buildSupported && patched && runtimeReady && runtimeCurrent && sourceBackup.present && loaderCurrent && sourceCurrent && !disabled,
   recommendedAction: action,
   pendingTransaction: pending ? { id: pending.id, phase: pending.phase, recovery } : null,
   error: error || null,
   appVersion: current?.pkg.version || null,
+  appBuild: current ? String(current.pkg.codexBuildNumber || "unknown") : null,
   supportedVersion,
+  supportedBuild,
   sourcePatchVersion: patchVersion,
   installedWorkflowVersion,
   appPatchVersion: current?.pkg.__codexWorkflow?.version || null,
@@ -101,6 +107,7 @@ console.log(JSON.stringify({
   runtimeCurrent,
   enabled: !disabled,
   versionSupported: Boolean(versionSupported),
+  buildSupported: Boolean(buildSupported),
   patched,
   patch: current?.pkg.__codexWorkflow || null,
   sourceBackup,

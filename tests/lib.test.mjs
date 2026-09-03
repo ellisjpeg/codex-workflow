@@ -16,6 +16,7 @@ import {
   restoreFilePair,
   restoreRuntimeFiles,
   runtimeRoot,
+  supportedBuild,
   supportedVersion,
   transactionRecoveryStatus,
   validateSourceFingerprint,
@@ -25,7 +26,12 @@ import {
 
 const libSource = readFileSync(new URL("../scripts/lib.mjs", import.meta.url), "utf8");
 
-async function createAsarPair(root, name, marker) {
+test("compatibility guard names the audited Codex version and build", () => {
+  assert.equal(supportedVersion, "26.901.20858");
+  assert.equal(supportedBuild, "7658");
+});
+
+async function createAsarPair(root, name, marker, build = Number(supportedBuild)) {
   const source = join(root, `${name}-source`);
   const targetAsar = join(root, `${name}.asar`);
   const targetPlist = join(root, `${name}.Info.plist`);
@@ -34,7 +40,7 @@ async function createAsarPair(root, name, marker) {
   writeFileSync(join(source, "package.json"), `${JSON.stringify({
     name: "openai-codex-electron",
     version: supportedVersion,
-    codexBuildNumber: 7119,
+    codexBuildNumber: build,
     main: "./main.cjs",
   }, null, 2)}\n`);
   await asar.createPackage(source, targetAsar);
@@ -48,6 +54,23 @@ async function createAsarPair(root, name, marker) {
 </dict></plist>\n`);
   return { targetAsar, targetPlist };
 }
+
+test("preflight rejects an unaudited build under the supported version", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
+  try {
+    const fixture = await createAsarPair(root, "wrong-build", "fixture", 7659);
+    assert.throws(
+      () => preflight(fixture.targetAsar, fixture.targetPlist),
+      /Unsupported Codex build 7659; expected 7658/u,
+    );
+    assert.equal(
+      preflight(fixture.targetAsar, fixture.targetPlist, { allowVersion: true }).pkg.codexBuildNumber,
+      7659,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function fixtureJournal(overrides = {}) {
   const id = "20260831-020000-12345678-1234-4abc-8def-1234567890ab";

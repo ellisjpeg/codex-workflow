@@ -29,10 +29,11 @@ export const infoPlistPath = join(appRoot, "Contents", "Info.plist");
 export const runtimeRoot = join(homedir(), "Library", "Application Support", "Codex Workflow");
 export const disabledPath = join(runtimeRoot, "DISABLED");
 export const updaterAgentPath = join(homedir(), "Library", "LaunchAgents", "com.ellisjpeg.codex-workflow-updater.plist");
-export const supportedVersion = "26.820.60940";
+export const supportedVersion = "26.901.20858";
+export const supportedBuild = "7658";
 export const expectedBundleIdentifier = "com.openai.codex";
 export const expectedPackageName = "openai-codex-electron";
-export const patchVersion = "0.5.9";
+export const patchVersion = "0.5.10";
 export const adhocEntitlementsPath = join(sourceRoot, "scripts", "adhoc.entitlements");
 export const appleSignatureBackupName = "AppleSignature";
 
@@ -265,6 +266,10 @@ export function preflight(targetAsar = asarPath, targetPlist = infoPlistPath, { 
   }
   if (pkg.version !== supportedVersion && !allowVersion) {
     throw new Error(`Unsupported Codex version ${pkg.version}; expected ${supportedVersion}`);
+  }
+  const build = String(pkg.codexBuildNumber || "unknown");
+  if (build !== supportedBuild && !allowVersion) {
+    throw new Error(`Unsupported Codex build ${build}; expected ${supportedBuild}`);
   }
   return {
     pkg,
