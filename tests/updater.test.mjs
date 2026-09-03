@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-process.env.CODEX_WORKFLOW_ROOT = "/tmp/codex-workflow-updater-test";
+const updaterRuntimeRoot = "/tmp/codex-workflow-updater-test";
+process.env.CODEX_WORKFLOW_ROOT = updaterRuntimeRoot;
 const require = createRequire(import.meta.url);
 const {
   automaticRepairDecision,
@@ -113,6 +116,61 @@ test("updater bypasses a stale ETag when its staged release is missing", async (
     assert.equal(request.options.headers["If-None-Match"], undefined);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("auto repair reacquires a source-less equal-version release", async () => {
+  const originalFetch = globalThis.fetch;
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-updater-refetch-test-"));
+  const releaseRoot = join(root, "release");
+  const archive = join(root, "codex-workflow-0.5.11.tar.gz");
+  const releaseApi = "https://api.github.test/releases/latest";
+  const assetUrl = "https://downloads.github.test/codex-workflow-0.5.11.tar.gz";
+  writeRelease(releaseRoot, "0.5.11");
+  const packed = spawnSync("/usr/bin/tar", ["-czf", archive, "-C", releaseRoot, "."], { encoding: "utf8" });
+  assert.equal(packed.status, 0, packed.stderr);
+  const archiveBytes = readFileSync(archive);
+  const digest = createHash("sha256").update(archiveBytes).digest("hex");
+  rmSync(updaterRuntimeRoot, { recursive: true, force: true });
+  mkdirSync(join(updaterRuntimeRoot, "runtime"), { recursive: true });
+  writeFileSync(join(updaterRuntimeRoot, "runtime", "version.json"), '{"version":"0.5.11"}\n');
+  let releaseRequest;
+  globalThis.fetch = async (url, options) => {
+    if (url === releaseApi) {
+      releaseRequest = { url, options };
+      if (options.headers["If-None-Match"]) return { status: 304, ok: false };
+      return {
+        status: 200,
+        ok: true,
+        headers: { get: (name) => name === "etag" ? '"release-1"' : null },
+        json: async () => ({
+          tag_name: "v0.5.11",
+          assets: [{
+            name: "codex-workflow-0.5.11.tar.gz",
+            browser_download_url: assetUrl,
+            digest: `sha256:${digest}`,
+          }],
+        }),
+      };
+    }
+    assert.equal(url, assetUrl);
+    return { status: 200, ok: true, arrayBuffer: async () => archiveBytes };
+  };
+  try {
+    const result = await checkRemote(
+      { releaseApi, autoRepairCodexUpdates: true },
+      {
+        releaseEtag: '"release-1"',
+        releaseVersion: "0.5.11",
+        stagedSourceRoot: null,
+      },
+    );
+    assert.equal(releaseRequest.options.headers["If-None-Match"], undefined);
+    assert.equal(result.candidate?.version, "0.5.11");
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(updaterRuntimeRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -304,6 +362,8 @@ test("equal-version release is not an ordinary update or a mismatched-build repa
       packageName: "openai-codex-electron",
     };
     assert.equal(releaseVersionEligible(candidate.version, candidate.version, false), false);
+    assert.equal(releaseVersionEligible("0.5.11-rc.1", candidate.version, true), false);
+    assert.equal(releaseVersionEligible("0.5.11+other", candidate.version, true), false);
     assert.equal(eligibleReleaseCandidate(candidate, candidate.version, identity, false), null);
     assert.equal(eligibleReleaseCandidate(
       candidate,

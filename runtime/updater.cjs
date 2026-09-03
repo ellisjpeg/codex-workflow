@@ -66,7 +66,7 @@ function compareVersions(left, right) {
 function releaseVersionEligible(version, installed, allowEqual = false) {
   if (!versionParts(version) || !versionParts(installed)) return false;
   const comparison = compareVersions(version, installed);
-  return comparison > 0 || (allowEqual && comparison === 0);
+  return comparison > 0 || (allowEqual && version === installed);
 }
 
 function remoteCheckDue(state, now = Date.now()) {
@@ -257,11 +257,16 @@ async function checkRemote(config, previousState) {
     ? sourcePackage(previousState.stagedSourceRoot)
     : null;
   const cachedReleaseVersion = previousState?.releaseVersion || previousState?.availableVersion;
-  const canReuseCachedRelease = Boolean(
-    (staged && staged.version === cachedReleaseVersion) ||
-    (versionParts(cachedReleaseVersion) && versionParts(installedVersion()) &&
-      compareVersions(cachedReleaseVersion, installedVersion()) <= 0),
-  );
+  const installed = installedVersion();
+  const cachedComparison = versionParts(cachedReleaseVersion) && versionParts(installed)
+    ? compareVersions(cachedReleaseVersion, installed)
+    : null;
+  const hasCachedSource = staged?.version === cachedReleaseVersion;
+  const needsEqualRepairSource = config.autoRepairCodexUpdates === true &&
+    !hasCachedSource &&
+    cachedReleaseVersion === installed;
+  const canReuseCachedRelease = hasCachedSource ||
+    (!needsEqualRepairSource && cachedComparison !== null && cachedComparison <= 0);
   if (canReuseCachedRelease && typeof previousState?.releaseEtag === "string" && previousState.releaseEtag) {
     headers["If-None-Match"] = previousState.releaseEtag;
   }
