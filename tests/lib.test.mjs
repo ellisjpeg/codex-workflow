@@ -31,7 +31,12 @@ test("compatibility guard names the audited Codex version and build", () => {
   assert.equal(supportedBuild, "7658");
 });
 
-async function createAsarPair(root, name, marker, build = Number(supportedBuild)) {
+async function createAsarPair(root, name, marker, {
+  build = Number(supportedBuild),
+  version = supportedVersion,
+  plistBuild = String(build),
+  plistVersion = version,
+} = {}) {
   const source = join(root, `${name}-source`);
   const targetAsar = join(root, `${name}.asar`);
   const targetPlist = join(root, `${name}.Info.plist`);
@@ -39,7 +44,7 @@ async function createAsarPair(root, name, marker, build = Number(supportedBuild)
   writeFileSync(join(source, "main.cjs"), `module.exports = ${JSON.stringify(marker)};\n`);
   writeFileSync(join(source, "package.json"), `${JSON.stringify({
     name: "openai-codex-electron",
-    version: supportedVersion,
+    version,
     codexBuildNumber: build,
     main: "./main.cjs",
   }, null, 2)}\n`);
@@ -48,6 +53,8 @@ async function createAsarPair(root, name, marker, build = Number(supportedBuild)
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.openai.codex</string>
+<key>CFBundleShortVersionString</key><string>${plistVersion}</string>
+<key>CFBundleVersion</key><string>${plistBuild}</string>
 <key>ElectronAsarIntegrity</key><dict><key>Resources/app.asar</key><dict>
 <key>algorithm</key><string>SHA256</string><key>hash</key><string>${headerHash(targetAsar)}</string>
 </dict></dict>
@@ -58,7 +65,7 @@ async function createAsarPair(root, name, marker, build = Number(supportedBuild)
 test("preflight rejects an unaudited build under the supported version", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
   try {
-    const fixture = await createAsarPair(root, "wrong-build", "fixture", 7659);
+    const fixture = await createAsarPair(root, "wrong-build", "fixture", { build: 7659, plistBuild: "7659" });
     assert.throws(
       () => preflight(fixture.targetAsar, fixture.targetPlist),
       /Unsupported Codex build 7659; expected 7658/u,
@@ -66,6 +73,28 @@ test("preflight rejects an unaudited build under the supported version", async (
     assert.equal(
       preflight(fixture.targetAsar, fixture.targetPlist, { allowVersion: true }).pkg.codexBuildNumber,
       7659,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight rejects package and bundle version or build mismatches", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
+  try {
+    const wrongVersion = await createAsarPair(root, "wrong-version-pair", "fixture", {
+      plistVersion: "26.901.20859",
+    });
+    assert.throws(
+      () => preflight(wrongVersion.targetAsar, wrongVersion.targetPlist, { allowVersion: true }),
+      /package version .* does not match bundle version/u,
+    );
+    const wrongBuild = await createAsarPair(root, "wrong-build-pair", "fixture", {
+      plistBuild: "7659",
+    });
+    assert.throws(
+      () => preflight(wrongBuild.targetAsar, wrongBuild.targetPlist, { allowVersion: true }),
+      /package build .* does not match bundle build/u,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

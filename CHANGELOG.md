@@ -6,6 +6,7 @@ All notable changes to Codex Workflow are documented here.
 
 - Re-audited and guarded Codex Desktop `26.901.20858` build `7658` without changing the existing native DOM integration.
 - Added a validated disposable-staging helper with separate app identity, process, user data, short socket-safe `CODEX_HOME`, Workflow state, and updater isolation.
+- Hardened staging with fail-closed updates, immutable clone builds, exact port/process ownership, symlink revalidation, and backup-preserving lifecycle checks.
 
 ## 0.5.9 - 2026-09-02
 

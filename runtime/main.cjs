@@ -148,9 +148,12 @@ function readUpdateStatus() {
     readJson(patchStatePath)?.runtimeVersion ||
     readJson(patchStatePath)?.patchVersion ||
     null;
+  const updateConfig = readJson(updateConfigPath);
   const remote = readJson(updateStatePath);
   const staged = readStagedUpdate(remote, installedVersion);
-  const blockedReason = fs.existsSync(transactionPath) ? "recovery-required" : null;
+  const blockedReason = updateConfig?.updatesDisabled === true
+    ? "updates-disabled"
+    : fs.existsSync(transactionPath) ? "recovery-required" : null;
   return {
     available: Boolean(staged) && !blockedReason,
     installedVersion,

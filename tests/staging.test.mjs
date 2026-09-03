@@ -1,8 +1,35 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import * as asar from "@electron/asar";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
+  buildPatchedAsar,
+  expectedBundleIdentifier,
+  expectedPackageName,
+  fileHash,
+  headerHash,
+  preflight,
+  supportedBuild,
+  supportedVersion,
+} from "../scripts/lib.mjs";
+import {
+  cleanupStaging,
+  launchStaging,
+  prepareStaging,
+  restoreStaging,
+  stopStaging,
   assertStagingRoot,
   assertManagedStagingPath,
   stagingBaseRoot,
@@ -12,7 +39,99 @@ import {
   stagingName,
   stagingPrefix,
   stagingUnixSocketPathMaxBytes,
+  stagingUpdaterPath,
 } from "../scripts/staging.mjs";
+
+const fixturePort = 49258;
+
+function infoPlist(integrity) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>${expectedBundleIdentifier}</string>
+  <key>CFBundleName</key><string>ChatGPT</string>
+  <key>CFBundleDisplayName</key><string>ChatGPT</string>
+  <key>CFBundleExecutable</key><string>ChatGPT</string>
+  <key>CFBundleShortVersionString</key><string>${supportedVersion}</string>
+  <key>CFBundleVersion</key><string>${supportedBuild}</string>
+  <key>CFBundleURLTypes</key><array/>
+  <key>CFBundleDocumentTypes</key><array/>
+  <key>ElectronAsarIntegrity</key>
+  <dict>
+    <key>Resources/app.asar</key>
+    <dict>
+      <key>algorithm</key><string>SHA256</string>
+      <key>hash</key><string>${integrity}</string>
+    </dict>
+  </dict>
+</dict>
+</plist>
+`;
+}
+
+async function createStockFixture() {
+  const root = mkdtempSync("/private/tmp/codex-workflow-stock-fixture-");
+  const app = join(root, "ChatGPT.app");
+  const contents = join(app, "Contents");
+  const resources = join(contents, "Resources");
+  const macos = join(contents, "MacOS");
+  const source = join(root, "asar-source");
+  mkdirSync(resources, { recursive: true });
+  mkdirSync(macos, { recursive: true });
+  mkdirSync(source);
+  writeFileSync(join(source, "package.json"), `${JSON.stringify({
+    name: expectedPackageName,
+    version: supportedVersion,
+    codexBuildNumber: Number(supportedBuild),
+    main: "./main.js",
+  }, null, 2)}\n`);
+  writeFileSync(join(source, "main.js"), "module.exports = {};\n");
+  const targetAsar = join(resources, "app.asar");
+  await asar.createPackage(source, targetAsar);
+  const plist = join(contents, "Info.plist");
+  writeFileSync(plist, infoPlist(headerHash(targetAsar)));
+  const executable = join(macos, "ChatGPT");
+  writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+  chmodSync(executable, 0o755);
+  return { root, app, asar: targetAsar, plist };
+}
+
+function fixtureHooks(fixture, state, overrides = {}) {
+  return {
+    assertPortAvailable() {},
+    sourcePreflight: () => preflight(fixture.asar, fixture.plist),
+    clonePreflight: (targetAsar, targetPlist) => preflight(targetAsar, targetPlist),
+    cloneApp(_source, target) {
+      state.cloneCount = (state.cloneCount || 0) + 1;
+      cpSync(fixture.app, target, { recursive: true });
+    },
+    createRoot() {
+      state.stagingRoot = mkdtempSync(join(stagingBaseRoot, `${stagingPrefix}test-`));
+      return state.stagingRoot;
+    },
+    resignPatchedApp() {},
+    signatureIsValid: () => true,
+    ...overrides,
+  };
+}
+
+async function prepareFixture(fixture, state = {}, overrides = {}) {
+  return prepareStaging(fixturePort, fixtureHooks(fixture, state, overrides));
+}
+
+function readJson(target) {
+  return JSON.parse(readFileSync(target, "utf8"));
+}
+
+function launchedIdentity(manifest, processId = 43121) {
+  return {
+    processId,
+    processGroupId: processId,
+    startedAt: "Thu Sep  3 12:00:00 2026",
+    executable: manifest.executable,
+  };
+}
 
 test("staging layout isolates every mutable root under one generated temporary directory", () => {
   const root = join(stagingBaseRoot, `${stagingPrefix}fixture`);
@@ -45,6 +164,7 @@ test("managed staging paths reject traversal and symlink redirection", () => {
   try {
     mkdirSync(join(root, "state"));
     symlinkSync("/Applications", join(root, "state", "redirect"));
+    symlinkSync("/path/that/does/not/exist", join(root, "state", "dangling"));
     assert.throws(
       () => assertManagedStagingPath(root, "/Applications/ChatGPT.app"),
       /escapes its generated root/u,
@@ -53,8 +173,22 @@ test("managed staging paths reject traversal and symlink redirection", () => {
       () => assertManagedStagingPath(root, join(root, "state", "redirect", "ChatGPT.app")),
       /must not contain symbolic links/u,
     );
+    assert.throws(
+      () => assertManagedStagingPath(root, join(root, "state", "dangling", "app.asar")),
+      /must not contain symbolic links/u,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("staging root rejects a dangling symbolic link", () => {
+  const root = join(stagingBaseRoot, `${stagingPrefix}dangling-${process.pid}`);
+  symlinkSync("/path/that/does/not/exist", root);
+  try {
+    assert.throws(() => assertStagingRoot(root), /must not be a symbolic link/u);
+  } finally {
+    rmSync(root, { force: true });
   }
 });
 
@@ -71,4 +205,300 @@ test("staging root and DevTools guards reject production, nesting, and unsafe po
     () => stagingLayout(join(stagingBaseRoot, `${stagingPrefix}${"x".repeat(100)}`), 49258),
     /IPC socket path exceeds/u,
   );
+});
+
+test("prepare clones once, builds only the verified clone, and installs a fail-closed updater", async () => {
+  const fixture = await createStockFixture();
+  const state = { buildInputs: [] };
+  const sourceHash = fileHash(fixture.asar);
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state, {
+      async buildPatchedAsar(...args) {
+        state.buildInputs.push(args[0]);
+        await buildPatchedAsar(...args);
+        assert.equal(
+          JSON.parse(asar.extractFile(args[1], "package.json").toString("utf8")).main,
+          "workflow-loader.cjs",
+        );
+      },
+    });
+    assert.equal(state.cloneCount, 1);
+    assert.deepEqual(state.buildInputs, [manifest.asar]);
+    assert.notEqual(fileHash(manifest.asar), sourceHash);
+    assert.equal(fileHash(fixture.asar), sourceHash);
+    assert.equal(fileHash(join(manifest.sourceBackup, "app.asar")), sourceHash);
+    assert.equal(
+      fileHash(join(manifest.workflowRoot, "runtime", "updater.cjs")),
+      fileHash(stagingUpdaterPath),
+    );
+    const updateConfig = readJson(join(manifest.workflowRoot, "update-config.json"));
+    assert.equal(updateConfig.updatesDisabled, true);
+    assert.equal(updateConfig.sourceRoot, null);
+    assert.equal(updateConfig.nodeExecutable, null);
+    assert.equal(manifest.updaterIsolation.workflowUpdatesDisabled, true);
+    const updater = spawnSync(process.execPath, [
+      join(manifest.workflowRoot, "runtime", "updater.cjs"),
+      "--apply",
+    ], { encoding: "utf8" });
+    assert.equal(updater.status, 78);
+    assert.match(updater.stderr, /updates are disabled in isolated staging/u);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("prepare removes its isolated clone after an interrupted build and preserves the source", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  const sourceHash = fileHash(fixture.asar);
+  try {
+    await assert.rejects(
+      prepareFixture(fixture, state, {
+        async buildPatchedAsar() {
+          throw new Error("fixture build interruption");
+        },
+      }),
+      /fixture build interruption/u,
+    );
+    assert.equal(state.cloneCount, 1);
+    assert.equal(existsSync(state.stagingRoot), false);
+    assert.equal(fileHash(fixture.asar), sourceHash);
+  } finally {
+    if (state.stagingRoot && existsSync(state.stagingRoot)) {
+      rmSync(state.stagingRoot, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("prepare rejects a clone whose captured source fingerprint changed", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let buildCalled = false;
+  try {
+    await assert.rejects(
+      prepareFixture(fixture, state, {
+        clonePreflight(targetAsar, targetPlist) {
+          const cloned = preflight(targetAsar, targetPlist);
+          return {
+            ...cloned,
+            fingerprint: { ...cloned.fingerprint, asarSha256: "0".repeat(64) },
+          };
+        },
+        async buildPatchedAsar() {
+          buildCalled = true;
+        },
+      }),
+      /does not match captured source asarSha256/u,
+    );
+    assert.equal(state.cloneCount, 1);
+    assert.equal(buildCalled, false);
+    assert.equal(existsSync(state.stagingRoot), false);
+  } finally {
+    if (state.stagingRoot && existsSync(state.stagingRoot)) {
+      rmSync(state.stagingRoot, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("launch proves DevTools ownership and stop signals only the persisted process group", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const identity = launchedIdentity(manifest);
+    const events = [];
+    const signals = [];
+    let running = true;
+    const launched = await launchStaging(manifest.manifest, {
+      assertPortAvailable(port) {
+        events.push(`port:${port}`);
+      },
+      listAppProcesses: () => [],
+      readAnyProcessIdentity: (processId) => ({
+        processId,
+        processGroupId: identity.processGroupId,
+        startedAt: identity.startedAt,
+      }),
+      readPortListeners: () => [{ processId: identity.processId, command: "staging" }],
+      readProcessIdentity: () => running ? identity : null,
+      signatureIsValid: () => true,
+      sleep: async () => {},
+      spawnApp() {
+        events.push("spawn");
+        return { pid: identity.processId, unref() {} };
+      },
+    });
+    assert.deepEqual(events, [`port:${fixturePort}`, "spawn"]);
+    assert.deepEqual(launched.processIdentity, identity);
+    assert.equal(launched.listenerOwnership.port, fixturePort);
+    assert.deepEqual(launched.listenerOwnership.listeners.map((entry) => entry.processId), [
+      identity.processId,
+    ]);
+
+    const stopped = await stopStaging(manifest.manifest, {
+      listAppProcesses: () => [],
+      readProcessIdentity: () => running ? identity : null,
+      signalProcessGroup(processGroupId, signal) {
+        signals.push({ processGroupId, signal });
+        running = false;
+      },
+      sleep: async () => {},
+      waitForExit: async () => !running,
+    });
+    assert.deepEqual(signals, [{ processGroupId: identity.processGroupId, signal: "SIGTERM" }]);
+    assert.equal(stopped.status, "stopped");
+    assert.equal(stopped.processId, null);
+    assert.equal(stopped.processIdentity, null);
+    assert.equal(stopped.listenerOwnership, null);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("launch rejects a foreign DevTools listener and safely stops its identified process group", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const identity = launchedIdentity(manifest, 43122);
+    const signals = [];
+    let running = true;
+    await assert.rejects(
+      launchStaging(manifest.manifest, {
+        assertPortAvailable() {},
+        listAppProcesses: () => [],
+        readAnyProcessIdentity: (processId) => ({
+          processId,
+          processGroupId: 99999,
+          startedAt: "Thu Sep  3 12:00:01 2026",
+        }),
+        readPortListeners: () => [{ processId: 99999, command: "foreign" }],
+        readProcessIdentity: () => running ? identity : null,
+        signatureIsValid: () => true,
+        sleep: async () => {},
+        spawnApp: () => ({ pid: identity.processId, unref() {} }),
+        signalProcessGroup(processGroupId, signal) {
+          signals.push({ processGroupId, signal });
+          running = false;
+        },
+        waitForExit: async () => !running,
+      }),
+      /listener is not owned by the launched process group/u,
+    );
+    assert.deepEqual(signals, [{ processGroupId: identity.processGroupId, signal: "SIGTERM" }]);
+    const persisted = readJson(manifest.manifest);
+    assert.equal(persisted.status, "prepared");
+    assert.equal(persisted.processId, null);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("stop rejects PID reuse before the first signal and rechecks before escalation", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const identity = launchedIdentity(manifest, 43123);
+    await launchStaging(manifest.manifest, {
+      assertPortAvailable() {},
+      listAppProcesses: () => [],
+      readAnyProcessIdentity: (processId) => ({
+        processId,
+        processGroupId: identity.processGroupId,
+        startedAt: identity.startedAt,
+      }),
+      readPortListeners: () => [{ processId: identity.processId, command: "staging" }],
+      readProcessIdentity: () => identity,
+      signatureIsValid: () => true,
+      sleep: async () => {},
+      spawnApp: () => ({ pid: identity.processId, unref() {} }),
+    });
+    const signals = [];
+    await assert.rejects(
+      stopStaging(manifest.manifest, {
+        listAppProcesses: () => [],
+        readProcessIdentity: () => ({ ...identity, startedAt: "Thu Sep  3 12:01:00 2026" }),
+        signalProcessGroup: (...args) => signals.push(args),
+      }),
+      /birth or process-group identity does not match/u,
+    );
+    assert.deepEqual(signals, []);
+
+    let identityReads = 0;
+    const escalationSignals = [];
+    await assert.rejects(
+      stopStaging(manifest.manifest, {
+        listAppProcesses: () => [],
+        readProcessIdentity() {
+          identityReads += 1;
+          return identityReads <= 3
+            ? identity
+            : { ...identity, startedAt: "Thu Sep  3 12:02:00 2026" };
+        },
+        signalProcessGroup: (processGroupId, signal) => {
+          escalationSignals.push({ processGroupId, signal });
+        },
+        waitForExit: async () => false,
+      }),
+      /birth or process-group identity does not match/u,
+    );
+    assert.deepEqual(escalationSignals, [{
+      processGroupId: identity.processGroupId,
+      signal: "SIGTERM",
+    }]);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore preserves source backups and cleanup removes only the verified staging root", async () => {
+  const fixture = await createStockFixture();
+  const state = {};
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state);
+    const backupAsar = join(manifest.sourceBackup, "app.asar");
+    const backupPlist = join(manifest.sourceBackup, "Info.plist");
+    const backupAsarHash = fileHash(backupAsar);
+    const backupPlistHash = fileHash(backupPlist);
+    assert.notEqual(fileHash(manifest.asar), backupAsarHash);
+
+    const restored = restoreStaging(manifest.manifest, {
+      listAppProcesses: () => [],
+      resignPatchedApp() {},
+      signatureIsValid: () => true,
+    });
+    assert.equal(restored.status, "restored");
+    assert.equal(fileHash(manifest.asar), backupAsarHash);
+    assert.equal(fileHash(backupAsar), backupAsarHash);
+    assert.equal(fileHash(backupPlist), backupPlistHash);
+
+    const removed = cleanupStaging(manifest.manifest, { listAppProcesses: () => [] });
+    assert.equal(removed.status, "removed");
+    assert.equal(existsSync(manifest.root), false);
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
 });

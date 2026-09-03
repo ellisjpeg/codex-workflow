@@ -254,6 +254,15 @@ export function preflight(targetAsar = asarPath, targetPlist = infoPlistPath, { 
   if (pkg.name !== expectedPackageName) {
     throw new Error(`Unexpected package name ${pkg.name}`);
   }
+  const bundleVersion = plistValue("CFBundleShortVersionString", targetPlist);
+  const bundleBuild = plistValue("CFBundleVersion", targetPlist);
+  const packageBuild = String(pkg.codexBuildNumber || "unknown");
+  if (pkg.version !== bundleVersion) {
+    throw new Error(`Codex package version ${pkg.version} does not match bundle version ${bundleVersion}`);
+  }
+  if (packageBuild !== bundleBuild) {
+    throw new Error(`Codex package build ${packageBuild} does not match bundle build ${bundleBuild}`);
+  }
   if (pkg.__codexWorkflow?.source) validateSourceFingerprint(pkg.__codexWorkflow.source);
   const originalMain = pkg.__codexWorkflow?.originalMain || pkg.main;
   if (typeof originalMain !== "string" || !originalMain.startsWith(".") || originalMain.includes("..")) {
@@ -267,9 +276,8 @@ export function preflight(targetAsar = asarPath, targetPlist = infoPlistPath, { 
   if (pkg.version !== supportedVersion && !allowVersion) {
     throw new Error(`Unsupported Codex version ${pkg.version}; expected ${supportedVersion}`);
   }
-  const build = String(pkg.codexBuildNumber || "unknown");
-  if (build !== supportedBuild && !allowVersion) {
-    throw new Error(`Unsupported Codex build ${build}; expected ${supportedBuild}`);
+  if (packageBuild !== supportedBuild && !allowVersion) {
+    throw new Error(`Unsupported Codex build ${packageBuild}; expected ${supportedBuild}`);
   }
   return {
     pkg,
@@ -277,6 +285,8 @@ export function preflight(targetAsar = asarPath, targetPlist = infoPlistPath, { 
     expectedIntegrity,
     computedIntegrity,
     originalMain,
+    bundleVersion,
+    bundleBuild,
     signatureIsValid: signatureIsValid(),
     fingerprint: fingerprint(targetAsar, pkg),
   };
@@ -665,6 +675,7 @@ export function atomicReplace(from, to) {
   try {
     copyFileDurably(from, staged);
     renameSync(staged, to);
+    if (to.endsWith(".asar")) asar.uncache(to);
     fsyncDirectory(dirname(to));
   } finally {
     rmSync(stageDir, { recursive: true, force: true });

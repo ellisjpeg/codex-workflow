@@ -288,6 +288,40 @@ test("Workflow Update ignores a newer local checkout", async () => {
   assert.equal(harness.quitCount(), 0);
 });
 
+test("Workflow Update is unavailable when isolated staging disables updates", async () => {
+  const runtimeRoot = "/tmp/codex-workflow-main-staging-test";
+  const stagedRoot = path.join(runtimeRoot, "updates", "0.5.11");
+  const files = new Map([
+    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
+      nodeExecutable: "/opt/node/bin/node",
+      updatesDisabled: true,
+    })],
+    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.5.10" })],
+    [path.join(runtimeRoot, "update-state.json"), JSON.stringify({
+      availableVersion: "0.5.11",
+      stagedSourceRoot: stagedRoot,
+    })],
+    [path.join(stagedRoot, "package.json"), JSON.stringify({
+      name: "codex-workflow",
+      version: "0.5.11",
+    })],
+    [path.join(stagedRoot, "scripts", "install.mjs"), ""],
+    [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
+    ["/opt/node/bin/node", ""],
+  ]);
+  const harness = createUpdateHarness(files, runtimeRoot);
+  const status = harness.handlers.get("codex-workflow:update:get")(harness.trusted);
+  assert.equal(status.available, false);
+  assert.equal(status.availableVersion, "0.5.11");
+  assert.equal(status.blockedReason, "updates-disabled");
+
+  const result = await harness.handlers.get("codex-workflow:update:install")(harness.trusted);
+  assert.equal(result.available, false);
+  assert.equal(harness.spawned.length, 0);
+  assert.equal(harness.relaunchCount(), 0);
+  assert.equal(harness.exitCount(), 0);
+});
+
 test("Workflow Update does not quit while patch recovery is pending", async () => {
   const runtimeRoot = "/tmp/codex-workflow-main-recovery-test";
   const stagedRoot = path.join(runtimeRoot, "updates", "0.5.0");

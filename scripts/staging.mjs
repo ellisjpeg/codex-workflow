@@ -15,7 +15,6 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import {
   appRoot,
-  asarPath,
   atomicReplace,
   buildPatchedAsar,
   embeddedFileHash,
@@ -43,6 +42,16 @@ export const stagingBundleIdentifier = "com.openai.codex.workflow-staging.v26901
 export const stagingName = "Codex Workflow Staging";
 export const stagingExecutableName = "CodexWorkflowStaging-2690120858";
 export const stagingUnixSocketPathMaxBytes = 103;
+export const stagingUpdaterPath = join(sourceRoot, "scripts", "staging-updater-disabled.cjs");
+
+function lstatIfPresent(targetPath) {
+  try {
+    return lstatSync(targetPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
 
 export function assertStagingRoot(targetRoot) {
   const root = resolve(targetRoot);
@@ -50,7 +59,7 @@ export function assertStagingRoot(targetRoot) {
   if (dirname(root) !== temporaryRoot || !basename(root).startsWith(stagingPrefix)) {
     throw new Error("Staging root must be a generated direct child of the system temporary directory");
   }
-  if (existsSync(root) && lstatSync(root).isSymbolicLink()) {
+  if (lstatIfPresent(root)?.isSymbolicLink()) {
     throw new Error("Staging root must not be a symbolic link");
   }
   return root;
@@ -66,11 +75,22 @@ export function assertManagedStagingPath(targetRoot, targetPath, label = "manage
   let current = root;
   for (const part of child.split("/").filter(Boolean)) {
     current = join(current, part);
-    if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+    if (lstatIfPresent(current)?.isSymbolicLink()) {
       throw new Error(`Staging ${label} must not contain symbolic links`);
     }
   }
   return target;
+}
+
+export function assertStagingLayoutManaged(layout) {
+  for (const key of [
+    "app", "asar", "plist", "executable", "userData", "codexHome", "workflowRoot",
+    "settings", "logs", "journal", "updates", "updateState", "backups", "sourceBackup",
+    "processLog", "manifest",
+  ]) {
+    assertManagedStagingPath(layout.root, layout[key], key);
+  }
+  return layout;
 }
 
 export function stagingLayout(targetRoot, devToolsPort) {
@@ -137,7 +157,20 @@ function assertPortAvailable(port) {
   if (result.status !== 1) throw new Error("Could not inspect the staging DevTools port");
 }
 
+export function assertMatchingSourceSnapshot(captured, cloned) {
+  for (const field of ["version", "build", "asarSha256", "headerSha256"]) {
+    if (captured?.fingerprint?.[field] !== cloned?.fingerprint?.[field]) {
+      throw new Error(`Staging clone does not match captured source ${field}`);
+    }
+  }
+  if (captured?.originalMain !== cloned?.originalMain) {
+    throw new Error("Staging clone does not match captured source main entry");
+  }
+  return cloned;
+}
+
 function installStagingRuntime(layout, source) {
+  assertStagingLayoutManaged(layout);
   for (const target of [
     layout.userData,
     layout.codexHome,
@@ -149,9 +182,10 @@ function installStagingRuntime(layout, source) {
   ]) {
     mkdirSync(target, { recursive: true, mode: 0o700 });
   }
-  for (const name of ["main.cjs", "preload.cjs", "updater.cjs"]) {
+  for (const name of ["main.cjs", "preload.cjs"]) {
     cpSync(join(sourceRoot, "runtime", name), join(layout.workflowRoot, "runtime", name));
   }
+  cpSync(stagingUpdaterPath, join(layout.workflowRoot, "runtime", "updater.cjs"));
   writeJsonAtomic(join(layout.workflowRoot, "runtime", "version.json"), {
     schemaVersion: 1,
     version: patchVersion,
@@ -166,11 +200,12 @@ function installStagingRuntime(layout, source) {
   });
   writeJsonAtomic(join(layout.workflowRoot, "update-config.json"), {
     schemaVersion: 1,
-    sourceRoot,
-    nodeExecutable: process.execPath,
+    sourceRoot: null,
+    nodeExecutable: null,
     appRoot: layout.app,
     appExecutable: layout.executable,
     releaseApi: null,
+    updatesDisabled: true,
   });
   writeJsonAtomic(layout.updateState, {
     schemaVersion: 1,
@@ -191,17 +226,27 @@ function installStagingRuntime(layout, source) {
   });
 }
 
-function verifyStagingApp(layout, source, { restored = false } = {}) {
+function verifyStagingApp(layout, source, {
+  restored = false,
+  signatureCheck = signatureIsValid,
+} = {}) {
   const pkg = readPackage(layout.asar);
   const integrity = headerHash(layout.asar);
-  const runtimeFiles = ["main.cjs", "preload.cjs", "updater.cjs"].map((name) => ({
+  const runtimeFiles = ["main.cjs", "preload.cjs"].map((name) => ({
     name,
     matchesSource: fileHash(join(layout.workflowRoot, "runtime", name)) ===
       fileHash(join(sourceRoot, "runtime", name)),
   }));
+  const updateConfig = JSON.parse(
+    readFileSync(join(layout.workflowRoot, "update-config.json"), "utf8"),
+  );
   const checks = {
     version: pkg.version === supportedVersion,
     build: String(pkg.codexBuildNumber || "unknown") === supportedBuild,
+    packageBundleVersion: pkg.version ===
+      plistValue("CFBundleShortVersionString", layout.plist),
+    packageBundleBuild: String(pkg.codexBuildNumber || "unknown") ===
+      plistValue("CFBundleVersion", layout.plist),
     packageName: pkg.name === expectedPackageName,
     bundleIdentifier: plistValue("CFBundleIdentifier", layout.plist) === stagingBundleIdentifier,
     bundleName: plistValue("CFBundleName", layout.plist) === stagingName,
@@ -211,8 +256,16 @@ function verifyStagingApp(layout, source, { restored = false } = {}) {
     urlHandlersAbsent: !plistHasKey("CFBundleURLTypes", layout.plist),
     documentHandlersAbsent: !plistHasKey("CFBundleDocumentTypes", layout.plist),
     integrity: plistValue("ElectronAsarIntegrity:Resources/app.asar:hash", layout.plist) === integrity,
-    signature: signatureIsValid(layout.app),
+    signature: signatureCheck(layout.app),
     runtimeFiles: runtimeFiles.every((entry) => entry.matchesSource),
+    updaterFailsClosed: fileHash(join(layout.workflowRoot, "runtime", "updater.cjs")) ===
+      fileHash(stagingUpdaterPath),
+    updateApplicationDisabled: updateConfig.updatesDisabled === true &&
+      updateConfig.sourceRoot === null &&
+      updateConfig.nodeExecutable === null &&
+      updateConfig.releaseApi === null &&
+      updateConfig.appRoot === layout.app &&
+      updateConfig.appExecutable === layout.executable,
   };
   if (restored) {
     checks.originalMain = pkg.main === source.originalMain;
@@ -231,22 +284,39 @@ function verifyStagingApp(layout, source, { restored = false } = {}) {
   return { checks, integrity, package: pkg };
 }
 
-export async function prepareStaging(devToolsPort) {
+export async function prepareStaging(devToolsPort, hooks = {}) {
   if (process.platform !== "darwin") throw new Error("Staging is supported only on macOS");
-  assertPortAvailable(devToolsPort);
-  const current = preflight();
+  const checkPort = hooks.assertPortAvailable || assertPortAvailable;
+  const sourcePreflight = hooks.sourcePreflight || (() => preflight());
+  const clonePreflight = hooks.clonePreflight || ((targetAsar, targetPlist) =>
+    preflight(targetAsar, targetPlist));
+  const cloneApp = hooks.cloneApp || ((from, to) =>
+    run("/bin/cp", ["-cR", from, to], "Could not create the APFS staging clone"));
+  const createRoot = hooks.createRoot || (() => mkdtempSync(join(stagingBaseRoot, stagingPrefix)));
+  const build = hooks.buildPatchedAsar || buildPatchedAsar;
+  const resign = hooks.resignPatchedApp || resignPatchedApp;
+  const signatureCheck = hooks.signatureIsValid || signatureIsValid;
+  checkPort(devToolsPort);
+  const current = sourcePreflight();
   if (current.pkg.__codexWorkflow || current.pkg.main === "workflow-loader.cjs") {
     throw new Error("Staging must be prepared from the audited stock Codex bundle");
   }
-  const root = mkdtempSync(join(stagingBaseRoot, stagingPrefix));
+  const root = createRoot();
   const layout = stagingLayout(root, devToolsPort);
   try {
-    run("/bin/cp", ["-cR", appRoot, layout.app], "Could not create the APFS staging clone");
+    assertStagingLayoutManaged(layout);
+    cloneApp(appRoot, layout.app);
+    assertStagingLayoutManaged(layout);
+    const cloned = assertMatchingSourceSnapshot(
+      current,
+      clonePreflight(layout.asar, layout.plist),
+    );
     const originalExecutableName = plistValue("CFBundleExecutable", layout.plist);
     if (!originalExecutableName || originalExecutableName.includes("/")) {
       throw new Error("Stock Codex executable name is unsafe");
     }
     const originalExecutable = join(layout.app, "Contents", "MacOS", originalExecutableName);
+    assertStagingLayoutManaged(layout);
     renameSync(originalExecutable, layout.executable);
     setPlistString("CFBundleIdentifier", stagingBundleIdentifier, layout.plist);
     setPlistString("CFBundleName", stagingName, layout.plist);
@@ -255,12 +325,13 @@ export async function prepareStaging(devToolsPort) {
     removePlistKey("CFBundleURLTypes", layout.plist);
     removePlistKey("CFBundleDocumentTypes", layout.plist);
 
+    assertStagingLayoutManaged(layout);
     mkdirSync(layout.sourceBackup, { recursive: true, mode: 0o700 });
     cpSync(layout.asar, join(layout.sourceBackup, "app.asar"));
     cpSync(layout.plist, join(layout.sourceBackup, "Info.plist"));
     const source = {
-      ...current.fingerprint,
-      originalMain: current.originalMain,
+      ...cloned.fingerprint,
+      originalMain: cloned.originalMain,
     };
     writeJsonAtomic(join(layout.sourceBackup, "manifest.json"), {
       schemaVersion: 1,
@@ -270,20 +341,40 @@ export async function prepareStaging(devToolsPort) {
     });
     installStagingRuntime(layout, source);
 
+    assertStagingLayoutManaged(layout);
     const buildRoot = join(root, ".build");
+    assertManagedStagingPath(root, buildRoot, "build workspace");
     mkdirSync(buildRoot, { mode: 0o700 });
     const patchedAsar = join(buildRoot, "app.asar");
-    await buildPatchedAsar(asarPath, patchedAsar, current.fingerprint, layout.workflowRoot);
+    const immutableClone = { fingerprint: fingerprint(layout.asar), originalMain: source.originalMain };
+    assertMatchingSourceSnapshot(cloned, immutableClone);
+    await build(layout.asar, patchedAsar, cloned.fingerprint, layout.workflowRoot);
+    assertStagingLayoutManaged(layout);
+    assertMatchingSourceSnapshot(cloned, {
+      fingerprint: fingerprint(layout.asar),
+      originalMain: source.originalMain,
+    });
+    const patchedAsarSha256 = fileHash(patchedAsar);
+    assertStagingLayoutManaged(layout);
     atomicReplace(patchedAsar, layout.asar);
+    if (fileHash(layout.asar) !== patchedAsarSha256) {
+      throw new Error("Staging ASAR replacement does not match the verified build output");
+    }
+    if (readPackage(layout.asar).main !== "workflow-loader.cjs") {
+      throw new Error("Staging ASAR replacement does not contain the Workflow loader");
+    }
     setPlistValue(
       "ElectronAsarIntegrity:Resources/app.asar:hash",
       headerHash(layout.asar),
       layout.plist,
     );
-    resignPatchedApp(layout.app);
+    assertStagingLayoutManaged(layout);
+    resign(layout.app);
+    assertManagedStagingPath(root, buildRoot, "build workspace");
     rmSync(buildRoot, { recursive: true, force: true });
 
-    const verification = verifyStagingApp(layout, source);
+    assertStagingLayoutManaged(layout);
+    const verification = verifyStagingApp(layout, source, { signatureCheck });
     const installed = fingerprint(layout.asar, verification.package);
     const manifest = {
       schemaVersion: 1,
@@ -302,25 +393,36 @@ export async function prepareStaging(devToolsPort) {
       updaterIsolation: {
         sparkleEnabled: false,
         workflowReleaseApi: null,
+        workflowUpdatesDisabled: true,
+        updater: "fail-closed-stub",
         launchAgentInstalled: false,
       },
       verification: verification.checks,
     };
+    assertStagingLayoutManaged(layout);
     writeJsonAtomic(layout.manifest, manifest);
     return manifest;
   } catch (error) {
-    rmSync(root, { recursive: true, force: true });
+    try {
+      assertStagingRoot(root);
+      rmSync(root, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Staging preparation failed and cleanup was unsafe");
+    }
     throw error;
   }
 }
 
 function readManifest(manifestPath) {
-  const parsed = JSON.parse(readFileSync(resolve(manifestPath), "utf8"));
+  const resolvedManifest = resolve(manifestPath);
+  const candidateRoot = assertStagingRoot(dirname(resolvedManifest));
+  assertManagedStagingPath(candidateRoot, resolvedManifest, "manifest");
+  const parsed = JSON.parse(readFileSync(resolvedManifest, "utf8"));
   if (parsed?.schemaVersion !== 1 || typeof parsed.root !== "string") {
     throw new Error("Staging manifest has an unsupported schema");
   }
   const layout = stagingLayout(parsed.root, parsed.devToolsPort);
-  if (resolve(manifestPath) !== layout.manifest) {
+  if (resolvedManifest !== layout.manifest) {
     throw new Error("Staging manifest is outside its validated root");
   }
   for (const key of [
@@ -358,44 +460,193 @@ function lsofRecords(args) {
   return records.filter((entry) => Number.isSafeInteger(entry.processId));
 }
 
-function assertExactProcess(processId, executable) {
-  const matches = lsofRecords(["-a", "-d", "txt", "--", executable]);
-  if (!matches.some((entry) => entry.processId === processId)) {
-    throw new Error("Staging process identity does not match its manifest");
-  }
-  return executable;
-}
-
-function exactProcessIsRunning(processId, executable) {
-  return lsofRecords(["-a", "-d", "txt", "--", executable])
-    .some((entry) => entry.processId === processId);
-}
-
 function processesUnderRoot(root) {
   return lsofRecords(["+D", join(root, `${stagingName}.app`)]);
 }
 
-async function waitForExit(processId, executable, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const running = lsofRecords(["-a", "-d", "txt", "--", executable])
-      .some((entry) => entry.processId === processId);
-    if (!running) return true;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-  }
-  return !lsofRecords(["-a", "-d", "txt", "--", executable])
-    .some((entry) => entry.processId === processId);
+function processStartIdentity(processId) {
+  const result = spawnSync(
+    "/bin/ps",
+    ["-p", String(processId), "-o", "pgid=", "-o", "lstart="],
+    { encoding: "utf8" },
+  );
+  if (result.status === 1 || !result.stdout.trim()) return null;
+  if (result.status !== 0) throw new Error("Could not inspect staging process birth identity");
+  const match = result.stdout.match(/^\s*(\d+)\s+(.+?)\s*$/u);
+  if (!match) throw new Error("Could not parse staging process birth identity");
+  return {
+    processId,
+    processGroupId: Number(match[1]),
+    startedAt: match[2],
+  };
 }
 
-export async function launchStaging(manifestPath) {
+export function readProcessIdentity(processId, executable) {
+  if (!Number.isSafeInteger(processId) || processId <= 0) return null;
+  const usesExecutable = lsofRecords(["-a", "-d", "txt", "--", executable])
+    .some((entry) => entry.processId === processId);
+  if (!usesExecutable) return null;
+  const start = processStartIdentity(processId);
+  return start ? { ...start, executable } : null;
+}
+
+export function processIdentityMatches(expected, current) {
+  return Boolean(expected && current) &&
+    expected.processId === current.processId &&
+    expected.processGroupId === current.processGroupId &&
+    expected.startedAt === current.startedAt &&
+    expected.executable === current.executable;
+}
+
+function assertMatchingProcessIdentity(expected, current) {
+  if (!processIdentityMatches(expected, current)) {
+    throw new Error("Staging process birth or process-group identity does not match its manifest");
+  }
+  return current;
+}
+
+function persistedProcessIdentity(manifest) {
+  const identity = manifest.processIdentity;
+  if (
+    !identity ||
+    identity.processId !== manifest.processId ||
+    identity.processGroupId !== identity.processId ||
+    typeof identity.startedAt !== "string" ||
+    !identity.startedAt ||
+    identity.executable !== manifest.executable
+  ) {
+    throw new Error("Staging manifest has no valid process birth or process-group identity");
+  }
+  return identity;
+}
+
+function portListenerRecords(port) {
+  return lsofRecords(["-a", `-iTCP:${port}`, "-sTCP:LISTEN"]);
+}
+
+export function listenerOwnershipForProcess(records, processIdentity, readIdentity = processStartIdentity) {
+  const processIds = [...new Set(records.map((entry) => entry.processId))];
+  if (!processIds.length) return null;
+  const listeners = processIds.map((processId) => readIdentity(processId));
+  if (
+    listeners.some((identity) => !identity) ||
+    listeners.some((identity) => identity.processGroupId !== processIdentity.processGroupId)
+  ) {
+    throw new Error("Staging DevTools listener is not owned by the launched process group");
+  }
+  return {
+    processGroupId: processIdentity.processGroupId,
+    listeners,
+  };
+}
+
+const delay = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+function lifecycleOperations(hooks = {}) {
+  const operations = {
+    assertPortAvailable: hooks.assertPortAvailable || assertPortAvailable,
+    listAppProcesses: hooks.listAppProcesses || processesUnderRoot,
+    readAnyProcessIdentity: hooks.readAnyProcessIdentity || processStartIdentity,
+    readPortListeners: hooks.readPortListeners || portListenerRecords,
+    readProcessIdentity: hooks.readProcessIdentity || readProcessIdentity,
+    signalProcessGroup: hooks.signalProcessGroup || ((processGroupId, signal) =>
+      process.kill(-processGroupId, signal)),
+    signatureIsValid: hooks.signatureIsValid || signatureIsValid,
+    sleep: hooks.sleep || delay,
+    spawnApp: hooks.spawnApp || ((executable, args, options) => spawn(executable, args, options)),
+  };
+  operations.waitForExit = hooks.waitForExit || ((identity, timeoutMs) =>
+    waitForIdentityExit(identity, operations, timeoutMs));
+  return operations;
+}
+
+async function waitForLaunchedIdentity(
+  processId,
+  executable,
+  operations,
+  launchError,
+  timeoutMs = 5000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (launchError()) throw launchError();
+    const identity = operations.readProcessIdentity(processId, executable);
+    if (identity) return identity;
+    await operations.sleep(100);
+  } while (Date.now() < deadline);
+  if (launchError()) throw launchError();
+  return null;
+}
+
+async function waitForIdentityExit(identity, operations, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const current = operations.readProcessIdentity(identity.processId, identity.executable);
+    if (!current) return true;
+    assertMatchingProcessIdentity(identity, current);
+    await operations.sleep(250);
+  } while (Date.now() < deadline);
+  const current = operations.readProcessIdentity(identity.processId, identity.executable);
+  if (!current) return true;
+  assertMatchingProcessIdentity(identity, current);
+  return false;
+}
+
+async function waitForOwnedListener(manifest, identity, operations, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    assertMatchingProcessIdentity(
+      identity,
+      operations.readProcessIdentity(identity.processId, identity.executable),
+    );
+    const ownership = listenerOwnershipForProcess(
+      operations.readPortListeners(manifest.devToolsPort),
+      identity,
+      operations.readAnyProcessIdentity,
+    );
+    if (ownership) return ownership;
+    await operations.sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error("Staging DevTools listener did not become ready");
+}
+
+function signalExactProcess(manifest, identity, signal, operations) {
+  assertStagingLayoutManaged(manifest);
+  assertMatchingProcessIdentity(
+    identity,
+    operations.readProcessIdentity(identity.processId, identity.executable),
+  );
+  operations.signalProcessGroup(identity.processGroupId, signal);
+}
+
+async function terminateExactProcess(manifest, identity, operations) {
+  const current = operations.readProcessIdentity(identity.processId, identity.executable);
+  if (!current) return;
+  assertMatchingProcessIdentity(identity, current);
+  signalExactProcess(manifest, identity, "SIGTERM", operations);
+  if (!await operations.waitForExit(identity, 15000)) {
+    signalExactProcess(manifest, identity, "SIGKILL", operations);
+    if (!await operations.waitForExit(identity, 5000)) {
+      throw new Error("Exact staging process group did not stop");
+    }
+  }
+}
+
+export async function launchStaging(manifestPath, hooks = {}) {
   const manifest = readManifest(manifestPath);
-  verifyStagingApp(manifest, manifest.source);
-  const existing = processesUnderRoot(manifest.root);
+  const operations = lifecycleOperations(hooks);
+  verifyStagingApp(manifest, manifest.source, { signatureCheck: operations.signatureIsValid });
+  const existing = operations.listAppProcesses(manifest.root);
   if (existing.length) throw new Error("A process is already using the staging root");
+  assertStagingLayoutManaged(manifest);
   const logDescriptor = openSync(manifest.processLog, "a", 0o600);
   let child;
+  let childError = null;
+  let identity;
   try {
-    child = spawn(manifest.executable, [
+    assertStagingLayoutManaged(manifest);
+    operations.assertPortAvailable(manifest.devToolsPort);
+    child = operations.spawnApp(manifest.executable, [
       `--user-data-dir=${manifest.userData}`,
       "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${manifest.devToolsPort}`,
@@ -411,70 +662,106 @@ export async function launchStaging(manifestPath) {
         CODEX_ELECTRON_PRIMARY_RUNTIME_UPDATE_MODE: "manual",
       },
     });
-  } finally {
     closeSync(logDescriptor);
-  }
-  child.unref();
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
-  const command = assertExactProcess(child.pid, manifest.executable);
-  const next = {
-    ...manifest,
-    status: "running",
-    processId: child.pid,
-    launchedAt: new Date().toISOString(),
-    processCommand: command,
-  };
-  writeJsonAtomic(manifest.manifest, next);
-  return next;
-}
-
-export async function stopStaging(manifestPath) {
-  const manifest = readManifest(manifestPath);
-  if (!Number.isSafeInteger(manifest.processId) || manifest.processId <= 0) {
-    throw new Error("Staging manifest has no running process");
-  }
-  if (!exactProcessIsRunning(manifest.processId, manifest.executable)) {
-    if (processesUnderRoot(manifest.root).length) {
-      throw new Error("Staging child processes remain after its main process exited");
+    child.once?.("error", (error) => {
+      childError = error;
+    });
+    child.unref?.();
+    identity = await waitForLaunchedIdentity(
+      child.pid,
+      manifest.executable,
+      operations,
+      () => childError,
+    );
+    if (!identity || identity.processGroupId !== child.pid) {
+      throw new Error("Staging launch did not create the expected isolated process group");
     }
+    const listenerOwnership = await waitForOwnedListener(manifest, identity, operations);
+    assertMatchingProcessIdentity(
+      identity,
+      operations.readProcessIdentity(identity.processId, identity.executable),
+    );
     const next = {
       ...manifest,
-      status: "stopped",
-      stoppedAt: new Date().toISOString(),
-      processId: null,
+      status: "running",
+      processId: child.pid,
+      processIdentity: identity,
+      launchedAt: new Date().toISOString(),
+      listenerOwnership: {
+        port: manifest.devToolsPort,
+        ...listenerOwnership,
+      },
     };
+    assertStagingLayoutManaged(manifest);
     writeJsonAtomic(manifest.manifest, next);
     return next;
-  }
-  assertExactProcess(manifest.processId, manifest.executable);
-  process.kill(manifest.processId, "SIGTERM");
-  if (!await waitForExit(manifest.processId, manifest.executable)) {
-    assertExactProcess(manifest.processId, manifest.executable);
-    process.kill(manifest.processId, "SIGKILL");
-    if (!await waitForExit(manifest.processId, manifest.executable, 5000)) {
-      throw new Error("Exact staging process did not stop");
+  } catch (error) {
+    try {
+      if (child?.pid) {
+        identity ||= operations.readProcessIdentity(child.pid, manifest.executable);
+        if (identity) {
+          await terminateExactProcess(manifest, identity, operations);
+        } else if (operations.listAppProcesses(manifest.root).length) {
+          throw new Error("Launched staging process could not be identified safely for cleanup");
+        }
+      }
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Staging launch failed and safe cleanup was incomplete");
     }
+    throw error;
+  } finally {
+    try {
+      closeSync(logDescriptor);
+    } catch {}
   }
-  const deadline = Date.now() + 5000;
-  let remaining = processesUnderRoot(manifest.root);
-  while (remaining.length && Date.now() < deadline) {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-    remaining = processesUnderRoot(manifest.root);
-  }
-  if (remaining.length) throw new Error("Staging child processes are still running");
+}
+
+function stoppedManifest(manifest) {
   const next = {
     ...manifest,
     status: "stopped",
     stoppedAt: new Date().toISOString(),
     processId: null,
+    processIdentity: null,
+    listenerOwnership: null,
   };
+  assertStagingLayoutManaged(manifest);
   writeJsonAtomic(manifest.manifest, next);
   return next;
 }
 
-export function restoreStaging(manifestPath) {
+export async function stopStaging(manifestPath, hooks = {}) {
   const manifest = readManifest(manifestPath);
-  if (processesUnderRoot(manifest.root).length) {
+  const operations = lifecycleOperations(hooks);
+  if (!Number.isSafeInteger(manifest.processId) || manifest.processId <= 0) {
+    throw new Error("Staging manifest has no running process");
+  }
+  const identity = persistedProcessIdentity(manifest);
+  const current = operations.readProcessIdentity(identity.processId, identity.executable);
+  if (!current) {
+    if (operations.listAppProcesses(manifest.root).length) {
+      throw new Error("Staging child processes remain after its main process exited");
+    }
+    return stoppedManifest(manifest);
+  }
+  assertMatchingProcessIdentity(identity, current);
+  await terminateExactProcess(manifest, identity, operations);
+  const deadline = Date.now() + 5000;
+  let remaining = operations.listAppProcesses(manifest.root);
+  while (remaining.length && Date.now() < deadline) {
+    await operations.sleep(250);
+    remaining = operations.listAppProcesses(manifest.root);
+  }
+  if (remaining.length) throw new Error("Staging child processes are still running");
+  return stoppedManifest(manifest);
+}
+
+export function restoreStaging(manifestPath, hooks = {}) {
+  const manifest = readManifest(manifestPath);
+  const listAppProcesses = hooks.listAppProcesses || processesUnderRoot;
+  const resign = hooks.resignPatchedApp || resignPatchedApp;
+  const signatureCheck = hooks.signatureIsValid || signatureIsValid;
+  if (listAppProcesses(manifest.root).length) {
     throw new Error("Stop the exact staging process before restore");
   }
   const backupAsar = assertManagedStagingPath(
@@ -500,30 +787,62 @@ export function restoreStaging(manifestPath) {
   ) {
     throw new Error("Staging source backup does not match its manifest");
   }
-  atomicReplace(backupAsar, manifest.asar);
-  atomicReplace(backupPlist, manifest.plist);
-  resignPatchedApp(manifest.app);
-  const verification = verifyStagingApp(manifest, manifest.source, { restored: true });
-  const next = {
-    ...manifest,
-    status: "restored",
-    restoredAt: new Date().toISOString(),
-    installed: null,
-    verification: verification.checks,
-  };
-  writeJsonAtomic(manifest.manifest, next);
-  return next;
+  assertStagingLayoutManaged(manifest);
+  const restoreRoot = mkdtempSync(join(manifest.root, ".restore-"));
+  try {
+    const restoreAsar = assertManagedStagingPath(
+      manifest.root,
+      join(restoreRoot, "app.asar"),
+      "restore ASAR",
+    );
+    const restorePlist = assertManagedStagingPath(
+      manifest.root,
+      join(restoreRoot, "Info.plist"),
+      "restore plist",
+    );
+    cpSync(backupAsar, restoreAsar);
+    cpSync(backupPlist, restorePlist);
+    assertStagingLayoutManaged(manifest);
+    assertManagedStagingPath(manifest.root, backupAsar, "source backup ASAR");
+    assertManagedStagingPath(manifest.root, backupPlist, "source backup plist");
+    atomicReplace(restoreAsar, manifest.asar);
+    assertStagingLayoutManaged(manifest);
+    assertManagedStagingPath(manifest.root, backupPlist, "source backup plist");
+    atomicReplace(restorePlist, manifest.plist);
+    assertStagingLayoutManaged(manifest);
+    resign(manifest.app);
+    assertStagingLayoutManaged(manifest);
+    const verification = verifyStagingApp(manifest, manifest.source, {
+      restored: true,
+      signatureCheck,
+    });
+    const next = {
+      ...manifest,
+      status: "restored",
+      restoredAt: new Date().toISOString(),
+      installed: null,
+      verification: verification.checks,
+    };
+    assertStagingLayoutManaged(manifest);
+    writeJsonAtomic(manifest.manifest, next);
+    return next;
+  } finally {
+    assertManagedStagingPath(manifest.root, restoreRoot, "restore workspace");
+    rmSync(restoreRoot, { recursive: true, force: true });
+  }
 }
 
-export function cleanupStaging(manifestPath) {
+export function cleanupStaging(manifestPath, hooks = {}) {
   const manifest = readManifest(manifestPath);
   if (manifest.status !== "restored") {
     throw new Error("Restore and verify staging before cleanup");
   }
-  if (processesUnderRoot(manifest.root).length) {
+  const listAppProcesses = hooks.listAppProcesses || processesUnderRoot;
+  if (listAppProcesses(manifest.root).length) {
     throw new Error("A process is still using the staging root");
   }
   const root = assertStagingRoot(manifest.root);
+  assertStagingLayoutManaged(manifest);
   rmSync(root, { recursive: true, force: true });
   return { ok: true, status: "removed", root };
 }
