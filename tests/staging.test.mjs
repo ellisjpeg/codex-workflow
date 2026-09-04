@@ -103,10 +103,41 @@ async function createStockFixture() {
   return { root, app, asar: targetAsar, plist };
 }
 
+async function patchFixtureFromVerifiedBackup(fixture) {
+  const backupDir = join(fixture.root, "verified-backup");
+  const backupAsar = join(backupDir, "app.asar");
+  const backupPlist = join(backupDir, "Info.plist");
+  const manifestPath = join(backupDir, "manifest.json");
+  mkdirSync(backupDir);
+  cpSync(fixture.asar, backupAsar);
+  cpSync(fixture.plist, backupPlist);
+  const stock = preflight(backupAsar, backupPlist);
+  const source = { ...stock.fingerprint, originalMain: stock.originalMain };
+  const manifest = { schemaVersion: 1, source: stock.fingerprint };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const patchedAsar = join(fixture.root, "patched.asar");
+  await buildPatchedAsar(backupAsar, patchedAsar, stock.fingerprint, join(fixture.root, "runtime"));
+  cpSync(patchedAsar, fixture.asar);
+  writeFileSync(fixture.plist, infoPlist(headerHash(fixture.asar)));
+  return {
+    backupDir,
+    backupAsar,
+    backupPlist,
+    manifestPath,
+    manifest,
+    fingerprint: stock.fingerprint,
+    source,
+  };
+}
+
 function fixtureHooks(fixture, state, overrides = {}) {
   return {
     assertPortAvailable() {},
-    sourcePreflight: () => preflight(fixture.asar, fixture.plist),
+    sourcePreflight: () => ({
+      ...preflight(fixture.asar, fixture.plist),
+      sourceAsar: fixture.asar,
+      sourcePlist: fixture.plist,
+    }),
     clonePreflight: (targetAsar, targetPlist) => preflight(targetAsar, targetPlist),
     cloneApp(_source, target) {
       state.cloneCount = (state.cloneCount || 0) + 1;
@@ -300,6 +331,7 @@ test("prepare clones once, builds only the verified clone, and installs a fail-c
   const fixture = await createStockFixture();
   const state = { buildInputs: [] };
   const sourceHash = fileHash(fixture.asar);
+  const sourcePlistHash = fileHash(fixture.plist);
   let manifest;
   try {
     manifest = await prepareFixture(fixture, state, {
@@ -316,7 +348,15 @@ test("prepare clones once, builds only the verified clone, and installs a fail-c
     assert.deepEqual(state.buildInputs, [manifest.asar]);
     assert.notEqual(fileHash(manifest.asar), sourceHash);
     assert.equal(fileHash(fixture.asar), sourceHash);
+    assert.equal(fileHash(fixture.plist), sourcePlistHash);
     assert.equal(fileHash(join(manifest.sourceBackup, "app.asar")), sourceHash);
+    assert.deepEqual(manifest.sourceEvidence, {
+      kind: "live-stock-app",
+      asar: fixture.asar,
+      plist: fixture.plist,
+      manifest: null,
+      fingerprint: manifest.source,
+    });
     assert.equal(
       fileHash(join(manifest.workflowRoot, "runtime", "updater.cjs")),
       fileHash(stagingUpdaterPath),
@@ -336,6 +376,93 @@ test("prepare clones once, builds only the verified clone, and installs a fail-c
     if (manifest?.root && existsSync(manifest.root)) {
       rmSync(manifest.root, { recursive: true, force: true });
     }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("prepare restores a patched live clone from its verified backup without production writes", async () => {
+  const fixture = await createStockFixture();
+  const verified = await patchFixtureFromVerifiedBackup(fixture);
+  const state = {};
+  const productionHashes = [fixture.asar, fixture.plist, join(fixture.app, "Contents", "MacOS", "ChatGPT")]
+    .map(fileHash);
+  let resolvedSource;
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture, state, {
+      resolveSourceBackup(source) {
+        resolvedSource = source;
+        return verified;
+      },
+    });
+    assert.equal(state.cloneCount, 1);
+    assert.deepEqual(resolvedSource, verified.fingerprint);
+    assert.equal(fileHash(join(manifest.sourceBackup, "app.asar")), verified.source.asarSha256);
+    assert.deepEqual(manifest.source, verified.source);
+    assert.deepEqual(manifest.sourceEvidence, {
+      kind: "verified-workflow-backup",
+      asar: verified.backupAsar,
+      plist: verified.backupPlist,
+      manifest: verified.manifestPath,
+      fingerprint: verified.source,
+    });
+    assert.deepEqual(
+      [fixture.asar, fixture.plist, join(fixture.app, "Contents", "MacOS", "ChatGPT")].map(fileHash),
+      productionHashes,
+    );
+  } finally {
+    if (manifest?.root && existsSync(manifest.root)) {
+      rmSync(manifest.root, { recursive: true, force: true });
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("patched prepare rejects a missing verified source backup before creating a staging root", async () => {
+  const fixture = await createStockFixture();
+  await patchFixtureFromVerifiedBackup(fixture);
+  const state = {};
+  const productionHashes = [fixture.asar, fixture.plist].map(fileHash);
+  try {
+    await assert.rejects(
+      prepareFixture(fixture, state, {
+        resolveSourceBackup() {
+          throw new Error("No verified source backup for fixture");
+        },
+      }),
+      /No verified source backup/u,
+    );
+    assert.equal(state.cloneCount || 0, 0);
+    assert.equal(state.stagingRoot, undefined);
+    assert.deepEqual([fixture.asar, fixture.plist].map(fileHash), productionHashes);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("patched prepare rejects a mismatched verified source backup before creating a staging root", async () => {
+  const fixture = await createStockFixture();
+  const verified = await patchFixtureFromVerifiedBackup(fixture);
+  const mismatched = await createStockFixture();
+  appendFileSync(mismatched.asar, "mismatch");
+  const state = {};
+  const productionHashes = [fixture.asar, fixture.plist].map(fileHash);
+  try {
+    await assert.rejects(
+      prepareFixture(fixture, state, {
+        resolveSourceBackup: () => ({
+          ...verified,
+          backupAsar: mismatched.asar,
+          backupPlist: mismatched.plist,
+        }),
+      }),
+      /does not match captured source asarSha256/u,
+    );
+    assert.equal(state.cloneCount || 0, 0);
+    assert.equal(state.stagingRoot, undefined);
+    assert.deepEqual([fixture.asar, fixture.plist].map(fileHash), productionHashes);
+  } finally {
+    rmSync(mismatched.root, { recursive: true, force: true });
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });

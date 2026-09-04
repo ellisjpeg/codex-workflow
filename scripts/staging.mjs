@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import {
   appRoot,
+  asarPath,
   atomicReplace,
   buildPatchedAsar,
   embeddedFileHash,
@@ -27,6 +28,7 @@ import {
   plistValue,
   preflight,
   readPackage,
+  resolveSourceBackup,
   resignPatchedApp,
   setPlistValue,
   signatureIsValid,
@@ -333,9 +335,14 @@ function verifyStagingApp(layout, source, {
 export async function prepareStaging(devToolsPort, hooks = {}) {
   if (process.platform !== "darwin") throw new Error("Staging is supported only on macOS");
   const checkPort = hooks.assertPortAvailable || assertPortAvailable;
-  const sourcePreflight = hooks.sourcePreflight || (() => preflight());
+  const sourcePreflight = hooks.sourcePreflight || (() => ({
+    ...preflight(),
+    sourceAsar: asarPath,
+    sourcePlist: infoPlistPath,
+  }));
   const clonePreflight = hooks.clonePreflight || ((targetAsar, targetPlist) =>
     preflight(targetAsar, targetPlist));
+  const resolveBackup = hooks.resolveSourceBackup || resolveSourceBackup;
   const cloneApp = hooks.cloneApp || ((from, to) =>
     run("/bin/cp", ["-cR", from, to], "Could not create the APFS staging clone"));
   const createRoot = hooks.createRoot || (() => mkdtempSync(join(stagingBaseRoot, stagingPrefix)));
@@ -344,17 +351,52 @@ export async function prepareStaging(devToolsPort, hooks = {}) {
   const signatureCheck = hooks.signatureIsValid || signatureIsValid;
   checkPort(devToolsPort);
   const current = sourcePreflight();
-  if (current.pkg.__codexWorkflow || current.pkg.main === "workflow-loader.cjs") {
-    throw new Error("Staging must be prepared from the audited stock Codex bundle");
+  const hasWorkflowMetadata = Object.hasOwn(current.pkg, "__codexWorkflow");
+  const hasWorkflowLoader = current.pkg.main === "workflow-loader.cjs";
+  if (hasWorkflowMetadata !== hasWorkflowLoader) {
+    throw new Error("Staging source has ambiguous Workflow metadata");
   }
+  let captured = current;
+  let verifiedBackup = null;
+  let evidencePaths = {
+    kind: "live-stock-app",
+    asar: current.sourceAsar || asarPath,
+    plist: current.sourcePlist || infoPlistPath,
+    manifest: null,
+  };
+  if (hasWorkflowMetadata) {
+    const metadata = current.pkg.__codexWorkflow;
+    if (!metadata || typeof metadata !== "object" || !metadata.source ||
+      typeof metadata.originalMain !== "string") {
+      throw new Error("Staging source has incomplete Workflow metadata");
+    }
+    verifiedBackup = resolveBackup(metadata.source);
+    captured = assertMatchingSourceSnapshot(
+      { fingerprint: metadata.source, originalMain: metadata.originalMain },
+      preflight(verifiedBackup.backupAsar, verifiedBackup.backupPlist),
+    );
+    evidencePaths = {
+      kind: "verified-workflow-backup",
+      asar: verifiedBackup.backupAsar,
+      plist: verifiedBackup.backupPlist,
+      manifest: verifiedBackup.manifestPath,
+    };
+  }
+  const source = { ...captured.fingerprint, originalMain: captured.originalMain };
+  const sourceEvidence = { ...evidencePaths, fingerprint: source };
   const root = createRoot();
   const layout = stagingLayout(root, devToolsPort);
   try {
     assertStagingLayoutManaged(layout);
     cloneApp(appRoot, layout.app);
     assertStagingLayoutManaged(layout);
+    if (verifiedBackup) {
+      cpSync(verifiedBackup.backupAsar, layout.asar);
+      cpSync(verifiedBackup.backupPlist, layout.plist);
+      assertStagingLayoutManaged(layout);
+    }
     const cloned = assertMatchingSourceSnapshot(
-      current,
+      captured,
       clonePreflight(layout.asar, layout.plist),
     );
     const originalExecutableName = plistValue("CFBundleExecutable", layout.plist);
@@ -375,10 +417,6 @@ export async function prepareStaging(devToolsPort, hooks = {}) {
     mkdirSync(layout.sourceBackup, { recursive: true, mode: 0o700 });
     cpSync(layout.asar, join(layout.sourceBackup, "app.asar"));
     cpSync(layout.plist, join(layout.sourceBackup, "Info.plist"));
-    const source = {
-      ...cloned.fingerprint,
-      originalMain: cloned.originalMain,
-    };
     writeJsonAtomic(join(layout.sourceBackup, "manifest.json"), {
       schemaVersion: 1,
       source,
@@ -432,6 +470,7 @@ export async function prepareStaging(devToolsPort, hooks = {}) {
       executableName: stagingExecutableName,
       sourceApp: appRoot,
       source,
+      sourceEvidence,
       installed,
       patchVersion,
       processId: null,
