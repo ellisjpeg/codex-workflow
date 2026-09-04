@@ -25,7 +25,7 @@ This is an independent community project and is not affiliated with or endorsed 
 
 ## Compatibility
 
-Sidebar customisation in the 0.5.15 candidate has source/fixture coverage; live visual review is pending. See [the evidence and manual review checklist](docs/SETTINGS_SIDEBAR_CUSTOMISATION.md).
+Sidebar customisation has source/fixture coverage; fixes from manual visual feedback await re-review. See [the evidence and manual review checklist](docs/SETTINGS_SIDEBAR_CUSTOMISATION.md).
 
 - macOS
 - Codex Desktop `26.901.31953` (build `7868`)

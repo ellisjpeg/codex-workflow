@@ -479,6 +479,51 @@ test("sidebar mutations settle with real observers and hiding the current page n
   } finally { harness.dom.window.close(); }
 });
 
+test("sidebar disclosure matches its muted heading and edit circles sit inside the row padding", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["voice"] } });
+  try {
+    const { nav, document } = harness;
+    const glyph = nav.querySelector('[data-codex-workflow="hidden-pages"] button svg');
+    assert.ok(glyph.classList.contains("text-tertiary"));
+    assert.ok(glyph.classList.contains("opacity-75"));
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('[data-codex-workflow="sidebar-edit"]').click();
+    for (const label of ["Hide Appearance", "Restore Voice"]) {
+      const action = nav.querySelector(`[aria-label="${label}"]`);
+      assert.ok(action.classList.contains("size-6"));
+      assert.ok(action.firstElementChild.classList.contains("size-4"));
+      assert.equal(action.style.insetInlineEnd, "var(--padding-row-x)");
+      assert.equal(action.previousElementSibling.style.paddingInlineEnd, "calc(var(--height-token-row) + var(--padding-row-x))");
+    }
+  } finally { harness.dom.window.close(); }
+});
+
+test("hide and restore preserve the viewport including user scrolling during persistence", async () => {
+  let resolveWrite;
+  const harness = await createHarness({ nativeSidebar: true, setSettings: (patch) =>
+    new Promise((resolve) => { resolveWrite = () => resolve(patch); }) });
+  try {
+    const { nav, document, window } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('[data-codex-workflow="sidebar-edit"]').click();
+    const owner = document.querySelector("#settings-scroll");
+    const nativeFocus = window.HTMLElement.prototype.focus;
+    window.HTMLElement.prototype.focus = function (options) {
+      if (this.closest("#settings-scroll") && !options?.preventScroll) owner.scrollTop = 999;
+      nativeFocus.call(this, options);
+    };
+    for (const label of ["Hide Appearance", "Restore Appearance"]) {
+      owner.scrollTop = 80;
+      nav.querySelector(`[aria-label="${label}"]`).click();
+      assert.equal(owner.scrollTop, 80);
+      owner.scrollTop = 120;
+      resolveWrite();
+      await flush();
+      assert.equal(owner.scrollTop, 120);
+    }
+  } finally { harness.dom.window.close(); }
+});
+
 test("Workflow Update uses the native sidebar hover-reveal pill", async () => {
   const harness = await createHarness({
     updateStatus: {

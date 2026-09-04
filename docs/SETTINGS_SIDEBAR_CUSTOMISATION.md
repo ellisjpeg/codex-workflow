@@ -19,6 +19,8 @@ Source inspected read-only from installed Codex 26.901.31953 / 7868:
 
 The production UI was not automated. Staging was blocked at sign-in. The user subsequently requested source inspection and automated tests with manual UI review instead. Native-looking composition, focus-ring clipping, hit targets, and exact geometry remain unverified until that review.
 
+Manual feedback on installed 0.5.15 reported an unmuted chevron, oversized circles at the scrollbar and a scroll-to-bottom on hide. The 0.5.16 source fixes use the heading's `text-tertiary opacity-75`, 16px circles within 24px targets inset by `--padding-row-x`, and scroll-preserving ownership focus transfers. Hide/restore preserves the immediate viewport without overriding later user scrolling while persistence finishes. These corrections still require manual visual re-review; the installed CSS confirms the tokens, not the final geometry.
+
 ## Ownership and reversal
 
 - Only enabled native `button[data-settings-panel-slug]` destinations inside the verified Settings scroll owner are hideable. Disabled entries, external browser links and plugin-extension rows without stable native page slugs are untouched.
@@ -34,6 +36,8 @@ The production UI was not automated. Staging was blocked at sign-in. The user su
 
 `npm run check` includes focused main/preload fixtures for canonical defaults and validation, actual disk round-trip/permissions, hide/restore, Workflow exclusion, content retention, IPC rejection/serialization, native search-result activation, empty/non-empty disclosure, native remounts, clone sanitation, keyboard focus, container/order preservation, and real MutationObserver settling.
 
+Regression fixtures also check muted disclosure styling, smaller circles with native inset and label clearance, and hide/restore scroll preservation including user scrolling during a pending write. The scroll fixture models focus-induced scrolling; it is not browser layout proof.
+
 Fixture layout assertions establish DOM order and out-of-flow controls, not pixel geometry. JSDOM does not prove live rendering, native React behavior, screen-reader output, or production performance.
 
 ## Manual review gate
@@ -47,4 +51,4 @@ On the audited build, after a separate guarded installation in a quiet window:
 5. With editing off, visit a hidden page through the disclosure and then native search. Neither visit restores its normal row. Clear search, close/reopen Settings and relaunch; choices must survive.
 6. Confirm native content, external links, disabled pages and plugin-extension rows remain functional; inspect accessible names/IDs and reduced-motion behavior.
 
-No live feature-state screenshots or production-install claim accompanies this source candidate.
+No new live feature-state screenshots accompany the 0.5.16 source corrections.

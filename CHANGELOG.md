@@ -2,6 +2,12 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.16 - 2026-09-05
+
+- Match the Hidden chevron to the muted section heading.
+- Reduce hide/restore circles to 16px, retaining 24px targets inset by native row padding to avoid the scrollbar.
+- Preserve the sidebar viewport when hiding or restoring a page, without undoing user scrolling during persistence.
+
 ## 0.5.15 - 2026-09-05
 
 - Add Customise/Done sidebar editing with hide/restore controls and a non-sticky Hidden disclosure.

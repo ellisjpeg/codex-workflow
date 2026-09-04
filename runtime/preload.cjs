@@ -1738,7 +1738,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     refreshSidebarSnapshot(source, record);
     restoreSidebarDisplay(source, record);
     if (record.wrapper.contains(document.activeElement) && source.isConnected) {
-      source.focus();
+      source.focus({ preventScroll: true });
     }
     record.wrapper.remove();
     source.removeAttribute("data-codex-workflow-sidebar-hidden");
@@ -1794,7 +1794,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     title.textContent = "Hidden";
     const disclosure = sidebarIconButton("Show hidden settings pages");
     disclosure.setAttribute("aria-controls", "codex-workflow-hidden-pages");
-    disclosure.append(sidebarGlyph("m6 9 6 6 6-6"));
+    const glyph = sidebarGlyph("m6 9 6 6 6-6");
+    glyph.classList.add("text-tertiary", "opacity-75");
+    disclosure.append(glyph);
     disclosure.addEventListener("click", () => {
       state.hiddenPagesExpanded = !state.hiddenPagesExpanded;
       syncSettingsSidebar();
@@ -1842,7 +1844,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       disclosure.setAttribute("aria-label", `${state.hiddenPagesExpanded ? "Hide" : "Show"} hidden settings pages`);
       disclosure.querySelector("path").setAttribute("d", state.hiddenPagesExpanded ? "m18 15-6-6-6 6" : "m6 9 6 6 6-6");
       const rows = state.hiddenPagesGroup.lastElementChild;
-      if (!state.hiddenPagesExpanded && rows.contains(document.activeElement)) disclosure.focus();
+      if (!state.hiddenPagesExpanded && rows.contains(document.activeElement)) disclosure.focus({ preventScroll: true });
       rows.hidden = !state.hiddenPagesExpanded;
       rows.style.display = state.hiddenPagesExpanded ? "" : "none";
     }
@@ -1858,7 +1860,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         wrapper.dataset.codexWorkflow = "sidebar-row";
         const control = sidebarIconButton("");
         control.style.position = "absolute";
-        control.style.insetInlineEnd = "0";
+        control.style.insetInlineEnd = "var(--padding-row-x)";
         control.style.top = "0";
         control.style.bottom = "0";
         control.style.marginBlock = "auto";
@@ -1868,9 +1870,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
           if (next.has(slug)) next.delete(slug);
           else next.add(slug);
           state.hiddenPagesExpanded = true;
-          await persistSetting("hiddenSettingsPages", [...next]);
+          const scrollTop = owner.scrollTop;
+          const write = persistSetting("hiddenSettingsPages", [...next]);
+          owner.scrollTop = scrollTop;
+          await write;
           const current = state.sidebarRows.get(source);
-          (current?.control.isConnected && state.sidebarEditing ? current.control : source).focus();
+          (current?.control.isConnected && state.sidebarEditing ? current.control : source).focus({ preventScroll: true });
         });
         record = { wrapper, control, display: source.style.display,
           priority: source.style.getPropertyPriority("display"), hadStyle: source.hasAttribute("style"),
@@ -1886,7 +1891,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         restoreSidebarDisplay(proxy, record);
         proxy.dataset.codexWorkflowPage = slug;
         proxy.addEventListener("click", () => source.click());
-        if (record.proxy === document.activeElement) { record.proxy.replaceWith(proxy); proxy.focus(); }
+        if (record.proxy === document.activeElement) { record.proxy.replaceWith(proxy); proxy.focus({ preventScroll: true }); }
         else if (record.proxy) record.proxy.replaceWith(proxy);
         else record.wrapper.append(proxy, record.control);
         record.proxy = proxy;
@@ -1895,7 +1900,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       }
       if (record.editing !== state.sidebarEditing) {
         record.proxy.style.setProperty("padding-inline-end",
-          state.sidebarEditing ? "var(--height-token-row)" : source.style.getPropertyValue("padding-inline-end"),
+          state.sidebarEditing ? "calc(var(--height-token-row) + var(--padding-row-x))" : source.style.getPropertyValue("padding-inline-end"),
           state.sidebarEditing ? "" : source.style.getPropertyPriority("padding-inline-end"));
         record.control.hidden = !state.sidebarEditing;
         record.control.style.display = state.sidebarEditing ? "" : "none";
@@ -1905,7 +1910,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       if (record.control.getAttribute("aria-label") !== label) {
         record.control.setAttribute("aria-label", label);
         const glyph = sidebarGlyph(isHidden ? "M5 12h14M12 5v14" : "M5 12h14");
-        const circle = div(isHidden ? "flex size-5 items-center justify-center rounded-full text-default bg-text/5" : "flex size-5 items-center justify-center rounded-full text-white bg-danger-solid");
+        const circle = div(isHidden ? "flex size-4 items-center justify-center rounded-full text-default bg-text/5" : "flex size-4 items-center justify-center rounded-full text-white bg-danger-solid");
         circle.append(glyph);
         record.control.replaceChildren(circle);
       }
@@ -1915,7 +1920,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         if (record.wrapper.parentElement !== rows) rows.append(record.wrapper);
       } else if (source.nextElementSibling !== record.wrapper) source.after(record.wrapper);
       if (source.contains(document.activeElement)) {
-        (isHidden && !state.hiddenPagesExpanded ? state.hiddenPagesGroup.querySelector("button") : record.proxy).focus();
+        (isHidden && !state.hiddenPagesExpanded ? state.hiddenPagesGroup.querySelector("button") : record.proxy).focus({ preventScroll: true });
       }
       source.setAttribute("data-codex-workflow-sidebar-hidden", "true");
       source.style.setProperty("display", "none", "important");
