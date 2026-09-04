@@ -2016,30 +2016,32 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         Math.abs(rect.left - rootRect.left) < 1 &&
         rect.top <= rootRect.top + 1 && rect.bottom > rootRect.top;
     });
-    if (titlebars.length !== 1) return null;
+    const matches = [];
+    for (const titlebar of titlebars) {
+      const titlebarRect = titlebar.getBoundingClientRect();
+      const regions = Array.from(titlebar.children).filter((candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const style = getComputedStyle(candidate);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        const rect = candidate.getBoundingClientRect();
+        return Math.abs(rect.left - rootRect.left) < 1 &&
+          Math.abs(rect.width - rootRect.width) < 1 &&
+          Math.abs(rect.height - titlebarRect.height) < 1;
+      });
+      if (regions.length !== 1) continue;
 
-    const titlebarRect = titlebars[0].getBoundingClientRect();
-    const regions = Array.from(titlebars[0].children).filter((candidate) => {
-      if (!(candidate instanceof HTMLElement)) return false;
-      const style = getComputedStyle(candidate);
-      if (style.display === "none" || style.visibility === "hidden") return false;
-      const rect = candidate.getBoundingClientRect();
-      return Math.abs(rect.left - rootRect.left) < 1 &&
-        Math.abs(rect.width - rootRect.width) < 1 &&
-        Math.abs(rect.height - titlebarRect.height) < 1;
-    });
-    if (regions.length !== 1) return null;
-
-    const hosts = Array.from(regions[0].children).filter((candidate) => {
-      if (!(candidate instanceof HTMLElement)) return false;
-      const style = getComputedStyle(candidate);
-      const rect = candidate.getBoundingClientRect();
-      return ["flex", "inline-flex"].includes(style.display) &&
-        style.visibility !== "hidden" && rect.width > 0 &&
-        Math.abs(rect.height - titlebarRect.height) < 1 &&
-        candidate.querySelectorAll("button[aria-label]").length >= 3;
-    });
-    return hosts.length === 1 ? { element: hosts[0], globalTitlebar: true } : null;
+      const hosts = Array.from(regions[0].querySelectorAll("*")).filter((candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const style = getComputedStyle(candidate);
+        const rect = candidate.getBoundingClientRect();
+        return ["flex", "inline-flex"].includes(style.display) &&
+          style.visibility !== "hidden" && rect.width > 0 &&
+          Math.abs(rect.height - titlebarRect.height) < 1 &&
+          candidate.querySelectorAll("button[aria-label]").length >= 3;
+      });
+      if (hosts.length === 1) matches.push(hosts[0]);
+    }
+    return matches.length === 1 ? { element: matches[0], globalTitlebar: true } : null;
   }
 
   function beginUpdatePillDiscovery() {

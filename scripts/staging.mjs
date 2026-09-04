@@ -40,9 +40,9 @@ import {
 
 export const stagingPrefix = "codex-workflow-staging-";
 export const stagingBaseRoot = "/private/tmp";
-export const stagingBundleIdentifier = "com.openai.codex.workflow-staging.v2690120858";
+export const stagingBundleIdentifier = "com.openai.codex.workflow-staging.v2690131953";
 export const stagingName = "Codex Workflow Staging";
-export const stagingExecutableName = "CodexWorkflowStaging-2690120858";
+export const stagingExecutableName = "CodexWorkflowStaging-2690131953";
 export const stagingUnixSocketPathMaxBytes = 103;
 export const stagingUpdaterPath = join(sourceRoot, "scripts", "staging-updater-disabled.cjs");
 

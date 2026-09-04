@@ -2,6 +2,17 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.14 - 2026-09-04
+
+- Preserve an unchanged loaded updater LaunchAgent so its installer does not terminate its own repair process.
+- Require the installed Workflow version and loader/runtime/source hashes to match before automatic repair relaunches Codex.
+- Document bounded deployment after the failed September 4 one-shot repair attempt.
+
+## 0.5.13 - 2026-09-04
+
+- Re-audited and guarded Codex Desktop `26.901.31953` build `7868` while preserving the existing Workflow UI and composer microphone preference.
+- Made post-update repair failures visible as one deduplicated waiting state and notification when no exact-build verified release exists, without repeated prompts or background log noise.
+
 ## 0.5.12 - 2026-09-04
 
 - Added an independent Interface preference that hides the idle composer microphone control while preserving active dictation controls and native layout reflow.

@@ -12,11 +12,14 @@ process.env.CODEX_WORKFLOW_ROOT = updaterRuntimeRoot;
 const require = createRequire(import.meta.url);
 const {
   automaticRepairDecision,
+  automaticRepairWaitState,
   applyAutomaticRepair,
   checkRemote,
   compareVersions,
   compatibilityMatches,
   eligibleReleaseCandidate,
+  nextAutomaticRepairState,
+  notifyRepairRequired,
   releaseVersionEligible,
   remoteBackoffMs,
   remoteCheckDue,
@@ -280,6 +283,73 @@ test("automatic repair is exact-build guarded and attempted once", () => {
   }
 });
 
+test("a replaced Codex build records and notifies one repair wait state", () => {
+  const config = { autoRepairCodexUpdates: true };
+  const identity = {
+    version: "26.901.31953",
+    build: "7868",
+    bundleIdentifier: "com.openai.codex",
+    packageName: "openai-codex-electron",
+  };
+  const patchState = { installed: { version: "26.901.20858", build: "7658" } };
+  const waiting = automaticRepairWaitState(
+    config,
+    null,
+    identity,
+    patchState,
+    {},
+    new Date("2026-09-04T20:00:00.000Z"),
+  );
+  assert.deepEqual(waiting, {
+    key: "awaiting-compatible-release:26.901.31953:7868",
+    status: "awaiting-compatible-release",
+    reason: "no-compatible-release",
+    appVersion: "26.901.31953",
+    appBuild: "7868",
+    updatedAt: "2026-09-04T20:00:00.000Z",
+  });
+  assert.equal(automaticRepairWaitState(
+    config,
+    null,
+    identity,
+    patchState,
+    { automaticRepair: waiting },
+  ), null);
+  assert.equal(nextAutomaticRepairState(
+    config,
+    null,
+    identity,
+    { installed: { version: identity.version, build: identity.build } },
+    { automaticRepair: waiting },
+  ), null);
+  assert.equal(nextAutomaticRepairState(config, waiting, identity, patchState, {}), waiting);
+  assert.equal(nextAutomaticRepairState(
+    { autoRepairCodexUpdates: false },
+    null,
+    identity,
+    patchState,
+    { automaticRepair: waiting },
+  ), null);
+  assert.equal(automaticRepairWaitState(config, {}, identity, patchState, {}), null);
+  assert.equal(automaticRepairWaitState(
+    config,
+    null,
+    identity,
+    { installed: { version: identity.version, build: identity.build } },
+    {},
+  ), null);
+
+  const calls = [];
+  assert.equal(notifyRepairRequired((command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0 };
+  }), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "/usr/bin/osascript");
+  assert.match(calls[0].args[1], /waiting for a compatible verified repair/u);
+  assert.equal(calls[0].options.timeout, 5000);
+});
+
 test("equal-version release repairs a verified stock app exactly once", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-auto-apply-test-"));
   try {
@@ -306,6 +376,10 @@ test("equal-version release repairs a verified stock app exactly once", async ()
       appBuild: identity.build,
       integrity: { matches: true },
       signature: { valid: true },
+      installedWorkflowVersion: candidate.version,
+      loaderCurrent: true,
+      runtimeCurrent: true,
+      sourceCurrent: true,
     }];
     const calls = [];
     const written = [];
@@ -345,6 +419,98 @@ test("equal-version release repairs a verified stock app exactly once", async ()
     ]);
     assert.equal(state.availableVersion, null);
     assert.equal(state.stagedSourceRoot, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic repair refuses stale installed hashes before relaunch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-auto-hashes-test-"));
+  try {
+    writeRelease(root, "0.5.11");
+    const candidate = sourcePackage(root);
+    const identity = {
+      version: candidate.compatibility.codexVersion,
+      build: candidate.compatibility.codexBuild,
+      bundleIdentifier: candidate.compatibility.bundleIdentifier,
+      packageName: candidate.compatibility.packageName,
+    };
+    for (const mismatch of [
+      { installedWorkflowVersion: "0.5.10" },
+      { loaderCurrent: false },
+      { runtimeCurrent: false },
+      { sourceCurrent: false },
+    ]) {
+      let state = {};
+      let calls = 0;
+      let inspections = 0;
+      await assert.rejects(applyAutomaticRepair(
+        { autoRepairCodexUpdates: true, nodeExecutable: "/opt/node" },
+        candidate, identity, state,
+        {
+          inspectCandidateStatus: () => inspections++ === 0
+            ? { patched: false, recommendedAction: "install", integrity: { computed: "fixture" } }
+            : {
+              ok: true, patched: true, appVersion: identity.version, appBuild: identity.build,
+              integrity: { matches: true }, signature: { valid: true },
+              installedWorkflowVersion: candidate.version,
+              loaderCurrent: true, runtimeCurrent: true, sourceCurrent: true,
+              ...mismatch,
+            },
+          waitForBundleQuiescence: async () => true,
+          readState: () => state,
+          writeState: (value) => { state = value; },
+          spawnSync: () => { calls += 1; return { status: 0 }; },
+        },
+      ), /installed hash, integrity, and signature verification/u);
+      assert.equal(calls, 1);
+      assert.equal(state.automaticRepair.status, "failed");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic repair does not rewrite the same quiescence wait state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-auto-wait-test-"));
+  try {
+    writeRelease(root, "0.5.13", {
+      codexVersion: "26.901.31953",
+      codexBuild: "7868",
+    });
+    const candidate = sourcePackage(root);
+    const identity = {
+      version: "26.901.31953",
+      build: "7868",
+      bundleIdentifier: "com.openai.codex",
+      packageName: "openai-codex-electron",
+    };
+    const status = {
+      patched: false,
+      recommendedAction: "install",
+      pendingTransaction: null,
+      error: null,
+      integrity: { computed: "c".repeat(64) },
+    };
+    const decision = automaticRepairDecision(
+      { autoRepairCodexUpdates: true }, candidate, identity, status, {},
+    );
+    const previousState = {
+      automaticRepair: { key: decision.key, status: "waiting" },
+    };
+    let writes = 0;
+    assert.equal(await applyAutomaticRepair(
+      { autoRepairCodexUpdates: true },
+      candidate,
+      identity,
+      previousState,
+      {
+        inspectCandidateStatus: () => status,
+        waitForBundleQuiescence: async () => false,
+        writeState() { writes += 1; },
+      },
+    ), false);
+    assert.equal(writes, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

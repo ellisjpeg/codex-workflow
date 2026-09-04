@@ -385,6 +385,68 @@ function automaticRepairDecision(config, candidate, identity, status, previousSt
   return { eligible: true, reason: null, key };
 }
 
+function automaticRepairWaitState(
+  config,
+  candidate,
+  identity,
+  patchState,
+  previousState,
+  now = new Date(),
+) {
+  const installed = patchState?.installed;
+  if (
+    config?.autoRepairCodexUpdates !== true ||
+    candidate ||
+    !identity ||
+    !installed ||
+    (installed.version === identity.version && String(installed.build) === String(identity.build))
+  ) {
+    return null;
+  }
+  const key = `awaiting-compatible-release:${identity.version}:${identity.build}`;
+  if (
+    previousState?.automaticRepair?.key === key &&
+    previousState.automaticRepair.status === "awaiting-compatible-release"
+  ) {
+    return null;
+  }
+  return {
+    key,
+    status: "awaiting-compatible-release",
+    reason: "no-compatible-release",
+    appVersion: identity.version,
+    appBuild: identity.build,
+    updatedAt: now.toISOString(),
+  };
+}
+
+function nextAutomaticRepairState(config, repairWait, identity, patchState, previousState) {
+  if (repairWait) return repairWait;
+  if (
+    config?.autoRepairCodexUpdates !== true &&
+    previousState?.automaticRepair?.status === "awaiting-compatible-release"
+  ) {
+    return null;
+  }
+  const installedIdentityCurrent = patchState?.installed?.version === identity?.version &&
+    String(patchState?.installed?.build) === String(identity?.build);
+  if (
+    previousState?.automaticRepair?.status === "awaiting-compatible-release" &&
+    installedIdentityCurrent
+  ) {
+    return null;
+  }
+  return previousState?.automaticRepair || null;
+}
+
+function notifyRepairRequired(runProcess = spawnSync) {
+  const result = runProcess("/usr/bin/osascript", [
+    "-e",
+    'display notification "Codex was updated. Workflow is waiting for a compatible verified repair." with title "Codex Workflow"',
+  ], { encoding: "utf8", timeout: 5000 });
+  return result.status === 0;
+}
+
 function bundleInUse(targetRoot) {
   const result = spawnSync("/usr/sbin/lsof", ["-nP", "+D", targetRoot], { stdio: "ignore" });
   if (result.status === 0) return true;
@@ -416,18 +478,18 @@ async function applyAutomaticRepair(config, candidate, identity, previousState, 
   const writeState = hooks.writeState || ((value) => writeJsonAtomic(statePath, value));
   const before = inspect(config, candidate);
   const decision = automaticRepairDecision(config, candidate, identity, before, previousState);
-  if (!decision.eligible) {
-    if (decision.reason !== "disabled" && decision.reason !== "already-patched") {
-      appendLog("info", `Automatic repair skipped: ${decision.reason}`);
-    }
-    return false;
-  }
+  if (!decision.eligible) return false;
   if (!await waitForQuiet(config)) {
-    appendLog("info", "Automatic repair deferred until the Codex bundle is quiescent");
-    writeState({
-      ...readState(),
-      automaticRepair: { key: decision.key, status: "waiting", updatedAt: new Date().toISOString() },
-    });
+    if (
+      previousState?.automaticRepair?.key !== decision.key ||
+      previousState.automaticRepair.status !== "waiting"
+    ) {
+      appendLog("info", "Automatic repair deferred until the Codex bundle is quiescent");
+      writeState({
+        ...readState(),
+        automaticRepair: { key: decision.key, status: "waiting", updatedAt: new Date().toISOString() },
+      });
+    }
     return false;
   }
   writeState({
@@ -448,6 +510,10 @@ async function applyAutomaticRepair(config, candidate, identity, previousState, 
       !verified.ok ||
       !verified.patched ||
       verified.pendingTransaction ||
+      verified.installedWorkflowVersion !== candidate.version ||
+      verified.loaderCurrent !== true ||
+      verified.runtimeCurrent !== true ||
+      verified.sourceCurrent !== true ||
       verified.appVersion !== identity.version ||
       verified.appBuild !== identity.build ||
       verified.integrity?.matches !== true ||
@@ -499,7 +565,7 @@ async function run() {
   if (!fs.existsSync(config.nodeExecutable)) throw new Error("Workflow updater Node.js runtime is unavailable");
   const apply = process.argv.includes("--apply");
   const background = process.argv.includes("--background");
-  appendLog("info", `Updater started (${apply ? "apply" : background ? "background" : "check"})`);
+  if (!background) appendLog("info", `Updater started (${apply ? "apply" : "check"})`);
 
   const previousState = readJson(statePath) || {};
   const installed = installedVersion();
@@ -530,6 +596,23 @@ async function run() {
   const failureCount = shouldCheckRemote
     ? checkError ? Math.min(Number(previousState.remoteFailureCount || 0) + 1, 9) : 0
     : Number(previousState.remoteFailureCount || 0);
+  const patchState = readJson(patchStatePath);
+  const repairWait = background
+    ? automaticRepairWaitState(
+      config,
+      automaticRepairCandidate,
+      identity,
+      patchState,
+      previousState,
+    )
+    : null;
+  const automaticRepair = nextAutomaticRepairState(
+    config,
+    repairWait,
+    identity,
+    patchState,
+    previousState,
+  );
   writeJsonAtomic(statePath, {
     ...previousState,
     schemaVersion: 1,
@@ -556,12 +639,25 @@ async function run() {
     availableCodexBuild: candidate?.compatibility.codexBuild || null,
     stagedSourceRoot: stagedRelease?.root || null,
     error: shouldCheckRemote ? checkError : previousState.error || null,
+    automaticRepair,
   });
+  if (repairWait) {
+    appendLog(
+      "info",
+      `Codex ${identity.version} (${identity.build}) detected; waiting for a compatible verified Workflow release`,
+    );
+    if (!notifyRepairRequired()) {
+      appendLog("error", "Could not show the one-time Workflow repair notification");
+    }
+  } else if (background && checkError && checkError !== previousState.error) {
+    appendLog("error", `Workflow release check failed: ${checkError}`);
+  }
   if (background && automaticRepairCandidate) {
     await applyAutomaticRepair(config, automaticRepairCandidate, identity, previousState);
     return;
   }
   if (!candidate || !apply) {
+    if (background) return;
     appendLog("info", candidate ? `Workflow ${candidate.version} is available` : "No Workflow update is available");
     return;
   }
@@ -584,11 +680,14 @@ if (require.main === module) {
 
 module.exports = {
   automaticRepairDecision,
+  automaticRepairWaitState,
   applyAutomaticRepair,
   checkRemote,
   compareVersions,
   compatibilityMatches,
   eligibleReleaseCandidate,
+  nextAutomaticRepairState,
+  notifyRepairRequired,
   releaseVersionEligible,
   remoteBackoffMs,
   remoteCheckDue,

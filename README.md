@@ -25,7 +25,7 @@ This is an independent community project and is not affiliated with or endorsed 
 ## Compatibility
 
 - macOS
-- Codex Desktop `26.901.20858` (build `7658`)
+- Codex Desktop `26.901.31953` (build `7868`)
 - Node.js 24 or newer
 
 The installer intentionally refuses unreviewed Codex versions and builds. A desktop update may change internal routes, DOM structure, preload behavior, or ASAR metadata even when the interface looks similar.
@@ -51,7 +51,7 @@ The command is idempotent: if Workflow is already current it reports that state 
 
 After installation, Workflow checks packaged GitHub Releases at app startup and when the app becomes active, then no more often than every five minutes. Checks use ETags and exponential failure backoff capped at one hour. Only a verified staged release whose compatibility manifest matches the exact Codex version/build can surface the existing Workflow sidebar update pill; local checkout or commit drift is ignored. Clicking the pill applies a guarded external-runtime transaction, then relaunches Codex. Releases that change the embedded loader still require a reviewed guarded reapply.
 
-When `--auto-repair` was selected, the machine-local background agent can detect that Codex replaced the patched app with a stock exact-build installation. It waits for the app and bundle to become quiescent, requires a verified release manifest for that exact Codex version/build, runs the normal journaled installer once, verifies runtime hashes, ASAR integrity, and the ad-hoc signature, then relaunches once. An unknown build, pending recovery, failed attempt, or running app stops or defers safely; it never uses `--allow-version` or consumes the source backup.
+When `--auto-repair` was selected, the machine-local background agent can detect that Codex replaced the patched app. If no exact-build verified release exists, it records that state and shows one notification for the new build instead of failing silently or prompting repeatedly. When a compatible release exists, it waits for the app and bundle to become quiescent, runs the normal journaled installer once, verifies runtime hashes, ASAR integrity, and the ad-hoc signature, then relaunches once. An unknown build, pending recovery, failed attempt, or running app stops or defers safely; it never uses `--allow-version` or consumes the source backup.
 
 ## Recovery and removal
 

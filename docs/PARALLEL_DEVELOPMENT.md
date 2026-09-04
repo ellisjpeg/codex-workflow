@@ -77,6 +77,8 @@ One integration task owns promotion. It may promote only when all applicable gat
 
 Then quit production Codex once, run the guarded installer/reapply once, relaunch once, inspect logs and UI, and rerun status. A failed gate returns the candidate to source work; it does not trigger a partial production deployment.
 
+Do not use `launchctl submit` for a one-shot deployment. The September 4 `com.ellisjpeg.codex-workflow-production-repair-20260904` attempt stopped at its quiescence gate. Use the bounded setup command; a detached launchd deployment must explicitly use `RunAtLoad=true`, `KeepAlive=false`, and no interval, record its attempt before touching the app, and be removed after its terminal result. Never reopen the app from a failed quiescence/install path. An unchanged loaded updater agent must not be booted out from its own installer child.
+
 ## Ownership and cleanup
 
 - Only the integration task may create or control the staging app.

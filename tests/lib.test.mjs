@@ -10,6 +10,7 @@ import {
   backupAppleSignature,
   compatibilityManifest,
   headerHash,
+  installUpdaterAgent,
   preflight,
   recoverTransaction,
   resignPatchedAppArgs,
@@ -27,11 +28,36 @@ import {
 
 const libSource = readFileSync(new URL("../scripts/lib.mjs", import.meta.url), "utf8");
 
+test("updater agent install preserves a loaded job and reloads an unloaded job", () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-agent-test-"));
+  const agentPath = join(root, "updater.plist");
+  const calls = [];
+  let loaded = false;
+  const runProcess = (_command, args) => {
+    calls.push(args[0]);
+    return { status: args[0] === "print" && !loaded ? 1 : 0 };
+  };
+  try {
+    installUpdaterAgent({ agentPath, runProcess });
+    assert.deepEqual(calls, ["bootout", "bootstrap"]);
+    loaded = true;
+    calls.length = 0;
+    installUpdaterAgent({ agentPath, runProcess });
+    assert.deepEqual(calls, ["print"]);
+    loaded = false;
+    calls.length = 0;
+    installUpdaterAgent({ agentPath, runProcess });
+    assert.deepEqual(calls, ["print", "bootout", "bootstrap"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("compatibility guard names the audited Codex version and build", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(supportedVersion, "26.901.20858");
-  assert.equal(supportedBuild, "7658");
-  assert.equal(compatibilityManifest.workflowVersion, "0.5.12");
+  assert.equal(supportedVersion, "26.901.31953");
+  assert.equal(supportedBuild, "7868");
+  assert.equal(compatibilityManifest.workflowVersion, "0.5.14");
   assert.equal(compatibilityManifest.workflowVersion, pkg.version);
   assert.equal(compatibilityManifest.bundleIdentifier, "com.openai.codex");
   assert.equal(compatibilityManifest.packageName, "openai-codex-electron");
@@ -71,14 +97,14 @@ async function createAsarPair(root, name, marker, {
 test("preflight rejects an unaudited build under the supported version", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
   try {
-    const fixture = await createAsarPair(root, "wrong-build", "fixture", { build: 7659, plistBuild: "7659" });
+    const fixture = await createAsarPair(root, "wrong-build", "fixture", { build: 7869, plistBuild: "7869" });
     assert.throws(
       () => preflight(fixture.targetAsar, fixture.targetPlist),
-      /Unsupported Codex build 7659; expected 7658/u,
+      /Unsupported Codex build 7869; expected 7868/u,
     );
     assert.equal(
       preflight(fixture.targetAsar, fixture.targetPlist, { allowVersion: true }).pkg.codexBuildNumber,
-      7659,
+      7869,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -89,14 +115,14 @@ test("preflight rejects package and bundle version or build mismatches", async (
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
   try {
     const wrongVersion = await createAsarPair(root, "wrong-version-pair", "fixture", {
-      plistVersion: "26.901.20859",
+      plistVersion: "26.901.31954",
     });
     assert.throws(
       () => preflight(wrongVersion.targetAsar, wrongVersion.targetPlist, { allowVersion: true }),
       /package version .* does not match bundle version/u,
     );
     const wrongBuild = await createAsarPair(root, "wrong-build-pair", "fixture", {
-      plistBuild: "7659",
+      plistBuild: "7869",
     });
     assert.throws(
       () => preflight(wrongBuild.targetAsar, wrongBuild.targetPlist, { allowVersion: true }),

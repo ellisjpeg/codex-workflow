@@ -396,7 +396,7 @@ export function installRuntimeFiles({ autoRepairCodexUpdates } = {}) {
   }
 }
 
-export function installUpdaterAgent() {
+export function installUpdaterAgent({ agentPath = updaterAgentPath, runProcess = spawnSync } = {}) {
   const executable = process.execPath;
   const escapeXml = (value) => String(value)
     .replaceAll("&", "&amp;")
@@ -425,19 +425,24 @@ export function installUpdaterAgent() {
 </dict>
 </plist>
 `;
-  mkdirSync(dirname(updaterAgentPath), { recursive: true });
-  const stageDir = mkdtempSync(join(dirname(updaterAgentPath), ".codex-workflow-"));
+  const domain = `gui/${process.getuid()}`;
+  // Reloading an unchanged job kills the updater and its installer child mid-repair.
+  if (existsSync(agentPath) && readFileSync(agentPath, "utf8") === plist &&
+    runProcess("/bin/launchctl", ["print", `${domain}/com.ellisjpeg.codex-workflow-updater`], {
+      stdio: "ignore",
+    }).status === 0) return;
+  mkdirSync(dirname(agentPath), { recursive: true });
+  const stageDir = mkdtempSync(join(dirname(agentPath), ".codex-workflow-"));
   try {
     const staged = join(stageDir, "updater.plist");
     writeFileSync(staged, plist, { mode: 0o600 });
-    renameSync(staged, updaterAgentPath);
-    fsyncDirectory(dirname(updaterAgentPath));
+    renameSync(staged, agentPath);
+    fsyncDirectory(dirname(agentPath));
   } finally {
     rmSync(stageDir, { recursive: true, force: true });
   }
-  const domain = `gui/${process.getuid()}`;
-  spawnSync("/bin/launchctl", ["bootout", domain, updaterAgentPath], { stdio: "ignore" });
-  const loaded = spawnSync("/bin/launchctl", ["bootstrap", domain, updaterAgentPath], {
+  runProcess("/bin/launchctl", ["bootout", domain, agentPath], { stdio: "ignore" });
+  const loaded = runProcess("/bin/launchctl", ["bootstrap", domain, agentPath], {
     encoding: "utf8",
   });
   if (loaded.status !== 0) {

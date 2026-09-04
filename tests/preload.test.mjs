@@ -317,12 +317,25 @@ test("Workflow Update follows the current global titlebar sidebar region", async
     assert.equal(document.querySelector('[data-codex-workflow-update="true"]'), null);
 
     const titlebar = document.querySelector("#top-toolbar");
+    const dormantTitlebar = titlebar.cloneNode(false);
+    dormantTitlebar.id = "dormant-top-toolbar";
+    dormantTitlebar.innerHTML = '<div id="dormant-sidebar-region" style="visibility: hidden"></div>';
+    dormantTitlebar.getBoundingClientRect = () => ({
+      width: 1200, height: 46, left: 0, right: 1200, top: 0, bottom: 46,
+    });
+    const dormantRegion = dormantTitlebar.firstElementChild;
+    dormantRegion.getBoundingClientRect = () => ({
+      width: 275, height: 46, left: 0, right: 275, top: 0, bottom: 46,
+    });
+    titlebar.before(dormantTitlebar);
     titlebar.innerHTML = `
       <div id="sidebar-titlebar-region">
-        <div id="sidebar-titlebar-controls" class="inline-flex h-full items-center pointer-events-none w-full">
-          <button aria-label="Hide sidebar"></button>
-          <button aria-label="Back"></button>
-          <button aria-label="Forward"></button>
+        <div id="sidebar-titlebar-controls-wrapper">
+          <div id="sidebar-titlebar-controls" class="inline-flex h-full items-center pointer-events-none w-full">
+            <button aria-label="Hide sidebar"></button>
+            <button aria-label="Back"></button>
+            <button aria-label="Forward"></button>
+          </div>
         </div>
       </div>
       <div id="main-titlebar-region"></div>
@@ -335,7 +348,11 @@ test("Workflow Update follows the current global titlebar sidebar region", async
       width: 275, height: 46, left: 0, right: 275, top: 0, bottom: 46,
     });
     const controls = titlebar.querySelector("#sidebar-titlebar-controls");
+    const controlsWrapper = titlebar.querySelector("#sidebar-titlebar-controls-wrapper");
     const nativeControls = Array.from(controls.children);
+    controlsWrapper.getBoundingClientRect = () => ({
+      width: 275, height: 46, left: 0, right: 275, top: 0, bottom: 46,
+    });
     controls.style.display = "inline-flex";
     controls.getBoundingClientRect = () => ({
       width: 187, height: 46, left: 88, right: 275, top: 0, bottom: 46,
@@ -378,6 +395,8 @@ test("Workflow Update follows the current global titlebar sidebar region", async
     replacementRegion.getBoundingClientRect = region.getBoundingClientRect;
     const replacementControls = replacement.querySelector("#sidebar-titlebar-controls");
     replacementControls.getBoundingClientRect = controls.getBoundingClientRect;
+    const replacementControlsWrapper = replacement.querySelector("#sidebar-titlebar-controls-wrapper");
+    replacementControlsWrapper.getBoundingClientRect = controlsWrapper.getBoundingClientRect;
     titlebar.replaceWith(replacement);
     emitMutation(document.body, { addedNodes: [replacement], removedNodes: [titlebar] });
     await flush();

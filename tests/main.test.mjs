@@ -223,8 +223,8 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
 }
 
 const compatibilityConfig = {
-  codexVersion: "26.901.20858",
-  codexBuild: "7658",
+  codexVersion: "26.901.31953",
+  codexBuild: "7868",
   bundleIdentifier: "com.openai.codex",
   packageName: "openai-codex-electron",
 };

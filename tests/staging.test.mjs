@@ -192,7 +192,7 @@ test("staging layout isolates every mutable root under one generated temporary d
   for (const target of Object.values(layout).filter((value) => typeof value === "string")) {
     assert.ok(target === root || target.startsWith(`${root}/`));
   }
-  assert.equal(stagingBundleIdentifier, "com.openai.codex.workflow-staging.v2690120858");
+  assert.equal(stagingBundleIdentifier, "com.openai.codex.workflow-staging.v2690131953");
   assert.ok(
     Buffer.byteLength(join(layout.codexHome, "ipc", "ipc.sock")) <= stagingUnixSocketPathMaxBytes,
   );
