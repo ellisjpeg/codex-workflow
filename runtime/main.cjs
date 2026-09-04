@@ -31,6 +31,7 @@ const defaults = {
   hideInviteFriendMenuItem: true,
   replaceHelpWithSettings: true,
   hideComposerMicrophone: false,
+  hiddenSettingsPages: [],
 };
 
 fs.mkdirSync(logDir, { recursive: true });
@@ -71,6 +72,10 @@ function normaliseSettings(value) {
     hideComposerMicrophone: typeof value?.hideComposerMicrophone === "boolean"
       ? value.hideComposerMicrophone
       : defaults.hideComposerMicrophone,
+    hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
+      ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
+        typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
+      : [],
   };
 }
 

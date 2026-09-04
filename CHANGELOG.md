@@ -2,6 +2,12 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.15 - 2026-09-05
+
+- Add Customise/Done sidebar editing with hide/restore controls and a non-sticky Hidden disclosure.
+- Preserve native routes, current content, search results, and feature state; Workflow always remains reachable.
+- Persist hidden-page choices through canonical atomic settings writes with optimistic rollback. Live visual review remains pending.
+
 ## 0.5.14 - 2026-09-04
 
 - Preserve an unchanged loaded updater LaunchAgent so its installer does not terminate its own repair process.

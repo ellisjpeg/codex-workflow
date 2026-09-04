@@ -21,6 +21,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     hideInviteFriendMenuItem: true,
     replaceHelpWithSettings: true,
     hideComposerMicrophone: false,
+    hiddenSettingsPages: [],
   };
   const discoveryDelays = [16, 50, 150, 450, 1000, 2500, 5000, 10000];
   const composerRootSelector = '[role="presentation"][data-composer-layout]';
@@ -83,6 +84,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     customizationSection: null,
     settingsWriteInFlight: false,
     settingControls: new Map(),
+    sidebarEditing: false,
+    hiddenPagesExpanded: false,
+    sidebarRows: new Map(),
+    hiddenPagesGroup: null,
+    sidebarEditButton: null,
   };
 
   queueMicrotask(waitForCodexRenderer);
@@ -165,6 +171,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       hideComposerMicrophone: typeof value?.hideComposerMicrophone === "boolean"
         ? value.hideComposerMicrophone
         : defaults.hideComposerMicrophone,
+      hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
+        ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
+          typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
+        : [],
     };
   }
 
@@ -1329,6 +1339,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.settingsNav = nav;
     if (state.navWithListener !== nav) {
       nav.addEventListener("click", onSettingsNavClick, true);
+      nav.addEventListener("keydown", onSettingsSidebarKeyDown, true);
       state.navWithListener = nav;
     }
 
@@ -1352,6 +1363,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       }
       activateWorkflowPanel();
     }
+    syncSettingsSidebar();
   }
 
   function findSettingsNav(scope = document) {
@@ -1361,7 +1373,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       const nav = general.closest("nav");
       if (nav) candidates.add(nav);
     }
-    return Array.from(candidates).find(isSettingsNav) || null;
+    const matches = Array.from(candidates).filter(isSettingsNav);
+    return matches.length === 1 ? matches[0] : null;
   }
 
   function isSettingsNav(nav) {
@@ -1371,6 +1384,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (style.display === "none" || style.visibility === "hidden") return false;
     const rect = nav.getBoundingClientRect();
     if (rect.width < 100 || rect.width > 380 || rect.height < 180 || rect.left > innerWidth / 2) return false;
+    if (nav === state.settingsNav) return true;
     const slugs = new Set(
       Array.from(nav.querySelectorAll("[data-settings-panel-slug]"))
         .map((item) => item.getAttribute("data-settings-panel-slug")),
@@ -1382,11 +1396,15 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   function createWorkflowNavItem(nav) {
     const appearance = nav.querySelector('[data-settings-panel-slug="appearance"]');
     const nativeItems = Array.from(nav.querySelectorAll("[data-settings-panel-slug]"));
-    const source = nativeItems.find((item) => item.getAttribute("aria-current") !== "page") || appearance || nativeItems[0];
+    const source = nativeItems.find((item) => item.getAttribute("aria-current") !== "page") || appearance || nativeItems[0] || state.customNav;
     if (!(source instanceof HTMLElement)) return null;
 
     const item = source.cloneNode(true);
     if (!(item instanceof HTMLElement)) return null;
+    scrubSidebarClone(item);
+    const owned = state.sidebarRows.get(source);
+    if (owned) restoreSidebarDisplay(item, owned);
+    if (source === state.customNav) applyVisualTemplate(item, state.customInactiveSnapshot);
     item.setAttribute("data-settings-panel-slug", "workflow");
     item.dataset.codexWorkflow = "nav-item";
     item.setAttribute("aria-label", "Workflow");
@@ -1406,12 +1424,13 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.workflowNativeSlug = nativeActive?.getAttribute("data-settings-panel-slug") || null;
       state.activeWorkflow = true;
       activateWorkflowPanel();
+      syncSettingsSidebar();
     }, true);
 
     if (appearance?.parentElement) {
       appearance.insertAdjacentElement("afterend", item);
     } else {
-      source.parentElement?.appendChild(item);
+      (nav.querySelector(".overflow-y-auto") || source.parentElement)?.appendChild(item);
     }
 
     if (!state.loggedSettingsShell) {
@@ -1457,9 +1476,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function onSettingsNavClick(event) {
     const target = event.target instanceof Element ? event.target : null;
-    const item = target?.closest("[data-settings-panel-slug], [data-codex-workflow='nav-item']");
+    const item = target?.closest("[data-settings-panel-slug], [data-list-navigation-item], [data-codex-workflow='nav-item']");
     if (!item || item === state.customNav) return;
     if (state.activeWorkflow) restoreNativeSettingsView();
+    queueMicrotask(() => scheduleWork("settings"));
   }
 
   function activateWorkflowPanel() {
@@ -1559,6 +1579,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         description: "Remove the Dictate button from the composer.",
       }),
       renderCustomizeRow(),
+      renderSidebarCustomizeRow(),
     );
     return card;
   }
@@ -1641,11 +1662,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function renderCustomizeRow() {
     const row = div("flex items-center px-4 py-3");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "Customize";
+    const button = renderActionButton("Customize");
     button.setAttribute("aria-controls", "codex-workflow-focused-options");
-    button.className = "no-drag cursor-interaction items-center gap-1 border whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 flex rounded-md text-default bg-text/5 enabled:hover:bg-text/10 data-[state=open]:bg-text/10 border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
     const apply = () => {
       button.setAttribute("aria-expanded", String(state.customizationOpen));
       button.dataset.state = state.customizationOpen ? "open" : "closed";
@@ -1660,6 +1678,272 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     });
     row.appendChild(button);
     return row;
+  }
+
+  function renderActionButton(label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.className = "no-drag cursor-interaction items-center gap-1 border whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 flex rounded-md text-default bg-text/5 enabled:hover:bg-text/10 data-[state=open]:bg-text/10 border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
+    return button;
+  }
+
+  function renderSidebarCustomizeRow() {
+    const row = div("flex items-center justify-between px-4 gap-6 py-3");
+    const copy = div("flex min-w-0 flex-1 flex-col gap-0.5");
+    const label = div("min-w-0 text-sm text-default font-medium");
+    label.id = "codex-workflow-sidebar-label";
+    label.textContent = "Customise settings sidebar";
+    const description = div("min-w-0 text-xs leading-4 text-balance text-secondary");
+    description.id = "codex-workflow-sidebar-description";
+    description.textContent = "Move pages into Hidden without turning off their features. They remain searchable.";
+    copy.append(label, description);
+    const action = renderActionButton("Customise");
+    action.setAttribute("aria-describedby", description.id);
+    action.dataset.codexWorkflow = "sidebar-edit";
+    action.addEventListener("click", () => {
+      state.sidebarEditing = !state.sidebarEditing;
+      if (state.sidebarEditing) state.hiddenPagesExpanded = true;
+      syncSettingsSidebar();
+    });
+    state.sidebarEditButton = action;
+    row.append(copy, action);
+    return row;
+  }
+
+  function scrubSidebarClone(root) {
+    for (const element of [root, ...root.querySelectorAll("*")]) {
+      for (const attribute of Array.from(element.attributes)) {
+        if (attribute.name === "id" || attribute.name === "href" ||
+          attribute.name === "tabindex" || attribute.name === "title" ||
+          attribute.name === "name" || attribute.name === "value" ||
+          attribute.name === "for" || attribute.name.startsWith("data-") ||
+          ["aria-controls", "aria-owns", "aria-labelledby", "aria-describedby"].includes(attribute.name)) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    }
+  }
+
+  function restoreSidebarDisplay(element, record) {
+    if (record.display) element.style.setProperty("display", record.display, record.priority);
+    else element.style.removeProperty("display");
+    if (element.style.cssText === record.originalCssText && record.hadStyle) element.setAttribute("style", record.styleText);
+    if (!record.hadStyle && !element.getAttribute("style")) element.removeAttribute("style");
+    if (record.ariaHidden === null) element.removeAttribute("aria-hidden");
+    else element.setAttribute("aria-hidden", record.ariaHidden);
+  }
+
+  function releaseSidebarRow(source, record) {
+    refreshSidebarSnapshot(source, record);
+    restoreSidebarDisplay(source, record);
+    if (record.wrapper.contains(document.activeElement) && source.isConnected) {
+      source.focus();
+    }
+    record.wrapper.remove();
+    source.removeAttribute("data-codex-workflow-sidebar-hidden");
+    state.sidebarRows.delete(source);
+  }
+
+  function refreshSidebarSnapshot(source, record) {
+    if (source.style.display !== "none" || source.style.getPropertyPriority("display") !== "important") {
+      record.display = source.style.display;
+      record.priority = source.style.getPropertyPriority("display");
+      record.hadStyle = source.hasAttribute("style");
+      record.styleText = source.getAttribute("style");
+      record.originalCssText = source.style.cssText;
+    }
+    if (source.getAttribute("aria-hidden") !== "true") record.ariaHidden = source.getAttribute("aria-hidden");
+  }
+
+  function releaseSettingsSidebar() {
+    for (const [source, record] of state.sidebarRows) releaseSidebarRow(source, record);
+    state.hiddenPagesGroup?.remove();
+    state.hiddenPagesGroup = null;
+  }
+
+  function sidebarGlyph(path) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "icon-xs");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const shape = document.createElementNS(svg.namespaceURI, "path");
+    shape.setAttribute("d", path);
+    svg.append(shape);
+    return svg;
+  }
+
+  function sidebarIconButton(label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "no-drag flex size-6 shrink-0 items-center justify-center rounded-full cursor-interaction hover:bg-primary-ghost-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-40";
+    button.setAttribute("aria-label", label);
+    return button;
+  }
+
+  function createHiddenPagesGroup() {
+    const group = div("flex flex-col gap-1");
+    group.dataset.codexWorkflow = "hidden-pages";
+    const header = div("group/nav-section-title flex items-center justify-between gap-2 browser:h-9 browser:ps-2.5 pe-0.5 ps-2");
+    const title = div("min-w-0 flex-1 text-base font-medium text-tertiary opacity-75 browser:leading-4.5");
+    title.textContent = "Hidden";
+    const disclosure = sidebarIconButton("Show hidden settings pages");
+    disclosure.setAttribute("aria-controls", "codex-workflow-hidden-pages");
+    disclosure.append(sidebarGlyph("m6 9 6 6 6-6"));
+    disclosure.addEventListener("click", () => {
+      state.hiddenPagesExpanded = !state.hiddenPagesExpanded;
+      syncSettingsSidebar();
+    });
+    header.append(title, disclosure);
+    const rows = div("flex flex-col gap-px browser:gap-0");
+    rows.id = "codex-workflow-hidden-pages";
+    group.append(header, rows);
+    return group;
+  }
+
+  function syncSettingsSidebar() {
+    if (state.sidebarEditButton?.isConnected) {
+      const label = state.sidebarEditing ? "Done" : "Customise";
+      if (state.sidebarEditButton.textContent !== label) state.sidebarEditButton.textContent = label;
+      state.sidebarEditButton.setAttribute("aria-label", `${label} settings sidebar`);
+      state.sidebarEditButton.setAttribute("aria-pressed", String(state.sidebarEditing));
+      state.sidebarEditButton.disabled = state.settingsWriteInFlight;
+    }
+    const nav = state.settingsNav;
+    if (!nav?.isConnected) return;
+    const owners = nav.querySelectorAll(".overflow-y-auto");
+    if (owners.length !== 1) { releaseSettingsSidebar(); return; }
+    const owner = owners[0];
+    const sources = Array.from(owner.querySelectorAll("button[data-settings-panel-slug]"))
+      .filter((source) => source !== state.customNav && !source.disabled &&
+        (state.sidebarRows.has(source) || getComputedStyle(source).display !== "none" && source.getAttribute("aria-hidden") !== "true"));
+    const slugs = sources.map((source) => source.dataset.settingsPanelSlug);
+    if (new Set(slugs).size !== slugs.length) { releaseSettingsSidebar(); return; }
+    const hidden = new Set(state.settings.hiddenSettingsPages);
+    hidden.delete("workflow");
+    for (const [source, record] of state.sidebarRows) {
+      if (!sources.includes(source) || (!state.sidebarEditing && !hidden.has(source.dataset.settingsPanelSlug))) {
+        releaseSidebarRow(source, record);
+      }
+    }
+    const hiddenSources = sources.filter((source) => hidden.has(source.dataset.settingsPanelSlug));
+    if (hiddenSources.length) {
+      if (!state.hiddenPagesGroup?.isConnected) state.hiddenPagesGroup = createHiddenPagesGroup();
+      let lastSection = sources.at(-1);
+      while (lastSection.parentElement !== owner) lastSection = lastSection.parentElement;
+      if (lastSection.nextElementSibling !== state.hiddenPagesGroup) lastSection.after(state.hiddenPagesGroup);
+      const disclosure = state.hiddenPagesGroup.querySelector("button");
+      disclosure.setAttribute("aria-expanded", String(state.hiddenPagesExpanded));
+      disclosure.setAttribute("aria-label", `${state.hiddenPagesExpanded ? "Hide" : "Show"} hidden settings pages`);
+      disclosure.querySelector("path").setAttribute("d", state.hiddenPagesExpanded ? "m18 15-6-6-6 6" : "m6 9 6 6 6-6");
+      const rows = state.hiddenPagesGroup.lastElementChild;
+      if (!state.hiddenPagesExpanded && rows.contains(document.activeElement)) disclosure.focus();
+      rows.hidden = !state.hiddenPagesExpanded;
+      rows.style.display = state.hiddenPagesExpanded ? "" : "none";
+    }
+    for (const source of sources) {
+      const slug = source.dataset.settingsPanelSlug;
+      if (slug === "workflow") continue;
+      const isHidden = hidden.has(slug);
+      if (!isHidden && !state.sidebarEditing) continue;
+      let record = state.sidebarRows.get(source);
+      if (!record) {
+        if (getComputedStyle(source).display === "none" || source.getAttribute("aria-hidden") === "true") continue;
+        const wrapper = div("relative");
+        wrapper.dataset.codexWorkflow = "sidebar-row";
+        const control = sidebarIconButton("");
+        control.style.position = "absolute";
+        control.style.insetInlineEnd = "0";
+        control.style.top = "0";
+        control.style.bottom = "0";
+        control.style.marginBlock = "auto";
+        control.addEventListener("click", async () => {
+          if (state.settingsWriteInFlight) return;
+          const next = new Set(state.settings.hiddenSettingsPages);
+          if (next.has(slug)) next.delete(slug);
+          else next.add(slug);
+          state.hiddenPagesExpanded = true;
+          await persistSetting("hiddenSettingsPages", [...next]);
+          const current = state.sidebarRows.get(source);
+          (current?.control.isConnected && state.sidebarEditing ? current.control : source).focus();
+        });
+        record = { wrapper, control, display: source.style.display,
+          priority: source.style.getPropertyPriority("display"), hadStyle: source.hasAttribute("style"),
+          styleText: source.getAttribute("style"), originalCssText: source.style.cssText,
+          ariaHidden: source.getAttribute("aria-hidden"), signature: null, proxy: null, editing: null };
+        state.sidebarRows.set(source, record);
+      }
+      refreshSidebarSnapshot(source, record);
+      const signature = source.innerHTML + source.className + source.getAttribute("aria-current") + source.getAttribute("aria-label");
+      if (record.signature !== signature) {
+        const proxy = source.cloneNode(true);
+        scrubSidebarClone(proxy);
+        restoreSidebarDisplay(proxy, record);
+        proxy.dataset.codexWorkflowPage = slug;
+        proxy.addEventListener("click", () => source.click());
+        if (record.proxy === document.activeElement) { record.proxy.replaceWith(proxy); proxy.focus(); }
+        else if (record.proxy) record.proxy.replaceWith(proxy);
+        else record.wrapper.append(proxy, record.control);
+        record.proxy = proxy;
+        record.signature = signature;
+        record.editing = null;
+      }
+      if (record.editing !== state.sidebarEditing) {
+        record.proxy.style.setProperty("padding-inline-end",
+          state.sidebarEditing ? "var(--height-token-row)" : source.style.getPropertyValue("padding-inline-end"),
+          state.sidebarEditing ? "" : source.style.getPropertyPriority("padding-inline-end"));
+        record.control.hidden = !state.sidebarEditing;
+        record.control.style.display = state.sidebarEditing ? "" : "none";
+        record.editing = state.sidebarEditing;
+      }
+      const label = `${isHidden ? "Restore" : "Hide"} ${source.getAttribute("aria-label") || source.textContent.replace(/\s+/gu, " ").trim()}`;
+      if (record.control.getAttribute("aria-label") !== label) {
+        record.control.setAttribute("aria-label", label);
+        const glyph = sidebarGlyph(isHidden ? "M5 12h14M12 5v14" : "M5 12h14");
+        const circle = div(isHidden ? "flex size-5 items-center justify-center rounded-full text-default bg-text/5" : "flex size-5 items-center justify-center rounded-full text-white bg-danger-solid");
+        circle.append(glyph);
+        record.control.replaceChildren(circle);
+      }
+      record.control.disabled = state.settingsWriteInFlight;
+      if (isHidden) {
+        const rows = state.hiddenPagesGroup.lastElementChild;
+        if (record.wrapper.parentElement !== rows) rows.append(record.wrapper);
+      } else if (source.nextElementSibling !== record.wrapper) source.after(record.wrapper);
+      if (source.contains(document.activeElement)) {
+        (isHidden && !state.hiddenPagesExpanded ? state.hiddenPagesGroup.querySelector("button") : record.proxy).focus();
+      }
+      source.setAttribute("data-codex-workflow-sidebar-hidden", "true");
+      source.style.setProperty("display", "none", "important");
+      source.setAttribute("aria-hidden", "true");
+    }
+    if (!hiddenSources.length) {
+      state.hiddenPagesGroup?.remove();
+      state.hiddenPagesGroup = null;
+    } else {
+      const rows = state.hiddenPagesGroup.lastElementChild;
+      hiddenSources.forEach((source, index) => {
+        const wrapper = state.sidebarRows.get(source)?.wrapper;
+        if (wrapper && rows.children[index] !== wrapper) rows.insertBefore(wrapper, rows.children[index] || null);
+      });
+    }
+  }
+
+  function onSettingsSidebarKeyDown(event) {
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    const target = event.target instanceof Element ? event.target.closest("[data-settings-panel-slug], [data-codex-workflow-page]") : null;
+    if (!target) return;
+    const items = Array.from(state.settingsNav.querySelectorAll("[data-settings-panel-slug], [data-codex-workflow-page]"))
+      .filter((item) => !item.closest("[hidden], [aria-hidden='true']") && getComputedStyle(item).display !== "none");
+    event.preventDefault();
+    event.stopPropagation();
+    const next = items[items.indexOf(target) + (event.key === "ArrowDown" ? 1 : -1)];
+    next?.focus();
+    next?.click();
   }
 
   function renderSwitch({ key, labelId, descriptionId, requiresFocusedInterface }) {
@@ -1729,6 +2013,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function refreshSettingControls() {
+    syncSettingsSidebar();
     for (const [key, control] of state.settingControls) {
       control.apply(state.settings[key]);
       control.applyDisabled(
@@ -1845,6 +2130,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   function syncSettingEffects() {
     syncFocusedInterfaceEffects();
     syncComposerMicrophone();
+    syncSettingsSidebar();
   }
 
   function muteNativeActiveNav(nav) {
@@ -1923,9 +2209,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function releaseSettingsMount() {
+    releaseSettingsSidebar();
+    state.sidebarEditing = false;
     restoreNativeSettingsView();
     if (state.navWithListener) {
       state.navWithListener.removeEventListener("click", onSettingsNavClick, true);
+      state.navWithListener.removeEventListener("keydown", onSettingsSidebarKeyDown, true);
     }
     state.navWithListener = null;
     state.customNav?.remove();

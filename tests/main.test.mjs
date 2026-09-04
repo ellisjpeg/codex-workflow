@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Script, createContext } from "node:vm";
 import test from "node:test";
+import * as fs from "node:fs";
+import { tmpdir } from "node:os";
 
 const mainSource = readFileSync(new URL("../runtime/main.cjs", import.meta.url), "utf8");
 
@@ -68,6 +70,7 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
     {
       schemaVersion: 2,
       focusedInterface: false,
+      hiddenSettingsPages: [],
       hidePullRequests: true,
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
@@ -94,12 +97,36 @@ test("main settings normalizer accepts only canonical booleans", () => {
       focusedInterface: false,
       hidePullRequests: false,
       hidePetMenuItem: true,
+      hiddenSettingsPages: [],
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
       hideComposerMicrophone: false,
     },
   );
   assert.equal(loadSettings({ hideComposerMicrophone: true }).hideComposerMicrophone, true);
+});
+
+test("hidden settings pages normalize, persist atomically, and survive another main process", () => {
+  assert.deepEqual(loadSettings({ hiddenSettingsPages: "appearance" }).hiddenSettingsPages, []);
+  assert.deepEqual(loadSettings({ hiddenSettingsPages: ["workflow", "appearance", "appearance", null, {}, "../bad"] }).hiddenSettingsPages, ["appearance"]);
+  assert.equal(loadSettings({ hiddenSettingsPages: Array.from({ length: 120 }, (_, index) => `page-${index}`) }).hiddenSettingsPages.length, 100);
+  const root = fs.mkdtempSync(path.join(tmpdir(), "workflow-sidebar-settings-"));
+  try {
+    const harness = createUpdateHarness(new Map(), root, fs);
+    const write = harness.handlers.get("codex-workflow:settings:set");
+    write(harness.trusted, { hideComposerMicrophone: true, hiddenSettingsPages: ["appearance", "workflow"] });
+    const settingsPath = path.join(root, "settings.json");
+    const saved = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    assert.deepEqual(saved.hiddenSettingsPages, ["appearance"]);
+    assert.equal(saved.hideComposerMicrophone, true);
+    assert.equal(fs.statSync(settingsPath).mode & 0o777, 0o600);
+    const reopened = createUpdateHarness(new Map(), root, fs);
+    assert.deepEqual(JSON.parse(JSON.stringify(reopened.handlers.get("codex-workflow:settings:get")(harness.trusted))), saved);
+    assert.throws(() => write({ senderFrame: { url: "https://example.com" } }, { hiddenSettingsPages: [] }), /untrusted renderer/u);
+    write(harness.trusted, { hiddenSettingsPages: [] });
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsPath, "utf8")).hiddenSettingsPages, []);
+    assert.equal(fs.readdirSync(root).some((entry) => entry.startsWith(".settings-")), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Settings activation sends the native shortcut without moving the pointer", () => {
@@ -135,7 +162,7 @@ test("Settings activation sends the native shortcut without moving the pointer",
   );
 });
 
-function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test") {
+function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test", fileSystem) {
   const handlers = new Map();
   const appListeners = new Map();
   const readyCallbacks = [];
@@ -193,6 +220,7 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
       if (name === "node:crypto") return { randomUUID: () => "test" };
       if (name === "node:path") return path;
       if (name === "node:fs") {
+        if (fileSystem) return fileSystem;
         return {
           appendFileSync() {},
           existsSync(target) { return files.has(target); },

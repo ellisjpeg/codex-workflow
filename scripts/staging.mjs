@@ -245,6 +245,7 @@ function installStagingRuntime(layout, source) {
     hideInviteFriendMenuItem: true,
     replaceHelpWithSettings: true,
     hideComposerMicrophone: false,
+    hiddenSettingsPages: [],
   });
   writeJsonAtomic(join(layout.workflowRoot, "update-config.json"), {
     schemaVersion: 1,

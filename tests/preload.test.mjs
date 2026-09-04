@@ -12,7 +12,7 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness({ initialSettings, installUpdateResult, setSettings, updateStatus, delayedRoots = false } = {}) {
+async function createHarness({ initialSettings, installUpdateResult, setSettings, updateStatus, delayedRoots = false, nativeSidebar = false, realObservers = false } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <header id="top-toolbar" class="flex h-toolbar draggable">
       <div id="toolbar-actions" class="@container flex items-center">
@@ -66,6 +66,12 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
   });
   const { window } = dom;
   const { document } = window;
+  if (nativeSidebar) {
+    const nav = document.querySelector("nav");
+    const items = Array.from(nav.children);
+    nav.innerHTML = `<div class="flex min-h-0 flex-1 flex-col"><input aria-label="Search settings"><div id="settings-scroll" class="min-h-0 flex-1 overflow-y-auto pb-2 flex flex-col gap-4"><div id="personal" class="flex flex-col gap-1"><div class="group/nav-section-title flex items-center justify-between gap-2 pe-0.5 ps-2"><div class="min-w-0 flex-1 text-base font-medium text-tertiary opacity-75">Personal</div></div><div class="flex flex-col gap-px browser:gap-0"></div></div><div id="integrations" class="flex flex-col gap-1"><div class="group/nav-section-title flex items-center justify-between gap-2 pe-0.5 ps-2"><div class="min-w-0 flex-1 text-base font-medium text-tertiary opacity-75">Integrations</div></div><div class="flex flex-col gap-px browser:gap-0"><button data-settings-panel-slug="mcp" aria-label="MCP servers" class="nav inactive"><span class="text-fade-truncate">MCP servers</span></button></div></div></div><footer>Fixed footer</footer></div>`;
+    nav.querySelector("#personal").lastElementChild.append(...items);
+  }
   const delayedSidebar = document.querySelector(".app-shell-left-panel");
   const delayedSettingsShell = document.querySelector("#settings-shell");
   if (delayedRoots) {
@@ -129,6 +135,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
   };
 
   const context = dom.getInternalVMContext();
+  const NativeMutationObserver = window.MutationObserver;
   context.require = (name) => {
     if (name === "electron") return { ipcRenderer };
     throw new Error(`Unexpected preload require: ${name}`);
@@ -139,6 +146,11 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
       this.active = false;
       this.target = null;
       this.options = null;
+      this.native = realObservers ? new NativeMutationObserver((records) => {
+        deliveredMutationCallbacks += 1;
+        if (deliveredMutationCallbacks > 60) { this.disconnect(); return; }
+        callback(records);
+      }) : null;
       observers.push(this);
     }
 
@@ -146,10 +158,12 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
       this.active = true;
       this.target = target;
       this.options = options;
+      this.native?.observe(target, options);
     }
 
     disconnect() {
       this.active = false;
+      this.native?.disconnect();
     }
   };
   context.setInterval = (...args) => {
@@ -245,6 +259,225 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
     },
   };
 }
+
+test("sidebar editing hides navigation only, keeps Workflow reachable, and restores exact nodes", async () => {
+  const harness = await createHarness({ nativeSidebar: true });
+  try {
+    const { document, nav } = harness;
+    const general = nav.querySelector('[data-settings-panel-slug="general-settings"]');
+    const appearance = nav.querySelector('[data-settings-panel-slug="appearance"]');
+    const parent = appearance.parentElement;
+    appearance.setAttribute("style", "display: inline-flex !important");
+    appearance.setAttribute("aria-hidden", "false");
+    const before = appearance.outerHTML;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const edit = document.querySelector('[data-codex-workflow="sidebar-edit"]');
+    assert.equal(edit.textContent, "Customise");
+    assert.equal(document.querySelector('[data-codex-workflow="hidden-pages"]'), null);
+    edit.click();
+    assert.equal(edit.textContent, "Done");
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="sidebar-row"]').length, 5);
+    assert.equal(nav.querySelector('[aria-label="Hide Workflow"]'), null);
+    assert.equal(appearance.parentElement, parent);
+    nav.querySelector('[aria-label="Hide Appearance"]').click();
+    await flush();
+    const group = nav.querySelector('[data-codex-workflow="hidden-pages"]');
+    assert.equal(group.previousElementSibling.id, "integrations");
+    assert.equal(group.parentElement.id, "settings-scroll");
+    assert.equal(group.querySelector("button").getAttribute("aria-expanded"), "true");
+    assert.equal(document.querySelector('[data-codex-workflow-panel]').isConnected, true);
+    assert.equal(general.getAttribute("aria-current"), null);
+    assert.equal(appearance.style.display, "none");
+    assert.equal(appearance.getAttribute("aria-hidden"), "true");
+    nav.querySelector('[aria-label="Restore Appearance"]').click();
+    await flush();
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]'), null);
+    edit.click();
+    assert.equal(appearance.outerHTML, before);
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="sidebar-row"]').length, 0);
+    edit.click();
+    appearance.style.display = "grid";
+    appearance.style.color = "red";
+    appearance.setAttribute("aria-hidden", "false");
+    edit.click();
+    assert.equal(appearance.style.display, "grid");
+    assert.equal(appearance.style.color, "red");
+    assert.equal(appearance.getAttribute("aria-hidden"), "false");
+  } finally { harness.dom.window.close(); }
+});
+
+test("hidden current pages remain open and disclosure navigation never restores preferences", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["general-settings", "workflow", "mcp", "mcp", 42] } });
+  try {
+    const { document, nav, invokedChannels, emitMutation } = harness;
+    const panel = document.querySelector("#native-panel");
+    const general = nav.querySelector('[data-settings-panel-slug="general-settings"]');
+    assert.equal(general.getAttribute("aria-current"), "page");
+    assert.equal(panel.style.display, "");
+    assert.equal(nav.querySelector('[data-settings-panel-slug="workflow"]').style.display, "");
+    const group = nav.querySelector('[data-codex-workflow="hidden-pages"]');
+    const disclosure = group.querySelector("button");
+    assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+    assert.equal(group.lastElementChild.hidden, true);
+    disclosure.click();
+    assert.equal(group.lastElementChild.hidden, false);
+    assert.equal(group.querySelectorAll('[data-codex-workflow-page]').length, 2);
+    const proxy = group.querySelector('[data-codex-workflow-page="mcp"]');
+    proxy.click();
+    await flush();
+    assert.equal(nav.querySelector('[data-settings-panel-slug="mcp"]').getAttribute("aria-current"), "page");
+    assert.equal(panel.style.display, "");
+    assert.equal(general.style.display, "none");
+    assert.equal(invokedChannels.includes("codex-workflow:settings:set"), false);
+    for (let index = 0; index < 4; index += 1) emitMutation(nav, { addedNodes: [proxy] });
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="hidden-pages"]').length, 1);
+    assert.equal(nav.querySelectorAll('[data-codex-workflow-page="mcp"]').length, 1);
+    group.querySelector('[data-codex-workflow-page="mcp"]').focus();
+    disclosure.click();
+    assert.equal(document.activeElement, disclosure);
+    assert.equal(group.lastElementChild.hidden, true);
+  } finally { harness.dom.window.close(); }
+});
+
+test("sidebar IPC failure rolls back and concurrent writes cannot overwrite other settings", async () => {
+  let rejectWrite;
+  const writes = [];
+  const harness = await createHarness({ nativeSidebar: true, setSettings: (patch) => {
+    writes.push(patch);
+    return new Promise((_resolve, reject) => { rejectWrite = reject; });
+  } });
+  try {
+    const { document, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('[data-codex-workflow="sidebar-edit"]').click();
+    const hide = nav.querySelector('[aria-label="Hide Voice"]');
+    hide.click();
+    assert.equal(hide.disabled, true);
+    assert.equal(document.querySelector('[role="switch"]').disabled, true);
+    nav.querySelector('[aria-label="Hide Appearance"]').click();
+    assert.equal(writes.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(writes[0])), { hiddenSettingsPages: ["voice"] });
+    rejectWrite(new Error("disk full"));
+    await flush();
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]'), null);
+    assert.ok(nav.querySelector('[aria-label="Hide Voice"]'));
+    assert.equal(document.querySelector('[role="switch"]').disabled, false);
+  } finally { harness.dom.window.close(); }
+});
+
+test("native search results remain untouched and open hidden pages without unhiding", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["voice"] } });
+  try {
+    const { document, nav, emitMutation, invokedChannels } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const owner = document.querySelector("#settings-scroll");
+    const savedGroups = [...owner.children].filter((element) => element.id === "personal" || element.id === "integrations");
+    owner.replaceChildren();
+    const result = document.createElement("button");
+    result.dataset.listNavigationItem = "true";
+    result.textContent = "Voice";
+    result.addEventListener("click", () => { document.querySelector("#native-panel").textContent = "Voice settings"; });
+    owner.append(result);
+    emitMutation(owner, { addedNodes: [result] });
+    assert.ok(nav.querySelector('[data-settings-panel-slug="workflow"]'));
+    assert.equal(result.style.display, "");
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]'), null);
+    result.click();
+    await flush();
+    assert.equal(document.querySelector("#native-panel").style.display, "");
+    assert.equal(document.querySelector("#native-panel").textContent, "Voice settings");
+    owner.replaceChildren(...savedGroups);
+    emitMutation(owner, { addedNodes: savedGroups });
+    assert.equal(nav.querySelector('[data-settings-panel-slug="voice"]').style.display, "none");
+    assert.equal(invokedChannels.includes("codex-workflow:settings:set"), false);
+  } finally { harness.dom.window.close(); }
+});
+
+test("sidebar proxies sanitize identity, skip hidden rows with arrows, and preserve section layout", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["voice"] } });
+  try {
+    const { document, nav, window, emitMutation } = harness;
+    const appearance = nav.querySelector('[data-settings-panel-slug="appearance"]');
+    const general = nav.querySelector('[data-settings-panel-slug="general-settings"]');
+    const groups = [document.querySelector("#personal"), document.querySelector("#integrations")];
+    const footer = nav.querySelector("footer");
+    const originalParents = groups.map((group) => group.parentElement);
+    appearance.querySelector("span").id = "native-label";
+    appearance.setAttribute("aria-describedby", "native-label");
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('[data-codex-workflow="sidebar-edit"]').click();
+    emitMutation(nav, { addedNodes: [] });
+    assert.equal(document.querySelectorAll("#native-label").length, 1);
+    assert.equal(nav.querySelector('[data-codex-workflow-page="appearance"]').hasAttribute("aria-describedby"), false);
+    for (const control of nav.querySelectorAll('[data-codex-workflow="sidebar-row"] button')) {
+      assert.equal(control.querySelector("button"), null);
+      assert.ok(control.getAttribute("aria-label") || control.textContent);
+    }
+    assert.equal(nav.querySelector('[aria-label="Hide Appearance"]').style.position, "absolute");
+    groups.forEach((group, index) => assert.equal(group.parentElement, originalParents[index]));
+    assert.equal(footer.parentElement.lastElementChild, footer);
+    assert.equal(general.parentElement.id, "");
+    document.querySelector('[data-codex-workflow="sidebar-edit"]').click();
+    const disclosure = nav.querySelector('[data-codex-workflow="hidden-pages"] button');
+    disclosure.click();
+    const workflow = nav.querySelector('[data-settings-panel-slug="workflow"]');
+    workflow.focus();
+    workflow.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    assert.equal(document.activeElement.dataset.settingsPanelSlug, "personalization");
+    assert.equal(nav.querySelector('[data-settings-panel-slug="voice"]').style.display, "none");
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]').className.includes("sticky"), false);
+  } finally { harness.dom.window.close(); }
+});
+
+test("hidden pages survive native remounts and repeated sidebar synchronization", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["appearance"] } });
+  try {
+    const { nav, emitMutation } = harness;
+    const original = nav.querySelector('[data-settings-panel-slug="appearance"]');
+    const replacement = original.cloneNode(true);
+    replacement.removeAttribute("style");
+    replacement.removeAttribute("aria-hidden");
+    original.replaceWith(replacement);
+    replacement.focus();
+    emitMutation(replacement.parentElement, { addedNodes: [replacement], removedNodes: [original] });
+    assert.equal(replacement.style.display, "none");
+    assert.equal(original.style.display, "");
+    assert.equal(harness.document.activeElement, nav.querySelector('[data-codex-workflow="hidden-pages"] button'));
+    const count = nav.querySelectorAll('[data-codex-workflow="sidebar-row"]').length;
+    for (let index = 0; index < 5; index += 1) emitMutation(nav, { addedNodes: [] });
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="sidebar-row"]').length, count);
+    assert.equal(nav.querySelectorAll('[data-codex-workflow-page="appearance"]').length, 1);
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="nav-item"]').length, 1);
+  } finally { harness.dom.window.close(); }
+});
+
+test("sidebar mutations settle with real observers and hiding the current page never navigates", async () => {
+  const harness = await createHarness({ nativeSidebar: true, realObservers: true });
+  try {
+    const { document, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('[data-codex-workflow="sidebar-edit"]').click();
+    nav.querySelector('[data-codex-workflow-page="appearance"]').click();
+    await flush();
+    const panel = document.querySelector("#native-panel");
+    const originalContent = panel.outerHTML;
+    nav.querySelector('[aria-label="Hide Appearance"]').click();
+    await flush();
+    assert.equal(panel.outerHTML, originalContent);
+    assert.equal(nav.querySelector('[data-settings-panel-slug="appearance"]').getAttribute("aria-current"), "page");
+    assert.ok(harness.deliveredMutationCallbacks() < 30);
+    const settled = harness.deliveredMutationCallbacks();
+    await flush();
+    assert.equal(harness.deliveredMutationCallbacks(), settled);
+    const duplicate = nav.querySelector('[data-settings-panel-slug="appearance"]').cloneNode(true);
+    duplicate.removeAttribute("style");
+    duplicate.removeAttribute("aria-hidden");
+    document.querySelector("#integrations").lastElementChild.append(duplicate);
+    await flush();
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]'), null);
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="sidebar-row"]').length, 0);
+  } finally { harness.dom.window.close(); }
+});
 
 test("Workflow Update uses the native sidebar hover-reveal pill", async () => {
   const harness = await createHarness({

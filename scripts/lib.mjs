@@ -392,6 +392,7 @@ export function installRuntimeFiles({ autoRepairCodexUpdates } = {}) {
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
       hideComposerMicrophone: false,
+      hiddenSettingsPages: [],
     });
   }
 }

@@ -14,6 +14,7 @@ This is an independent community project and is not affiliated with or endorsed 
 - Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
 - Optional sidebar **Settings** shortcut with **Help & Updates** moved into the account menu.
 - Independent option to hide the idle composer microphone button.
+- **Customise settings sidebar**: hide or restore native Settings pages without disabling features; hidden pages remain searchable and accessible in a non-sticky **Hidden** disclosure. Workflow cannot be hidden.
 - Native hover-reveal **Workflow Update** control in the sidebar-aligned titlebar region.
 - One-click guarded runtime updates in the Workflow sidebar pill, with automatic relaunch and logged failures.
 - Immediate startup/visibility checks plus five-minute conditional GitHub Release checks with bounded backoff.
@@ -23,6 +24,8 @@ This is an independent community project and is not affiliated with or endorsed 
 - Version, bundle identity, ASAR integrity, backup, transaction, recovery, and uninstall guards.
 
 ## Compatibility
+
+Sidebar customisation in the 0.5.15 candidate has source/fixture coverage; live visual review is pending. See [the evidence and manual review checklist](docs/SETTINGS_SIDEBAR_CUSTOMISATION.md).
 
 - macOS
 - Codex Desktop `26.901.31953` (build `7868`)
