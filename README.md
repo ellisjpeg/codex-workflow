@@ -13,6 +13,7 @@ This is an independent community project and is not affiliated with or endorsed 
 - **Focused Interface** master switch with individual visibility controls.
 - Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
 - Optional sidebar **Settings** shortcut with **Help & Updates** moved into the account menu.
+- Independent option to hide the idle composer microphone button.
 - Native hover-reveal **Workflow Update** control in the sidebar-aligned titlebar region.
 - One-click guarded runtime updates in the Workflow sidebar pill, with automatic relaunch and logged failures.
 - Immediate startup/visibility checks plus five-minute conditional GitHub Release checks with bounded backoff.

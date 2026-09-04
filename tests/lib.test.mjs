@@ -31,7 +31,7 @@ test("compatibility guard names the audited Codex version and build", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(supportedVersion, "26.901.20858");
   assert.equal(supportedBuild, "7658");
-  assert.equal(compatibilityManifest.workflowVersion, "0.5.11");
+  assert.equal(compatibilityManifest.workflowVersion, "0.5.12");
   assert.equal(compatibilityManifest.workflowVersion, pkg.version);
   assert.equal(compatibilityManifest.bundleIdentifier, "com.openai.codex");
   assert.equal(compatibilityManifest.packageName, "openai-codex-electron");

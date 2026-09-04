@@ -72,6 +72,7 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
+      hideComposerMicrophone: false,
     },
   );
 });
@@ -86,6 +87,7 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hidePetMenuItem: 1,
       hideInviteFriendMenuItem: "yes",
       replaceHelpWithSettings: 0,
+      hideComposerMicrophone: "yes",
     }),
     {
       schemaVersion: 2,
@@ -94,8 +96,10 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
+      hideComposerMicrophone: false,
     },
   );
+  assert.equal(loadSettings({ hideComposerMicrophone: true }).hideComposerMicrophone, true);
 });
 
 test("Settings activation sends the native shortcut without moving the pointer", () => {

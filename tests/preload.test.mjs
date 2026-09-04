@@ -34,6 +34,21 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
         <svg class="icon-sm" viewBox="0 0 20 20" fill="none"><path d="native-question" fill="currentColor"></path></svg>
       </button>
     </aside>
+    <div id="primary-composer" role="presentation" data-composer-layout="multiline">
+      <div id="composer-footer" class="_ComposerLayoutFooter_kbwao_2" data-composer-footer-responsive="" data-composer-layout="multiline" data-composer-rows="inline" data-composer-spacing="default">
+        <div id="composer-expanding-controls" class="flex min-w-0 flex-1 justify-end">
+          <button id="model-reasoning-selector" type="button" aria-label="Select model and reasoning"></button>
+        </div>
+        <div id="composer-actions" class="flex shrink-0 items-center gap-2">
+          <button id="context-window-ring" type="button" aria-label="Context window"></button>
+          <button id="composer-dictate" type="button" aria-label="Dictate" style="display: inline-flex !important" aria-hidden="false" tabindex="4"></button>
+          <div id="composer-submit-slot" class="ms-2 flex items-center">
+            <button id="composer-submit" type="button" aria-label="Send"></button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button id="outside-dictate" type="button" aria-label="Dictate"></button>
     <div id="settings-shell">
       <nav aria-label="Settings">
         <button class="nav active" data-settings-panel-slug="general-settings" aria-current="page"><svg class="icon active"><path></path></svg><span class="text-fade-truncate active-label">General</span></button>
@@ -74,6 +89,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
       hidePetMenuItem: true,
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
+      hideComposerMicrophone: false,
     };
   const ipcRenderer = {
     invoke(channel, patch) {
@@ -467,11 +483,234 @@ test("Focused Interface exposes a native customize disclosure with unique switch
     assert.equal(document.querySelector("#codex-workflow-hidePetMenuItem-label").textContent, "Hide pet controls");
     assert.equal(document.querySelector("#codex-workflow-hideInviteFriendMenuItem-label").textContent, "Hide friend invite");
     assert.equal(document.querySelector("#codex-workflow-replaceHelpWithSettings-label").textContent, "Replace Help with Settings");
+    assert.equal(document.querySelector("#codex-workflow-hideComposerMicrophone-label").textContent, "Hide microphone button");
+    assert.equal(
+      document.querySelector("#codex-workflow-hideComposerMicrophone-description").textContent,
+      "Remove the Dictate button from the composer.",
+    );
+    const interfaceCard = document.querySelector("#codex-workflow-focusedInterface-label")
+      .closest("section").querySelector("[role='switch']").parentElement.parentElement.parentElement;
+    const microphoneToggle = document.querySelector('[aria-labelledby="codex-workflow-hideComposerMicrophone-label"]');
+    assert.equal(interfaceCard.contains(microphoneToggle), true);
+    assert.equal(options.contains(microphoneToggle), false);
 
     const switches = Array.from(document.querySelectorAll('[role="switch"]'));
-    assert.equal(switches.length, 5);
-    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-labelledby"))).size, 5);
-    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-describedby"))).size, 5);
+    assert.equal(switches.length, 6);
+    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-labelledby"))).size, 6);
+    assert.equal(new Set(switches.map((control) => control.getAttribute("aria-describedby"))).size, 6);
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("composer microphone preference hides only the idle button and restores it exactly", async () => {
+  const harness = await createHarness({
+    initialSettings: { hideComposerMicrophone: true },
+  });
+  try {
+    const { document, emitMutation, nav, window } = harness;
+    const dictate = document.querySelector("#composer-dictate");
+    const actions = document.querySelector("#composer-actions");
+    const originalActionsClass = actions.className;
+    const modelSelector = document.querySelector("#model-reasoning-selector");
+    const contextRing = document.querySelector("#context-window-ring");
+    const submitSlot = document.querySelector("#composer-submit-slot");
+    const outside = document.querySelector("#outside-dictate");
+
+    assert.equal(dictate.style.getPropertyValue("display"), "none");
+    assert.equal(dictate.style.getPropertyPriority("display"), "important");
+    assert.equal(dictate.getAttribute("aria-hidden"), "true");
+    assert.equal(dictate.getAttribute("tabindex"), "-1");
+    assert.equal(dictate.dataset.codexWorkflowComposerMicrophoneHidden, "true");
+    assert.equal(actions.className, originalActionsClass);
+    assert.equal(actions.style.cssText, "");
+    assert.equal(modelSelector.style.display, "");
+    assert.equal(contextRing.style.display, "");
+    assert.equal(submitSlot.style.display, "");
+    assert.equal(outside.style.display, "");
+
+    emitMutation(actions);
+    emitMutation(actions);
+    await flush();
+    assert.equal(
+      document.querySelectorAll('[data-codex-workflow-composer-microphone-hidden="true"]').length,
+      1,
+    );
+    window.history.pushState({}, "", "#composer-route-change");
+    assert.equal(dictate.style.getPropertyValue("display"), "none");
+
+    dictate.setAttribute("aria-label", "Stop dictation");
+    emitMutation(dictate);
+    await flush();
+    assert.equal(dictate.style.getPropertyValue("display"), "inline-flex");
+    assert.equal(dictate.style.getPropertyPriority("display"), "important");
+    assert.equal(dictate.getAttribute("aria-hidden"), "false");
+    assert.equal(dictate.getAttribute("tabindex"), "4");
+
+    dictate.setAttribute("aria-label", "Dictate");
+    emitMutation(dictate);
+    await flush();
+    assert.equal(dictate.style.getPropertyValue("display"), "none");
+
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const toggle = document.querySelector('[aria-labelledby="codex-workflow-hideComposerMicrophone-label"]');
+    toggle.click();
+    await flush();
+    assert.equal(toggle.getAttribute("aria-checked"), "false");
+    assert.equal(dictate.style.getPropertyValue("display"), "inline-flex");
+    assert.equal(dictate.style.getPropertyPriority("display"), "important");
+    assert.equal(dictate.getAttribute("aria-hidden"), "false");
+    assert.equal(dictate.getAttribute("tabindex"), "4");
+    assert.equal(dictate.hasAttribute("data-codex-workflow-composer-microphone-hidden"), false);
+    assert.equal(actions.className, originalActionsClass);
+    assert.equal(modelSelector.parentElement.id, "composer-expanding-controls");
+    assert.equal(contextRing.parentElement, actions);
+    assert.equal(submitSlot.parentElement, actions);
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("absent and ambiguous composer microphone targets are left untouched", async () => {
+  const harness = await createHarness();
+  try {
+    const { document, emitMutation, nav } = harness;
+    const actions = document.querySelector("#composer-actions");
+    const original = document.querySelector("#composer-dictate");
+    original.remove();
+    emitMutation(actions, { removedNodes: [original] });
+
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const toggle = document.querySelector('[aria-labelledby="codex-workflow-hideComposerMicrophone-label"]');
+    toggle.click();
+    await flush();
+    assert.equal(toggle.getAttribute("aria-checked"), "true");
+    assert.equal(document.querySelector("#outside-dictate").style.display, "");
+
+    const first = document.createElement("button");
+    first.id = "ambiguous-dictate-one";
+    first.setAttribute("aria-label", "Dictate");
+    const second = document.createElement("button");
+    second.id = "ambiguous-dictate-two";
+    second.setAttribute("aria-label", "Dictate");
+    actions.prepend(first, second);
+    emitMutation(actions, { addedNodes: [first, second] });
+    await flush();
+    assert.equal(first.style.display, "");
+    assert.equal(second.style.display, "");
+    assert.equal(actions.style.cssText, "");
+
+    second.remove();
+    emitMutation(actions, { removedNodes: [second] });
+    await flush();
+    assert.equal(first.style.getPropertyValue("display"), "none");
+    assert.equal(document.querySelector("#context-window-ring").style.display, "");
+    assert.equal(document.querySelector("#composer-submit-slot").style.display, "");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("composer microphone preference follows composer root remounts", async () => {
+  const harness = await createHarness({
+    initialSettings: { hideComposerMicrophone: true },
+  });
+  try {
+    const { document, emitMutation, observers } = harness;
+    const oldRoot = document.querySelector("#primary-composer");
+    const oldDictate = document.querySelector("#composer-dictate");
+    const replacement = document.createElement("div");
+    replacement.id = "replacement-composer";
+    replacement.setAttribute("role", "presentation");
+    replacement.dataset.composerLayout = "multiline";
+    replacement.innerHTML = `
+      <div data-composer-rows="inline">
+        <div class="flex min-w-0 flex-1 justify-end"><button aria-label="Select model and reasoning"></button></div>
+        <div class="flex shrink-0 items-center gap-2">
+          <button id="remounted-dictate" aria-label="Dictate"></button>
+          <div class="ms-2 flex items-center"><button id="remounted-submit" aria-label="Send"></button></div>
+        </div>
+      </div>
+    `;
+    oldRoot.replaceWith(replacement);
+    emitMutation(document.body, { addedNodes: [replacement], removedNodes: [oldRoot] });
+    await flush();
+
+    const remounted = document.querySelector("#remounted-dictate");
+    assert.equal(oldDictate.style.getPropertyValue("display"), "inline-flex");
+    assert.equal(remounted.style.getPropertyValue("display"), "none");
+    assert.equal(document.querySelector("#remounted-submit").style.display, "");
+    assert.ok(!observers.some((observer) => observer.active && observer.target === oldRoot));
+    assert.ok(observers.some((observer) => observer.active && observer.target === replacement && observer.options?.subtree));
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("failed composer microphone persistence rolls back optimistic state and effect", async () => {
+  let rejectWrite;
+  let receivedPatch;
+  const pendingWrite = new Promise((_resolve, reject) => {
+    rejectWrite = reject;
+  });
+  const harness = await createHarness({
+    setSettings: (patch) => {
+      receivedPatch = patch;
+      return pendingWrite;
+    },
+  });
+  try {
+    const { document, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const toggle = document.querySelector('[aria-labelledby="codex-workflow-hideComposerMicrophone-label"]');
+    const dictate = document.querySelector("#composer-dictate");
+    toggle.click();
+
+    assert.deepEqual(JSON.parse(JSON.stringify(receivedPatch)), { hideComposerMicrophone: true });
+    assert.equal(toggle.getAttribute("aria-checked"), "true");
+    assert.equal(toggle.disabled, true);
+    assert.equal(dictate.style.getPropertyValue("display"), "none");
+
+    rejectWrite(new Error("fixture write failed"));
+    await flush();
+    assert.equal(toggle.getAttribute("aria-checked"), "false");
+    assert.equal(toggle.disabled, false);
+    assert.equal(dictate.style.getPropertyValue("display"), "inline-flex");
+    assert.equal(dictate.getAttribute("aria-hidden"), "false");
+    assert.equal(dictate.getAttribute("tabindex"), "4");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("composer microphone preference remains usable when Focused Interface is off", async () => {
+  const harness = await createHarness({
+    initialSettings: { focusedInterface: false, hideComposerMicrophone: true },
+  });
+  try {
+    const { document, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const master = document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]');
+    const microphone = document.querySelector('[aria-labelledby="codex-workflow-hideComposerMicrophone-label"]');
+    assert.equal(master.getAttribute("aria-checked"), "false");
+    assert.equal(microphone.getAttribute("aria-checked"), "true");
+    assert.equal(microphone.disabled, false);
+    assert.equal(document.querySelector("#composer-dictate").style.getPropertyValue("display"), "none");
+  } finally {
+    harness.dom.window.close();
+  }
+});
+
+test("renderer normalisation keeps the microphone visible for malformed settings", async () => {
+  const harness = await createHarness({
+    initialSettings: { hideComposerMicrophone: "yes" },
+  });
+  try {
+    const { document, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const microphone = document.querySelector('[aria-labelledby="codex-workflow-hideComposerMicrophone-label"]');
+    assert.equal(microphone.getAttribute("aria-checked"), "false");
+    assert.equal(document.querySelector("#composer-dictate").style.getPropertyValue("display"), "inline-flex");
   } finally {
     harness.dom.window.close();
   }
@@ -1227,12 +1466,13 @@ test("scoped observers ignore 120 response-stream mutations", async () => {
     const { document, observers, intervalCalls, emitMutation, deliveredMutationCallbacks } = harness;
     const sidebar = document.querySelector(".app-shell-left-panel");
     const settingsShell = document.querySelector("#settings-shell");
+    const composer = document.querySelector("#primary-composer");
     const activeSubtreeTargets = observers
       .filter((observer) => observer.active && observer.options?.subtree)
       .map((observer) => observer.target);
 
     assert.equal(intervalCalls.length, 0);
-    assert.deepEqual(new Set(activeSubtreeTargets), new Set([sidebar, settingsShell]));
+    assert.deepEqual(new Set(activeSubtreeTargets), new Set([sidebar, settingsShell, composer]));
     assert.ok(!activeSubtreeTargets.includes(document.documentElement));
 
     const beforeCallbacks = deliveredMutationCallbacks();

@@ -30,6 +30,7 @@ const defaults = {
   hidePetMenuItem: true,
   hideInviteFriendMenuItem: true,
   replaceHelpWithSettings: true,
+  hideComposerMicrophone: false,
 };
 
 fs.mkdirSync(logDir, { recursive: true });
@@ -67,6 +68,9 @@ function normaliseSettings(value) {
     replaceHelpWithSettings: typeof value?.replaceHelpWithSettings === "boolean"
       ? value.replaceHelpWithSettings
       : defaults.replaceHelpWithSettings,
+    hideComposerMicrophone: typeof value?.hideComposerMicrophone === "boolean"
+      ? value.hideComposerMicrophone
+      : defaults.hideComposerMicrophone,
   };
 }
 

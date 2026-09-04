@@ -20,9 +20,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     hidePetMenuItem: true,
     hideInviteFriendMenuItem: true,
     replaceHelpWithSettings: true,
+    hideComposerMicrophone: false,
   };
   const discoveryDelays = [16, 50, 150, 450, 1000, 2500, 5000, 10000];
-  const discoveryRootSelector = ".app-shell-left-panel, nav[aria-label='Settings'], [data-settings-panel-slug='general-settings']";
+  const composerRootSelector = '[role="presentation"][data-composer-layout]';
+  const discoveryRootSelector = `.app-shell-left-panel, nav[aria-label='Settings'], [data-settings-panel-slug='general-settings'], ${composerRootSelector}`;
   const state = {
     settings: { ...defaults },
     discoveryObserver: null,
@@ -34,10 +36,13 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     settingsObserver: null,
     settingsMountObservers: [],
     settingsShell: null,
+    composerObserver: null,
+    composerMountObservers: [],
+    composerRoot: null,
     accountMenuDiscoveryObserver: null,
     accountMenuDiscoveryTimer: null,
     scheduled: false,
-    dirty: { discovery: false, sidebar: false, settings: false, toolbar: false },
+    dirty: { composer: false, discovery: false, sidebar: false, settings: false, toolbar: false },
     updateStatus: { available: false, installedVersion: null, availableVersion: null },
     updateApplying: false,
     updatePill: null,
@@ -64,6 +69,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     loggedAmbiguousPetMenu: false,
     loggedAmbiguousInviteFriendMenu: false,
     loggedAmbiguousSettingsMenu: false,
+    loggedAmbiguousComposerMicrophone: false,
     sidebarHelpButton: null,
     sidebarHelpSnapshot: null,
     suppressSidebarSettingsClick: false,
@@ -156,6 +162,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       replaceHelpWithSettings: typeof value?.replaceHelpWithSettings === "boolean"
         ? value.replaceHelpWithSettings
         : defaults.replaceHelpWithSettings,
+      hideComposerMicrophone: typeof value?.hideComposerMicrophone === "boolean"
+        ? value.hideComposerMicrophone
+        : defaults.hideComposerMicrophone,
     };
   }
 
@@ -167,14 +176,14 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         const result = original.apply(this, args);
         if (state.activeWorkflow && location.href !== previousLocation) restoreNativeSettingsView();
         beginDiscovery();
-        scheduleWork("sidebar", "settings", "toolbar");
+        scheduleWork("composer", "sidebar", "settings", "toolbar");
         return result;
       };
     }
     const onNavigation = () => {
       if (state.activeWorkflow) restoreNativeSettingsView();
       beginDiscovery();
-      scheduleWork("sidebar", "settings", "toolbar");
+      scheduleWork("composer", "sidebar", "settings", "toolbar");
     };
     window.addEventListener("popstate", onNavigation);
     window.addEventListener("hashchange", onNavigation);
@@ -293,9 +302,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     requestAnimationFrame(() => {
       state.scheduled = false;
       const dirty = state.dirty;
-      state.dirty = { discovery: false, sidebar: false, settings: false, toolbar: false };
+      state.dirty = { composer: false, discovery: false, sidebar: false, settings: false, toolbar: false };
       try {
         if (dirty.discovery) discoverRoots();
+        if (dirty.composer) syncComposerMicrophone();
         if (dirty.sidebar) {
           syncPullRequests();
           syncSidebarHelpShortcut();
@@ -381,7 +391,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (settingsShell) bindSettingsShell(settingsShell);
     else if (state.settingsShell && !state.settingsShell.isConnected) unbindSettingsShell();
 
-    if (state.sidebarRoot?.isConnected && state.settingsShell?.isConnected) {
+    const composerRoot = findComposerRoot();
+    if (composerRoot) bindComposerRoot(composerRoot);
+    else if (state.composerRoot) unbindComposerRoot();
+
+    if (state.sidebarRoot?.isConnected && state.settingsShell?.isConnected && state.composerRoot?.isConnected) {
       stopDiscovery();
       return;
     }
@@ -398,10 +412,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function mutationMayContainRoot(mutation) {
-    return Array.from(mutation.addedNodes || []).some((node) => {
-      if (!(node instanceof Element)) return false;
-      return node.matches(discoveryRootSelector) || Boolean(node.querySelector(discoveryRootSelector));
-    });
+    return [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])]
+      .some((node) => {
+        if (!(node instanceof Element)) return false;
+        return node.matches(discoveryRootSelector) || Boolean(node.querySelector(discoveryRootSelector));
+      });
   }
 
   function findSidebarRoot() {
@@ -420,6 +435,42 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return element instanceof HTMLElement &&
       element.isConnected &&
       !element.closest('[role="dialog"], [role="menu"], [cmdk-root]');
+  }
+
+  function findComposerRoot() {
+    const roots = Array.from(document.querySelectorAll(composerRootSelector))
+      .filter(isComposerRoot);
+    return roots.length === 1 ? roots[0] : null;
+  }
+
+  function isComposerRoot(element) {
+    return element instanceof HTMLElement &&
+      element.isConnected &&
+      !element.closest('[role="dialog"], [role="menu"], [cmdk-root]');
+  }
+
+  function bindComposerRoot(root) {
+    if (state.composerRoot === root && root.isConnected) return;
+    unbindComposerRoot();
+    state.composerRoot = root;
+    state.composerObserver = new MutationObserver(() => scheduleWork("composer"));
+    state.composerObserver.observe(root, {
+      attributes: true,
+      attributeFilter: ["aria-label"],
+      childList: true,
+      subtree: true,
+    });
+    state.composerMountObservers = observeMountChain("composer", root);
+    scheduleWork("composer");
+  }
+
+  function unbindComposerRoot() {
+    state.composerObserver?.disconnect();
+    state.composerObserver = null;
+    disconnectObservers(state.composerMountObservers);
+    state.composerMountObservers = [];
+    restoreComposerMicrophones(state.composerRoot || document);
+    state.composerRoot = null;
   }
 
   function bindSidebarRoot(root) {
@@ -491,9 +542,15 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     while (child?.parentElement) {
       const parent = child.parentElement;
       const observer = new MutationObserver(() => {
+        if (kind === "composer" && root.isConnected) {
+          beginDiscovery();
+          scheduleWork("composer");
+          return;
+        }
         if (root.isConnected) return;
         if (kind === "sidebar" && state.sidebarRoot === root) unbindSidebarRoot();
         if (kind === "settings" && state.settingsShell === root) unbindSettingsShell();
+        if (kind === "composer" && state.composerRoot === root) unbindComposerRoot();
         if (kind === "update-pill" && state.updatePillHost === root) {
           releaseUpdatePillHost();
           beginUpdatePillDiscovery();
@@ -1496,6 +1553,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         label: "Focused Interface",
         description: "Hide optional Codex features and destinations to keep the interface focused on your workflow.",
       }),
+      renderSettingRow({
+        key: "hideComposerMicrophone",
+        label: "Hide microphone button",
+        description: "Remove the Dictate button from the composer.",
+      }),
       renderCustomizeRow(),
     );
     return card;
@@ -1648,17 +1710,17 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   async function persistSetting(key, next) {
     const previousSettings = { ...state.settings };
     state.settings = { ...state.settings, [key]: next };
-    syncFocusedInterfaceEffects();
+    syncSettingEffects();
     state.settingsWriteInFlight = true;
     refreshSettingControls();
     try {
       state.settings = normaliseSettings(
         await ipcRenderer.invoke("codex-workflow:settings:set", { [key]: next }),
       );
-      syncFocusedInterfaceEffects();
+      syncSettingEffects();
     } catch (error) {
       state.settings = previousSettings;
-      syncFocusedInterfaceEffects();
+      syncSettingEffects();
       log("error", `settings write failed: ${error?.stack || error}`);
     } finally {
       state.settingsWriteInFlight = false;
@@ -1681,6 +1743,108 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     syncSidebarHelpShortcut();
     syncAccountMenuItems();
     syncHelpPopup();
+  }
+
+  function syncComposerMicrophone() {
+    const root = state.composerRoot;
+    const matching = root?.isConnected
+      ? Array.from(root.querySelectorAll('[data-composer-rows] button[aria-label="Dictate"]'))
+        .filter((button) => button instanceof HTMLButtonElement &&
+          button.closest(composerRootSelector) === root)
+      : [];
+    const owned = Array.from(document.querySelectorAll(
+      '[data-codex-workflow-composer-microphone-hidden="true"]',
+    ));
+    const target = state.settings.hideComposerMicrophone && matching.length === 1
+      ? matching[0]
+      : null;
+
+    for (const element of owned) {
+      if (element !== target) restoreComposerMicrophone(element);
+    }
+
+    if (state.settings.hideComposerMicrophone && matching.length > 1) {
+      if (!state.loggedAmbiguousComposerMicrophone) {
+        state.loggedAmbiguousComposerMicrophone = true;
+        log("error", `composer microphone target ambiguous: ${matching.length} candidates`);
+      }
+      return;
+    }
+    if (matching.length <= 1 || !state.settings.hideComposerMicrophone) {
+      state.loggedAmbiguousComposerMicrophone = false;
+    }
+    if (!(target instanceof HTMLButtonElement)) return;
+
+    if (!target.hasAttribute("data-codex-workflow-composer-microphone-hidden")) {
+      target.dataset.codexWorkflowComposerMicrophoneOriginalDisplay =
+        target.style.getPropertyValue("display");
+      target.dataset.codexWorkflowComposerMicrophoneOriginalDisplayPriority =
+        target.style.getPropertyPriority("display");
+      target.dataset.codexWorkflowComposerMicrophoneHadAriaHidden =
+        String(target.hasAttribute("aria-hidden"));
+      target.dataset.codexWorkflowComposerMicrophoneOriginalAriaHidden =
+        target.getAttribute("aria-hidden") || "";
+      target.dataset.codexWorkflowComposerMicrophoneHadTabindex =
+        String(target.hasAttribute("tabindex"));
+      target.dataset.codexWorkflowComposerMicrophoneOriginalTabindex =
+        target.getAttribute("tabindex") || "";
+      target.dataset.codexWorkflowComposerMicrophoneHidden = "true";
+    }
+    if (document.activeElement === target) target.blur();
+    target.style.setProperty("display", "none", "important");
+    target.setAttribute("aria-hidden", "true");
+    target.setAttribute("tabindex", "-1");
+  }
+
+  function restoreComposerMicrophones(root) {
+    for (const element of root?.querySelectorAll?.(
+      '[data-codex-workflow-composer-microphone-hidden="true"]',
+    ) || []) {
+      restoreComposerMicrophone(element);
+    }
+  }
+
+  function restoreComposerMicrophone(element) {
+    if (!(element instanceof HTMLElement) ||
+      !element.hasAttribute("data-codex-workflow-composer-microphone-hidden")) return;
+    const originalDisplay = element.dataset.codexWorkflowComposerMicrophoneOriginalDisplay || "";
+    if (originalDisplay) {
+      element.style.setProperty(
+        "display",
+        originalDisplay,
+        element.dataset.codexWorkflowComposerMicrophoneOriginalDisplayPriority || "",
+      );
+    } else {
+      element.style.removeProperty("display");
+    }
+    if (element.dataset.codexWorkflowComposerMicrophoneHadAriaHidden === "true") {
+      element.setAttribute(
+        "aria-hidden",
+        element.dataset.codexWorkflowComposerMicrophoneOriginalAriaHidden || "",
+      );
+    } else {
+      element.removeAttribute("aria-hidden");
+    }
+    if (element.dataset.codexWorkflowComposerMicrophoneHadTabindex === "true") {
+      element.setAttribute(
+        "tabindex",
+        element.dataset.codexWorkflowComposerMicrophoneOriginalTabindex || "",
+      );
+    } else {
+      element.removeAttribute("tabindex");
+    }
+    delete element.dataset.codexWorkflowComposerMicrophoneOriginalDisplay;
+    delete element.dataset.codexWorkflowComposerMicrophoneOriginalDisplayPriority;
+    delete element.dataset.codexWorkflowComposerMicrophoneHadAriaHidden;
+    delete element.dataset.codexWorkflowComposerMicrophoneOriginalAriaHidden;
+    delete element.dataset.codexWorkflowComposerMicrophoneHadTabindex;
+    delete element.dataset.codexWorkflowComposerMicrophoneOriginalTabindex;
+    delete element.dataset.codexWorkflowComposerMicrophoneHidden;
+  }
+
+  function syncSettingEffects() {
+    syncFocusedInterfaceEffects();
+    syncComposerMicrophone();
   }
 
   function muteNativeActiveNav(nav) {

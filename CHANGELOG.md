@@ -2,6 +2,10 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.12 - 2026-09-04
+
+- Added an independent Interface preference that hides the idle composer microphone control while preserving active dictation controls and native layout reflow.
+
 ## 0.5.11 - 2026-09-03
 
 - Added one bounded `npm run setup` flow with concise output, `y`/`yes` or agent approval, one isolated staging launch, signal-safe cleanup, one guarded install, and one relaunch.
