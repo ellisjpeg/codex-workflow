@@ -28,10 +28,12 @@ This is an independent community project and is not affiliated with or endorsed 
 Sidebar customisation has source/fixture coverage; fixes from manual visual feedback await re-review. See [the evidence and manual review checklist](docs/SETTINGS_SIDEBAR_CUSTOMISATION.md).
 
 - macOS
-- Codex Desktop `26.901.31953` (build `7868`)
+- Codex Desktop `26.901.41600` (build `7982`)
 - Node.js 24 or newer
 
 The installer intentionally refuses unreviewed Codex versions and builds. A desktop update may change internal routes, DOM structure, preload behavior, or ASAR metadata even when the interface looks similar.
+
+Build `7982` has a [bundle compatibility audit](docs/CODEX_26.901.41600_AUDIT.md). Exact-build live staging remains pending while another task owns the sole staging instance; source support is not production installation or visual approval.
 
 ## Install
 

@@ -55,9 +55,9 @@ test("updater agent install preserves a loaded job and reloads an unloaded job",
 
 test("compatibility guard names the audited Codex version and build", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(supportedVersion, "26.901.31953");
-  assert.equal(supportedBuild, "7868");
-  assert.equal(compatibilityManifest.workflowVersion, "0.5.18");
+  assert.equal(supportedVersion, "26.901.41600");
+  assert.equal(supportedBuild, "7982");
+  assert.equal(compatibilityManifest.workflowVersion, "0.5.19");
   assert.equal(compatibilityManifest.workflowVersion, pkg.version);
   assert.equal(compatibilityManifest.bundleIdentifier, "com.openai.codex");
   assert.equal(compatibilityManifest.packageName, "openai-codex-electron");
@@ -94,17 +94,36 @@ async function createAsarPair(root, name, marker, {
   return { targetAsar, targetPlist };
 }
 
+test("preflight accepts the audited 7982 pair and rejects the previous desktop version", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
+  try {
+    const current = await createAsarPair(root, "current", "fixture", {
+      version: "26.901.41600", build: 7982,
+    });
+    assert.equal(preflight(current.targetAsar, current.targetPlist).bundleBuild, "7982");
+    const previous = await createAsarPair(root, "previous", "fixture", {
+      version: "26.901.31953", build: 7868,
+    });
+    assert.throws(
+      () => preflight(previous.targetAsar, previous.targetPlist),
+      /Unsupported Codex version 26\.901\.31953; expected 26\.901\.41600/u,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("preflight rejects an unaudited build under the supported version", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-workflow-test-"));
   try {
-    const fixture = await createAsarPair(root, "wrong-build", "fixture", { build: 7869, plistBuild: "7869" });
+    const fixture = await createAsarPair(root, "wrong-build", "fixture", { build: 7983, plistBuild: "7983" });
     assert.throws(
       () => preflight(fixture.targetAsar, fixture.targetPlist),
-      /Unsupported Codex build 7869; expected 7868/u,
+      /Unsupported Codex build 7983; expected 7982/u,
     );
     assert.equal(
       preflight(fixture.targetAsar, fixture.targetPlist, { allowVersion: true }).pkg.codexBuildNumber,
-      7869,
+      7983,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -2,6 +2,12 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.19 - 2026-09-05
+
+- Guard Codex Desktop `26.901.41600` build `7982` after comparing its bootstrap, preload, settings routes, DOM contracts, CSS, and ASAR metadata with build `7868`.
+- Preserve the complete 0.5.18 runtime and settings schema; no selector, observer, timer, IPC, signing, or integrity guard changes were needed.
+- Add current-build acceptance and previous/adjacent-build rejection proof. Exact-build live staging remains pending under the recorded ownership gate.
+
 ## 0.5.18 - 2026-09-05
 
 - Collapse Hidden when sidebar editing finishes, without restoring its pages.
