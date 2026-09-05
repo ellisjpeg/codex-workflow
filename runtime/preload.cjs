@@ -87,8 +87,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     sidebarEditing: false,
     hiddenPagesExpanded: false,
     sidebarRows: new Map(),
+    sidebarSections: new Map(),
     hiddenPagesGroup: null,
     sidebarEditButton: null,
+    sidebarRevertButton: null,
+    sidebarVisibilityStyle: null,
   };
 
   queueMicrotask(waitForCodexRenderer);
@@ -122,6 +125,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     } catch (error) {
       log("error", `settings read failed: ${error?.stack || error}`);
     }
+    syncSettingsSidebarStyles();
     try {
       state.updateStatus = await ipcRenderer.invoke("codex-workflow:update:get");
     } catch (error) {
@@ -377,11 +381,32 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
     if (!state.discoveryObserver) {
       state.discoveryObserver = new MutationObserver((mutations) => {
+        if (mutations.some(mutationMayContainSettingsNavigation)) syncSettingsBeforePaint();
         if (mutations.some(mutationMayContainRoot)) scheduleWork("discovery");
       });
       state.discoveryObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
+    syncSettingsBeforePaint();
     scheduleWork("discovery");
+  }
+
+  function mutationMayContainSettingsNavigation(mutation) {
+    if (state.settingsNav?.contains(mutation.target)) return true;
+    const selector = 'nav[aria-label="Settings"], [data-settings-panel-slug]';
+    return Array.from(mutation.addedNodes || []).some((node) => node instanceof Element &&
+      (node.matches(selector) || Boolean(node.querySelector(selector))));
+  }
+
+  function syncSettingsBeforePaint() {
+    if (!state.settings.hiddenSettingsPages.length) return;
+    try {
+      const shell = state.settingsShell?.isConnected ? state.settingsShell : findSettingsShell();
+      if (!shell) return;
+      bindSettingsShell(shell);
+      syncSettingsPage();
+    } catch (error) {
+      log("error", `pre-paint settings sync failed: ${error?.stack || error}`);
+    }
   }
 
   function stopDiscovery() {
@@ -529,7 +554,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (state.settingsShell === shell && shell.isConnected) return;
     unbindSettingsShell();
     state.settingsShell = shell;
-    state.settingsObserver = new MutationObserver(() => {
+    state.settingsObserver = new MutationObserver((mutations) => {
+      if (mutations.some(mutationMayContainSettingsNavigation)) syncSettingsBeforePaint();
       scheduleWork("settings");
     });
     state.settingsObserver.observe(shell, { childList: true, subtree: true });
@@ -1567,18 +1593,19 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function renderFocusedInterfaceCard() {
     const card = settingsCard();
+    const focusedRow = renderSettingRow({
+      key: "focusedInterface",
+      label: "Focused Interface",
+      description: "Hide optional Codex features and destinations to keep the interface focused on your workflow.",
+    });
+    focusedRow.lastElementChild.prepend(renderCustomizeButton());
     card.append(
-      renderSettingRow({
-        key: "focusedInterface",
-        label: "Focused Interface",
-        description: "Hide optional Codex features and destinations to keep the interface focused on your workflow.",
-      }),
+      focusedRow,
       renderSettingRow({
         key: "hideComposerMicrophone",
         label: "Hide microphone button",
         description: "Remove the Dictate button from the composer.",
       }),
-      renderCustomizeRow(),
       renderSidebarCustomizeRow(),
     );
     return card;
@@ -1660,9 +1687,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return row;
   }
 
-  function renderCustomizeRow() {
-    const row = div("flex items-center px-4 py-3");
-    const button = renderActionButton("Customize");
+  function renderCustomizeButton() {
+    const button = renderActionButton("Customise");
+    button.setAttribute("aria-label", "Customise Focused Interface");
     button.setAttribute("aria-controls", "codex-workflow-focused-options");
     const apply = () => {
       button.setAttribute("aria-expanded", String(state.customizationOpen));
@@ -1676,15 +1703,15 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.customizationOpen = !state.customizationOpen;
       apply();
     });
-    row.appendChild(button);
-    return row;
+    return button;
   }
 
-  function renderActionButton(label) {
+  function renderActionButton(label, danger = false) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = label;
-    button.className = "no-drag cursor-interaction items-center gap-1 border whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 flex rounded-md text-default bg-text/5 enabled:hover:bg-text/10 data-[state=open]:bg-text/10 border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
+    const variant = danger ? "bg-chart-red/10 enabled:hover:bg-chart-red/20 text-chart-red" : "text-default bg-text/5 enabled:hover:bg-text/10 data-[state=open]:bg-text/10";
+    button.className = `no-drag cursor-interaction items-center gap-1 border whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 flex rounded-md ${variant} border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]`;
     return button;
   }
 
@@ -1703,11 +1730,23 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     action.dataset.codexWorkflow = "sidebar-edit";
     action.addEventListener("click", () => {
       state.sidebarEditing = !state.sidebarEditing;
-      if (state.sidebarEditing) state.hiddenPagesExpanded = true;
+      state.hiddenPagesExpanded = state.sidebarEditing;
       syncSettingsSidebar();
     });
     state.sidebarEditButton = action;
-    row.append(copy, action);
+    const revert = renderActionButton("Revert", true);
+    revert.setAttribute("aria-label", "Revert settings sidebar to default");
+    revert.setAttribute("aria-describedby", description.id);
+    revert.dataset.codexWorkflow = "sidebar-revert";
+    revert.addEventListener("click", () => {
+      if (!state.settingsWriteInFlight && state.settings.hiddenSettingsPages.length) {
+        persistSetting("hiddenSettingsPages", []);
+      }
+    });
+    state.sidebarRevertButton = revert;
+    const controls = div("flex max-w-full shrink-0 items-center gap-2");
+    controls.append(revert, action);
+    row.append(copy, controls);
     return row;
   }
 
@@ -1734,6 +1773,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     else element.setAttribute("aria-hidden", record.ariaHidden);
   }
 
+  function snapshotSidebarDisplay(source) {
+    return { display: source.style.display, priority: source.style.getPropertyPriority("display"),
+      hadStyle: source.hasAttribute("style"), styleText: source.getAttribute("style"),
+      originalCssText: source.style.cssText, ariaHidden: source.getAttribute("aria-hidden") };
+  }
+
   function releaseSidebarRow(source, record) {
     refreshSidebarSnapshot(source, record);
     restoreSidebarDisplay(source, record);
@@ -1758,8 +1803,40 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function releaseSettingsSidebar() {
     for (const [source, record] of state.sidebarRows) releaseSidebarRow(source, record);
+    for (const [section, record] of state.sidebarSections) {
+      refreshSidebarSnapshot(section, record);
+      restoreSidebarDisplay(section, record);
+      section.removeAttribute("data-codex-workflow-sidebar-empty");
+    }
+    state.sidebarSections.clear();
     state.hiddenPagesGroup?.remove();
     state.hiddenPagesGroup = null;
+  }
+
+  function syncSettingsSidebarSections(owner, hidden) {
+    const empty = new Set();
+    for (const section of owner.children) {
+      const [header, rows] = section.children;
+      if (section.children.length !== 2 || !header.classList.contains("group/nav-section-title") ||
+        header.querySelector('button, a, [role="button"]') || !rows.children.length) continue;
+      if (Array.from(rows.children).every((row) => state.sidebarRows.has(row) && hidden.has(row.dataset.settingsPanelSlug))) {
+        empty.add(section);
+      }
+    }
+    for (const [section, record] of state.sidebarSections) {
+      refreshSidebarSnapshot(section, record);
+      if (!empty.has(section)) {
+        restoreSidebarDisplay(section, record);
+        section.removeAttribute("data-codex-workflow-sidebar-empty");
+        state.sidebarSections.delete(section);
+      }
+    }
+    for (const section of empty) {
+      if (!state.sidebarSections.has(section)) state.sidebarSections.set(section, snapshotSidebarDisplay(section));
+      section.dataset.codexWorkflowSidebarEmpty = "true";
+      section.style.setProperty("display", "none", "important");
+      section.setAttribute("aria-hidden", "true");
+    }
   }
 
   function sidebarGlyph(path) {
@@ -1808,7 +1885,30 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return group;
   }
 
+  function syncSettingsSidebarStyles() {
+    const hidden = state.settings.hiddenSettingsPages;
+    if (!hidden.length) {
+      state.sidebarVisibilityStyle?.remove();
+      state.sidebarVisibilityStyle = null;
+      return;
+    }
+    const nav = ':is(.app-shell-left-panel, [data-testid="app-shell-floating-left-panel"]) nav.sidebar-navigation[aria-label="Settings"]:not([data-codex-workflow-sidebar-measuring]):not([role="dialog"] *, [role="menu"] *, [cmdk-root] *, .vertical-scroll-fade-mask *)';
+    const rows = `:is(${hidden.map((slug) => `button[data-settings-panel-slug="${slug}"]:not(:disabled)`).join(", ")})`;
+    const header = '[class~="group/nav-section-title"]';
+    const section = `${nav} .overflow-y-auto > div:has(> ${header} + div > ${rows}):not(:has(> :nth-child(3), > ${header} :is(button, a, [role="button"]), > ${header} + div > :not(${rows})))`;
+    const css = `${nav} ${rows}, ${section} { display: none !important; }`;
+    if (!state.sidebarVisibilityStyle?.isConnected) {
+      const parent = document.head || document.documentElement;
+      if (!parent) return;
+      state.sidebarVisibilityStyle = document.createElement("style");
+      state.sidebarVisibilityStyle.dataset.codexWorkflow = "sidebar-visibility";
+      parent.append(state.sidebarVisibilityStyle);
+    }
+    if (state.sidebarVisibilityStyle.textContent !== css) state.sidebarVisibilityStyle.textContent = css;
+  }
+
   function syncSettingsSidebar() {
+    syncSettingsSidebarStyles();
     if (state.sidebarEditButton?.isConnected) {
       const label = state.sidebarEditing ? "Done" : "Customise";
       if (state.sidebarEditButton.textContent !== label) state.sidebarEditButton.textContent = label;
@@ -1816,14 +1916,23 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       state.sidebarEditButton.setAttribute("aria-pressed", String(state.sidebarEditing));
       state.sidebarEditButton.disabled = state.settingsWriteInFlight;
     }
+    if (state.sidebarRevertButton?.isConnected) {
+      state.sidebarRevertButton.disabled = state.settingsWriteInFlight || !state.settings.hiddenSettingsPages.length;
+    }
     const nav = state.settingsNav;
     if (!nav?.isConnected) return;
     const owners = nav.querySelectorAll(".overflow-y-auto");
     if (owners.length !== 1) { releaseSettingsSidebar(); return; }
     const owner = owners[0];
-    const sources = Array.from(owner.querySelectorAll("button[data-settings-panel-slug]"))
-      .filter((source) => source !== state.customNav && !source.disabled &&
-        (state.sidebarRows.has(source) || getComputedStyle(source).display !== "none" && source.getAttribute("aria-hidden") !== "true"));
+    let sources;
+    nav.setAttribute("data-codex-workflow-sidebar-measuring", "");
+    try {
+      sources = Array.from(owner.querySelectorAll("button[data-settings-panel-slug]"))
+        .filter((source) => source !== state.customNav && !source.disabled &&
+          (state.sidebarRows.has(source) || getComputedStyle(source).display !== "none" && source.getAttribute("aria-hidden") !== "true"));
+    } finally {
+      nav.removeAttribute("data-codex-workflow-sidebar-measuring");
+    }
     const slugs = sources.map((source) => source.dataset.settingsPanelSlug);
     if (new Set(slugs).size !== slugs.length) { releaseSettingsSidebar(); return; }
     const hidden = new Set(state.settings.hiddenSettingsPages);
@@ -1855,7 +1964,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       if (!isHidden && !state.sidebarEditing) continue;
       let record = state.sidebarRows.get(source);
       if (!record) {
-        if (getComputedStyle(source).display === "none" || source.getAttribute("aria-hidden") === "true") continue;
         const wrapper = div("relative");
         wrapper.dataset.codexWorkflow = "sidebar-row";
         const control = sidebarIconButton("");
@@ -1877,10 +1985,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
           const current = state.sidebarRows.get(source);
           (current?.control.isConnected && state.sidebarEditing ? current.control : source).focus({ preventScroll: true });
         });
-        record = { wrapper, control, display: source.style.display,
-          priority: source.style.getPropertyPriority("display"), hadStyle: source.hasAttribute("style"),
-          styleText: source.getAttribute("style"), originalCssText: source.style.cssText,
-          ariaHidden: source.getAttribute("aria-hidden"), signature: null, proxy: null, editing: null };
+        record = { wrapper, control, ...snapshotSidebarDisplay(source), signature: null, proxy: null, editing: null };
         state.sidebarRows.set(source, record);
       }
       refreshSidebarSnapshot(source, record);
@@ -1936,6 +2041,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         if (wrapper && rows.children[index] !== wrapper) rows.insertBefore(wrapper, rows.children[index] || null);
       });
     }
+    syncSettingsSidebarSections(owner, hidden);
   }
 
   function onSettingsSidebarKeyDown(event) {

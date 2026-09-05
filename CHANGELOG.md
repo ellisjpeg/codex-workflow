@@ -2,6 +2,19 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.18 - 2026-09-05
+
+- Collapse Hidden when sidebar editing finishes, without restoring its pages.
+- Add scoped, preference-derived visibility CSS before update-status IPC to cover native inline-style resets, retained-DOM reveals and transitional layout before observer-owned controls mount.
+- Document the remaining cold settings-read and live visual verification boundaries in the design bible and sidebar evidence.
+
+## 0.5.17 - 2026-09-05
+
+- Hide empty native Settings sections when all their destinations are hidden; restore sections together with their pages.
+- Apply saved sidebar visibility before paint on Settings mounts and remounts using the existing observers.
+- Place Focused Interface's Customise action beside its switch.
+- Add a persistent red Revert action that resets only hidden-page choices, with write serialization and rollback.
+
 ## 0.5.16 - 2026-09-05
 
 - Match the Hidden chevron to the muted section heading.

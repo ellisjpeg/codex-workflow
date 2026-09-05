@@ -12,7 +12,7 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness({ initialSettings, installUpdateResult, setSettings, updateStatus, delayedRoots = false, nativeSidebar = false, realObservers = false } = {}) {
+async function createHarness({ initialSettings, installUpdateResult, setSettings, updateStatus, getUpdateStatus, delayedRoots = false, nativeSidebar = false, realObservers = false } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <header id="top-toolbar" class="flex h-toolbar draggable">
       <div id="toolbar-actions" class="@container flex items-center">
@@ -68,6 +68,11 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
   const { document } = window;
   if (nativeSidebar) {
     const nav = document.querySelector("nav");
+    nav.classList.add("sidebar-navigation");
+    const sidebar = document.createElement("aside");
+    sidebar.className = "app-shell-left-panel";
+    nav.before(sidebar);
+    sidebar.append(nav);
     const items = Array.from(nav.children);
     nav.innerHTML = `<div class="flex min-h-0 flex-1 flex-col"><input aria-label="Search settings"><div id="settings-scroll" class="min-h-0 flex-1 overflow-y-auto pb-2 flex flex-col gap-4"><div id="personal" class="flex flex-col gap-1"><div class="group/nav-section-title flex items-center justify-between gap-2 pe-0.5 ps-2"><div class="min-w-0 flex-1 text-base font-medium text-tertiary opacity-75">Personal</div></div><div class="flex flex-col gap-px browser:gap-0"></div></div><div id="integrations" class="flex flex-col gap-1"><div class="group/nav-section-title flex items-center justify-between gap-2 pe-0.5 ps-2"><div class="min-w-0 flex-1 text-base font-medium text-tertiary opacity-75">Integrations</div></div><div class="flex flex-col gap-px browser:gap-0"><button data-settings-panel-slug="mcp" aria-label="MCP servers" class="nav inactive"><span class="text-fade-truncate">MCP servers</span></button></div></div></div><footer>Fixed footer</footer></div>`;
     nav.querySelector("#personal").lastElementChild.append(...items);
@@ -104,6 +109,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
         return Promise.resolve({ ...persistedSettings });
       }
       if (channel === "codex-workflow:update:get") {
+        if (getUpdateStatus) return getUpdateStatus();
         return Promise.resolve(updateStatus || { available: false });
       }
       if (channel === "codex-workflow:update:install") {
@@ -476,7 +482,10 @@ test("sidebar mutations settle with real observers and hiding the current page n
     await flush();
     assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]'), null);
     assert.equal(nav.querySelectorAll('[data-codex-workflow="sidebar-row"]').length, 0);
-  } finally { harness.dom.window.close(); }
+  } finally {
+    harness.observers.forEach((observer) => observer.disconnect());
+    harness.dom.window.close();
+  }
 });
 
 test("sidebar disclosure matches its muted heading and edit circles sit inside the row padding", async () => {
@@ -521,6 +530,250 @@ test("hide and restore preserve the viewport including user scrolling during per
       await flush();
       assert.equal(owner.scrollTop, 120);
     }
+  } finally { harness.dom.window.close(); }
+});
+
+test("empty native sidebar sections disappear and restore exactly without hiding unowned destinations", async () => {
+  const harness = await createHarness({ nativeSidebar: true });
+  try {
+    const { document, nav, emitMutation } = harness;
+    const section = document.querySelector("#integrations");
+    section.setAttribute("style", "display: grid !important; color: red");
+    section.setAttribute("aria-hidden", "false");
+    const original = section.outerHTML;
+    const owner = section.parentElement;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const edit = document.querySelector('[data-codex-workflow="sidebar-edit"]');
+    edit.click();
+    nav.querySelector('[aria-label="Hide MCP servers"]').click();
+    await flush();
+    assert.equal(section.style.display, "none");
+    assert.equal(section.getAttribute("aria-hidden"), "true");
+    assert.equal(section.parentElement, owner);
+    assert.equal(section.nextElementSibling.dataset.codexWorkflow, "hidden-pages");
+    assert.equal(document.querySelector("#personal").style.display, "");
+    for (const html of ['<button disabled>Unavailable</button>', '<a href="https://example.test">External</a>', '<button>Extension settings</button>']) {
+      section.lastElementChild.insertAdjacentHTML("beforeend", html);
+      const extra = section.lastElementChild.lastElementChild;
+      emitMutation(section, { addedNodes: [extra] });
+      assert.equal(section.style.display, "grid");
+      extra.remove();
+      emitMutation(section, { removedNodes: [extra] });
+      assert.equal(section.style.display, "none");
+    }
+    nav.querySelector('[aria-label="Restore MCP servers"]').click();
+    await flush();
+    edit.click();
+    assert.equal(section.outerHTML, original);
+    assert.equal(nav.querySelector("footer").parentElement.lastElementChild.tagName, "FOOTER");
+  } finally { harness.dom.window.close(); }
+});
+
+test("Revert remains available outside editing and resets only sidebar choices", async () => {
+  const initialSettings = { hiddenSettingsPages: ["voice", "mcp", "future-page"], focusedInterface: false, hideComposerMicrophone: true };
+  const harness = await createHarness({ nativeSidebar: true, initialSettings });
+  try {
+    const { document, nav, ipcRenderer, invokedChannels } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const revert = document.querySelector('[data-codex-workflow="sidebar-revert"]');
+    const edit = document.querySelector('[data-codex-workflow="sidebar-edit"]');
+    assert.ok(revert);
+    assert.equal(revert.parentElement, edit.parentElement);
+    assert.equal(revert.textContent, "Revert");
+    assert.equal(revert.getAttribute("aria-label"), "Revert settings sidebar to default");
+    assert.ok(revert.classList.contains("text-chart-red"));
+    assert.ok(revert.classList.contains("bg-chart-red/10"));
+    revert.focus();
+    revert.click();
+    assert.equal(revert.disabled, true);
+    await flush();
+    assert.equal(document.activeElement, revert);
+    assert.equal(edit.textContent, "Customise");
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"]'), null);
+    assert.equal(nav.querySelector('[data-settings-panel-slug="voice"]').style.display, "");
+    assert.equal(document.querySelector("#integrations").hasAttribute("style"), false);
+    const saved = await ipcRenderer.invoke("codex-workflow:settings:get");
+    assert.deepEqual(JSON.parse(JSON.stringify(saved)), { ...initialSettings, schemaVersion: 2, hiddenSettingsPages: [] });
+    revert.click();
+    assert.equal(invokedChannels.filter((channel) => channel === "codex-workflow:settings:set").length, 1);
+    edit.click();
+    nav.querySelector('[aria-label="Hide Voice"]').click();
+    await flush();
+    assert.equal(revert.disabled, false);
+    revert.click();
+    await flush();
+    assert.equal(edit.textContent, "Done");
+    assert.ok(nav.querySelector('[aria-label="Hide Voice"]'));
+    assert.equal(nav.querySelector('[aria-label="Hide Workflow"]'), null);
+  } finally { harness.dom.window.close(); }
+});
+
+test("Revert serializes writes and rolls rows and headers back on persistence failure", async () => {
+  let rejectWrite;
+  const writes = [];
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["mcp"] }, setSettings: (patch) => {
+    writes.push(patch);
+    return new Promise((_resolve, reject) => { rejectWrite = reject; });
+  } });
+  try {
+    const { document, nav } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const revert = document.querySelector('[data-codex-workflow="sidebar-revert"]');
+    assert.ok(revert);
+    revert.click();
+    revert.click();
+    document.querySelector('[role="switch"]').click();
+    assert.equal(writes.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(writes[0])), { hiddenSettingsPages: [] });
+    assert.equal(document.querySelector("#integrations").style.display, "");
+    rejectWrite(new Error("disk full"));
+    await flush();
+    assert.equal(revert.disabled, false);
+    assert.equal(document.querySelector("#integrations").style.display, "none");
+    assert.equal(nav.querySelector('[data-settings-panel-slug="mcp"]').style.display, "none");
+    assert.equal(nav.querySelector('[data-codex-workflow="hidden-pages"] button').getAttribute("aria-expanded"), "false");
+  } finally { harness.dom.window.close(); }
+});
+
+test("hidden settings and empty headings are suppressed before paint on delayed mounts and remounts", async () => {
+  const harness = await createHarness({ nativeSidebar: true, delayedRoots: true, realObservers: true, initialSettings: { hiddenSettingsPages: ["voice", "mcp"] } });
+  try {
+    const { document, window, nav, deferAnimationFrames, flushAnimationFrame } = harness;
+    const replacementShell = nav.closest("#settings-shell").cloneNode(true);
+    const replacementVoice = nav.querySelector('[data-settings-panel-slug="voice"]').cloneNode(true);
+    const assertSuppressed = () => {
+      assert.equal(document.querySelector('[data-settings-panel-slug="voice"]').style.display, "none");
+      assert.equal(document.querySelector("#integrations").style.display, "none");
+      assert.equal(document.querySelectorAll('[data-codex-workflow="hidden-pages"]').length, 1);
+    };
+    deferAnimationFrames();
+    window.requestAnimationFrame(harness.mountDelayedRoots);
+    flushAnimationFrame();
+    await flush();
+    assertSuppressed();
+    window.requestAnimationFrame(() => document.querySelector("#settings-shell").replaceWith(replacementShell));
+    flushAnimationFrame();
+    await flush();
+    assertSuppressed();
+    window.requestAnimationFrame(() => document.querySelector('[data-settings-panel-slug="voice"]').replaceWith(replacementVoice));
+    flushAnimationFrame();
+    await flush();
+    assertSuppressed();
+    harness.resumeAnimationFrames();
+    flushAnimationFrame();
+    await flush();
+    const settled = harness.deliveredMutationCallbacks();
+    await flush();
+    assert.equal(harness.deliveredMutationCallbacks(), settled);
+    assert.ok(settled < 60);
+    assert.equal(harness.observers.some((observer) => observer.active && observer.target === document.documentElement), false);
+  } finally {
+    harness.observers.forEach((observer) => observer.disconnect());
+    harness.dom.window.close();
+  }
+});
+
+test("Done collapses Hidden without restoring pages or navigating away", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["voice"] } });
+  try {
+    const { document, nav, invokedChannels } = harness;
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    const edit = document.querySelector('[data-codex-workflow="sidebar-edit"]');
+    const group = nav.querySelector('[data-codex-workflow="hidden-pages"]');
+    const disclosure = group.querySelector("button");
+    edit.click();
+    assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+    edit.focus();
+    edit.click();
+    assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+    assert.equal(group.lastElementChild.hidden, true);
+    assert.equal(document.activeElement, edit);
+    assert.ok(document.querySelector('[data-codex-workflow-panel]'));
+    assert.equal(nav.querySelector('[data-settings-panel-slug="voice"]').style.display, "none");
+    assert.equal(invokedChannels.includes("codex-workflow:settings:set"), false);
+    disclosure.click();
+    assert.equal(group.lastElementChild.hidden, false);
+    edit.click();
+    edit.click();
+    assert.equal(group.lastElementChild.hidden, true);
+  } finally { harness.dom.window.close(); }
+});
+
+test("saved visibility survives attribute-only native resets before any observer or frame runs", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["voice", "mcp"] } });
+  try {
+    const { document, window, nav } = harness;
+    harness.deferAnimationFrames();
+    const voice = nav.querySelector('[data-settings-panel-slug="voice"]');
+    const section = document.querySelector("#integrations");
+    voice.style.display = "";
+    section.style.display = "";
+    nav.parentElement.style.display = "none";
+    nav.parentElement.style.display = "";
+    assert.equal(window.getComputedStyle(voice).display, "none");
+    assert.equal(window.getComputedStyle(section).display, "none");
+    assert.notEqual(window.getComputedStyle(nav.querySelector('[data-settings-panel-slug="workflow"]')).display, "none");
+    nav.querySelector('[data-settings-panel-slug="workflow"]').click();
+    document.querySelector('[data-codex-workflow="sidebar-revert"]').click();
+    await flush();
+    assert.notEqual(window.getComputedStyle(voice).display, "none");
+    assert.notEqual(window.getComputedStyle(section).display, "none");
+  } finally { harness.dom.window.close(); }
+});
+
+test("first-paint visibility does not depend on Settings geometry or slow update IPC", async () => {
+  let resolveUpdate;
+  const harness = await createHarness({ nativeSidebar: true, delayedRoots: true,
+    initialSettings: { hiddenSettingsPages: ["voice", "mcp"] },
+    getUpdateStatus: () => new Promise((resolve) => { resolveUpdate = resolve; }),
+  });
+  try {
+    const { document, window, nav } = harness;
+    nav.getBoundingClientRect = () => ({ width: 0, height: 0, left: 0, right: 0, top: 0, bottom: 0 });
+    harness.deferAnimationFrames();
+    harness.mountDelayedRoots();
+    const voice = nav.querySelector('[data-settings-panel-slug="voice"]');
+    assert.equal(window.getComputedStyle(voice).display, "none");
+    assert.equal(window.getComputedStyle(document.querySelector("#integrations")).display, "none");
+    assert.equal(nav.querySelector('[data-codex-workflow="nav-item"]'), null);
+    resolveUpdate({ available: false });
+    await flush();
+    assert.equal(window.getComputedStyle(voice).display, "none");
+    delete nav.getBoundingClientRect;
+    harness.resumeAnimationFrames();
+    harness.flushAnimationFrame();
+    await flush();
+    assert.equal(nav.querySelectorAll('[data-codex-workflow="nav-item"]').length, 1);
+    assert.equal(nav.querySelectorAll('[data-codex-workflow-page="voice"]').length, 1);
+    assert.equal(voice.style.display, "none");
+  } finally { harness.dom.window.close(); }
+});
+
+test("visibility CSS excludes lookalikes, search and disabled rows, and preserves native hiding", async () => {
+  const harness = await createHarness({ nativeSidebar: true, initialSettings: { hiddenSettingsPages: ["voice"] } });
+  try {
+    const { document, window, nav, emitMutation } = harness;
+    document.body.insertAdjacentHTML("beforeend", `<nav class="sidebar-navigation" aria-label="Settings"><button id="outside-voice" data-settings-panel-slug="voice">Voice</button></nav><div role="dialog"><aside class="app-shell-left-panel"><nav class="sidebar-navigation" aria-label="Settings"><button id="dialog-voice" data-settings-panel-slug="voice">Voice</button></nav></aside></div>`);
+    const owner = document.querySelector("#settings-scroll");
+    owner.insertAdjacentHTML("beforeend", '<button id="search-voice" data-list-navigation-item>Voice</button><button id="disabled-voice" data-settings-panel-slug="voice" disabled>Voice</button>');
+    for (const id of ["outside-voice", "dialog-voice", "search-voice", "disabled-voice"]) {
+      assert.notEqual(window.getComputedStyle(document.getElementById(id)).display, "none");
+    }
+    const style = document.createElement("style");
+    style.textContent = ".native-hidden { display: none; }";
+    document.head.append(style);
+    const original = nav.querySelector('[data-settings-panel-slug="voice"]');
+    const replacement = document.createElement("button");
+    replacement.className = "native-hidden";
+    replacement.dataset.settingsPanelSlug = "voice";
+    replacement.textContent = "Voice";
+    original.replaceWith(replacement);
+    emitMutation(replacement.parentElement, { addedNodes: [replacement], removedNodes: [original] });
+    assert.equal(nav.querySelector('[data-codex-workflow-page="voice"]'), null);
+    assert.equal(replacement.style.display, "");
+    assert.equal(window.getComputedStyle(replacement).display, "none");
+    assert.equal(nav.hasAttribute("data-codex-workflow-sidebar-measuring"), false);
+    assert.equal(document.querySelectorAll('style[data-codex-workflow="sidebar-visibility"]').length, 1);
   } finally { harness.dom.window.close(); }
 });
 
@@ -769,6 +1022,9 @@ test("Focused Interface exposes a native customize disclosure with unique switch
     );
 
     const customize = document.querySelector('button[aria-controls="codex-workflow-focused-options"]');
+    const master = document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]');
+    assert.equal(customize.parentElement, master.parentElement);
+    assert.equal(customize.nextElementSibling, master);
     const options = document.querySelector("#codex-workflow-focused-options");
     assert.equal(customize.getAttribute("aria-expanded"), "false");
     assert.equal(options.hidden, true);
