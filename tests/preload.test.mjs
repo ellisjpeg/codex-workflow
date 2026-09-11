@@ -4,7 +4,166 @@ import { Script } from "node:vm";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 
-const preloadSource = readFileSync(new URL("../runtime/preload.cjs", import.meta.url), "utf8");
+// Keep the archived feature regressions runnable while the starter owns runtime/.
+const preloadSource = readFileSync(new URL("../parked/workflow-before-starter/preload.cjs", import.meta.url), "utf8");
+const starterSource = readFileSync(new URL("../runtime/preload.cjs", import.meta.url), "utf8");
+
+test("all active Workflow switches use the native blue track, including refreshed recent-chat controls", async () => {
+  const h = await createHarness({source:starterSource});
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    const check = button => {
+      assert.equal(button.firstElementChild.classList.contains('bg-chart-blue'), true);
+      assert.equal(button.firstElementChild.classList.contains('bg-chart-red'), false);
+      assert.equal(button.firstElementChild.getAttribute('aria-hidden'), 'true');
+      assert.equal(button.getAttribute('aria-checked'), 'true');
+    };
+    check(h.document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]'));
+    const filter = h.document.querySelector('[aria-labelledby="codex-workflow-changed-label"]');
+    filter.click(); check(filter); filter.click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    const recent = h.document.querySelector('[data-codex-workflow-recent-switch]');
+    check(recent); recent.click(); await flush();
+    assert.equal(recent.firstElementChild.classList.contains('bg-text/10'), true);
+    recent.click(); await flush(); check(recent);
+  } finally { h.dom.window.close(); }
+});
+
+test("Workflow homepage exposes integrated sections and preserves unrelated navigation", async () => {
+  const h = await createHarness({ source: starterSource, nativeSidebar: true,
+    initialSettings: { focusedInterface: true, hideComposerMicrophone: true, hiddenSettingsPages: ["appearance"] } });
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    const panel = h.document.querySelector("[data-codex-workflow-panel]");
+    assert.ok(panel);
+    assert.equal(panel.querySelectorAll("[data-codex-workflow-section]").length, 5);
+    assert.equal(panel.querySelectorAll("[role=switch]").length, 2);
+    assert.doesNotMatch(panel.textContent, /Active setup|Make Codex yours|Save as|Customise interface|Import setup|Export setup|Focused Interface|Hide microphone/iu);
+    for (const row of panel.querySelectorAll("[data-codex-workflow-section]")) {
+      assert.equal(row.disabled, false);
+      const available = ["sidebar", "composer", "usage"].includes(row.dataset.codexWorkflowSection);
+      assert.equal(row.getAttribute("aria-disabled"), available ? null : "true");
+      row.focus();
+      assert.equal(h.document.activeElement, row);
+      if (!available) row.click();
+      assert.equal(h.document.querySelector("[data-codex-workflow-panel]"), panel);
+      assert.equal(row.classList.contains("enabled:hover:bg-text/5"), true);
+    }
+    assert.equal(h.document.querySelector("#pull-requests").style.display, "block");
+    assert.equal(h.document.querySelector("#composer-dictate").style.display, "none");
+    assert.notEqual(h.document.querySelector('[data-settings-panel-slug="appearance"]').style.display, "none");
+    assert.ok(!h.document.querySelector("[data-codex-workflow-settings-visibility]"));
+    const ids = [...h.document.querySelectorAll("[id]")].map((node) => node.id);
+    assert.equal(new Set(ids).size, ids.length);
+    for (const control of panel.querySelectorAll("[aria-labelledby], [aria-describedby]")) {
+      for (const attr of ["aria-labelledby", "aria-describedby"]) {
+        for (const id of (control.getAttribute(attr) || "").split(" ").filter(Boolean)) assert.ok(h.document.getElementById(id));
+      }
+    }
+  } finally { h.dom.window.close(); }
+});
+
+test("Workflow update control uses the guarded handoff and exposes a failed handoff", async () => {
+  for (const applying of [true, false]) {
+    const h = await createHarness({source:starterSource, updateStatus:{available:true}, installUpdateResult:{applying}});
+    try {
+      h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+      const button = h.document.querySelector('[data-codex-workflow="update"]');
+      assert.equal(button.hidden, false);
+      button.click(); await flush();
+      assert.equal(h.invokedChannels.filter(channel => channel === "codex-workflow:update:install").length, 1);
+      assert.equal(button.disabled, applying);
+      if (!applying) assert.match(h.document.querySelector('[data-codex-workflow-panel]').textContent, /Couldn’t update Workflow/);
+    } finally { h.dom.window.close(); }
+  }
+});
+
+test("starter search, changed-only view and reset respond without fictitious change counts", async () => {
+  const h = await createHarness({ source: starterSource, initialSettings: { focusedInterface: false } });
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    const panel = h.document.querySelector("[data-codex-workflow-panel]");
+    const search = panel.querySelector("input");
+    search.value = "  COMPOSER ";
+    search.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+    assert.deepEqual([...panel.querySelectorAll("[data-codex-workflow-section]")].filter((row) => !row.hidden).map((row) => row.dataset.codexWorkflowSection), ["composer"]);
+    assert.equal(panel.querySelector('[data-codex-workflow="sections"]').children.length, 1);
+    panel.querySelector('[data-codex-workflow="search-clear"]').click();
+    assert.equal(search.value, "");
+    assert.equal(panel.querySelector('[data-codex-workflow="sections"]').children.length, 5);
+    search.value = "not a section";
+    search.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+    assert.equal(panel.querySelector('[data-codex-workflow="empty"]').textContent, "No matching customisations.");
+    search.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(search.value, "");
+    const filter = panel.querySelector('[aria-labelledby="codex-workflow-changed-label"]');
+    const writesBefore = h.invokedChannels.filter((channel) => channel.endsWith(":set")).length;
+    filter.click();
+    assert.equal(filter.getAttribute("aria-checked"), "true");
+    assert.equal(panel.querySelector('[data-codex-workflow="sections"]').hidden, true);
+    assert.equal(panel.querySelector('[data-codex-workflow="empty"]').textContent, "No changed customisations.");
+    assert.equal(h.invokedChannels.filter((channel) => channel.endsWith(":set")).length, writesBefore);
+    panel.querySelector('[data-codex-workflow="reset"]').click();
+    await flush();
+    assert.equal(filter.getAttribute("aria-checked"), "false");
+    assert.equal(panel.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]').getAttribute("aria-checked"), "true");
+    assert.equal(panel.querySelector('[data-codex-workflow="sections"]').hidden, false);
+  } finally { h.dom.window.close(); }
+});
+
+test("starter saves the master preference, blocks concurrent writes and visibly rolls back failures", async () => {
+  let rejectWrite;
+  let writes = 0;
+  const h = await createHarness({ source: starterSource, setSettings: () => {
+    writes += 1;
+    return new Promise((_resolve, reject) => { rejectWrite = reject; });
+  } });
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    const master = h.document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]');
+    master.focus();
+    master.click();
+    assert.equal(master.getAttribute("aria-checked"), "false");
+    assert.equal(master.disabled, true);
+    master.click();
+    assert.equal(writes, 1);
+    master.blur();
+    rejectWrite(new Error("disk full"));
+    await flush();
+    assert.equal(master.getAttribute("aria-checked"), "true");
+    assert.equal(master.disabled, false);
+    assert.equal(h.document.activeElement, master);
+    assert.match(h.document.querySelector("[data-codex-workflow-panel]").textContent, /Couldn’t save changes/u);
+    assert.equal(master.firstElementChild.classList.contains("bg-chart-blue"), true);
+  } finally { h.dom.window.close(); }
+});
+
+test("starter restores native styles, supports reopening and ignores conversation mutations", async () => {
+  const h = await createHarness({ source: starterSource, realObservers: true, nativeSidebar: true });
+  try {
+    const native = h.document.querySelector("#native-panel");
+    native.style.setProperty("display", "grid", "important");
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    assert.equal(native.style.display, "none");
+    assert.equal(h.document.querySelectorAll('[aria-current="page"]').length, 1);
+    h.document.querySelector('[data-settings-panel-slug="appearance"]').click();
+    assert.equal(native.style.display, "grid");
+    assert.equal(native.style.getPropertyPriority("display"), "important");
+    assert.equal(native.inert, false);
+    assert.equal(h.document.querySelector("[data-codex-workflow-panel]"), null);
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    await flush();
+    const ownedCount = () => h.document.querySelectorAll('[data-codex-workflow="nav-item"]').length;
+    h.document.querySelector("#response-stream").textContent = "Unrelated response";
+    await flush();
+    assert.equal(ownedCount(), 1);
+    assert.equal(h.document.querySelectorAll("[data-codex-workflow-panel]").length, 1);
+    assert.ok(!h.observers.some((observer) => observer.active && observer.target === h.document.documentElement && observer.options.subtree));
+    h.window.history.pushState({}, "", "#conversation-test");
+    assert.equal(h.document.querySelector("[data-codex-workflow-panel]"), null);
+  } finally { h.dom.window.close(); }
+});
+
 
 async function flush() {
   await Promise.resolve();
@@ -12,7 +171,230 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness({ initialSettings, installUpdateResult, setSettings, updateStatus, getUpdateStatus, delayedRoots = false, nativeSidebar = false, realObservers = false } = {}) {
+test("navigation hides and reorders native rows before paint, preserves New chat and reverses on disable", async () => {
+  const h = await createHarness({source:starterSource, realObservers:true, nativeSidebar:true});
+  try {
+    const aside = h.document.querySelector("aside");
+    aside.innerHTML = `<div id="app-shell-sidebar"><nav><button class="sidebar-item"><span class="text-fade-truncate">New chat</span></button>
+      <div data-app-action-sidebar-scroll><div><div class="flex flex-col">
+      <div class="flex flex-col"><div class="contents"><button class="sidebar-item"><span class="text-fade-truncate">Pull requests</span></button></div>
+      <div class="contents"><button class="sidebar-item"><span class="text-fade-truncate">Scheduled</span></button></div>
+      <div class="contents"><button class="sidebar-item"><span class="text-fade-truncate">Plugins</span></button></div></div>
+      <button class="sidebar-item"><span class="text-fade-truncate">Explore</span></button></div></div>
+      <section data-app-action-sidebar-section-heading="Recents"><h2>Recents</h2><button>Fixture chat</button></section>
+      </div></nav></div>`;
+    h.window.dispatchEvent(new h.window.Event("resize")); await flush();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    const page = () => h.document.querySelector('[data-codex-workflow-panel]');
+    assert.match(page().textContent, /Sidebar & navigation/);
+    assert.doesNotMatch(page().textContent, /Show task previews|Changes apply to/);
+    assert.equal(page().querySelector('[data-workflow-navigation-item="new-chat"] button').disabled, true);
+    assert.equal(page().querySelector('[data-workflow-navigation-item="new-chat"] [aria-pressed]'), null);
+    page().querySelector('[aria-label="Hide Pull requests"]').click(); await flush();
+    const pull = () => aside.querySelector('[data-workflow-native-nav="pull-requests"]');
+    assert.equal(h.window.getComputedStyle(pull()).display, "none");
+    pull().style.setProperty("display", "block");
+    assert.equal(h.window.getComputedStyle(pull()).display, "none");
+    const old = pull(); old.replaceWith(old.cloneNode(true)); await flush();
+    assert.equal(h.window.getComputedStyle(pull()).display, "none");
+    page().querySelector('[data-workflow-navigation-item="plugins"] button').dispatchEvent(new h.window.KeyboardEvent("keydown", {key:"ArrowUp", bubbles:true})); await flush();
+    assert.equal(h.window.getComputedStyle(aside.querySelector('[data-workflow-native-nav="plugins"]')).order, "2");
+    page().querySelector('[data-codex-workflow-recent-switch]').click(); await flush();
+    const recents = aside.querySelector('section');
+    assert.equal(h.window.getComputedStyle(recents).display, "none");
+    assert.equal(page().querySelector('[data-codex-workflow-recent-switch]').getAttribute('aria-checked'), 'false');
+    page().querySelector('button').click();
+    page().querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]').click(); await flush();
+    assert.notEqual(h.window.getComputedStyle(recents).display,"none");
+    assert.notEqual(h.window.getComputedStyle(pull()).display,"none");
+  } finally { h.dom.window.close(); }
+});
+
+test("navigation pointer sorting previews, cancels, settles and rolls failed saves back", async () => {
+  let reject = false;
+  const h = await createHarness({source:starterSource, setSettings: patch => reject
+    ? Promise.reject(new Error("disk full")) : Promise.resolve({focusedInterface:true, ...patch})});
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    const card = h.document.querySelector('[data-codex-workflow-navigation-rows]');
+    assert.equal(card.previousElementSibling.textContent, 'Navigation items');
+    let captured = null;
+    for (const target of [card, ...card.querySelectorAll('button')]) {
+      target.setPointerCapture = () => { captured = target; };
+      target.hasPointerCapture = () => captured === target;
+      target.releasePointerCapture = () => { captured = null; };
+    }
+    const insertBefore = card.insertBefore.bind(card);
+    card.insertBefore = (node, reference) => {
+      const losesCapture = captured && node.contains(captured);
+      const result = insertBefore(node, reference);
+      if (losesCapture) {
+        const target = captured; captured = null;
+        target.dispatchEvent(new h.window.Event('lostpointercapture', {bubbles:true}));
+      }
+      return result;
+    };
+    let reduced = false;
+    h.window.matchMedia = () => ({matches:reduced});
+    const animations = [];
+    for (const row of card.children) {
+      row.getBoundingClientRect = () => {
+        const offset = Number(/translateY\(([-.\d]+)px\)/.exec(row.style.transform)?.[1] || 0);
+        const top = [...card.children].indexOf(row) * 48 + offset;
+        return {top, bottom:top + 48, height:48, width:600, left:0, right:600};
+      };
+      row.animate = (frames, options) => { animations.push({frames, options}); return {}; };
+    }
+    const order = () => [...card.children].map(row => row.dataset.workflowNavigationItem);
+    const original = order();
+    const handle = card.querySelector('[data-workflow-navigation-item="plugins"] button');
+    const pointer = (type, y) => (captured || handle).dispatchEvent(new h.window.MouseEvent(type, {button:0, clientY:y, bubbles:true}));
+    pointer('pointerdown', 150); pointer('pointermove', 55);
+    assert.equal(order()[1], 'plugins');
+    assert.equal(h.invokedChannels.filter(channel => channel.endsWith(':settings:set')).length, 0);
+    h.document.dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'Escape', bubbles:true}));
+    assert.deepEqual(order(), original);
+    pointer('pointerdown', 150); pointer('pointermove', 55); pointer('pointerup', 55); await flush();
+    assert.equal(order()[1], 'plugins');
+    assert.equal(card.querySelector('[data-workflow-navigation-item="plugins"] button'), handle);
+    assert.ok(animations.some(({options}) => options.duration === 200 && options.easing === 'ease'));
+    assert.ok(animations.some(({options}) => options.duration === 250));
+    const saved = order();
+    reject = true; reduced = true; animations.length = 0;
+    pointer('pointerdown', 55); pointer('pointermove', 150); pointer('pointerup', 150); await flush();
+    assert.deepEqual(order(), saved);
+    assert.equal(animations.length, 0);
+    assert.match(h.document.querySelector('[role="status"]').textContent, /Couldn’t save/);
+    assert.equal(card.firstElementChild.dataset.workflowNavigationItem, 'new-chat');
+    reject = false; reduced = false; h.document.documentElement.dataset.reducedMotion = 'true';
+    pointer('pointerdown', 55); pointer('pointermove', 150); pointer('pointerup', 150); await flush();
+    assert.equal(animations.length, 0, 'native Reduce motion On overrides the system preference');
+  } finally { h.dom.window.close(); }
+});
+
+test("sidebar width displays its unit inside the field and rolls a failed native write back", async () => {
+  const requests = [];
+  const h = await createHarness({source:starterSource, sidebarWidth: request => {
+    requests.push(request);
+    return request.action === 'get' ? Promise.resolve(317) : Promise.reject(new Error('native write failed'));
+  }});
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click(); await flush();
+    const input = h.document.querySelector('input[aria-label="Sidebar width"]');
+    assert.equal(input.value, '317');
+    assert.equal(input.parentElement.textContent, 'px');
+    input.value = '521'; input.dispatchEvent(new h.window.Event('change')); await flush();
+    assert.equal(input.getAttribute('aria-invalid'), 'true');
+    assert.equal(requests.length, 1);
+    input.value = '350'; input.dispatchEvent(new h.window.Event('change')); await flush();
+    assert.equal(input.value, '317');
+    assert.equal(input.disabled, false);
+    assert.match(h.document.querySelector('[role="status"]').textContent, /Couldn’t resize/);
+  } finally { h.dom.window.close(); }
+});
+
+test("settings ordering preserves the native Account wrapper and follows visual keyboard order", async () => {
+  const h = await createHarness({source:starterSource});
+  try {
+    h.document.querySelector('aside').remove();
+    h.document.querySelector('#settings-shell').classList.add('app-shell-left-panel');
+    const nav = h.document.querySelector('nav[aria-label="Settings"]');
+    nav.classList.add('sidebar-navigation');
+    const group = h.document.createElement('div'); group.className = 'flex flex-col';
+    group.append(...nav.children); nav.append(group);
+    const account = h.document.createElement('span'); account.className = 'contents'; account.innerHTML = '<button class="sidebar-item">Account</button>'; group.append(account);
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    [...h.document.querySelectorAll('[aria-label="Navigation area"] button')].find(n=>n.textContent === 'Settings navigation').click();
+    h.document.querySelector('[data-workflow-navigation-item="appearance"] button').dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'ArrowUp', bubbles:true})); await flush();
+    const appearance = nav.querySelector('[data-settings-panel-slug="appearance"]');
+    const general = nav.querySelector('[data-settings-panel-slug="general-settings"]');
+    assert.equal(h.window.getComputedStyle(appearance).order, '1');
+    assert.equal(h.window.getComputedStyle(account).order, '101');
+    assert.equal(h.window.getComputedStyle(account.firstElementChild).order, '101');
+    for (const node of group.children) node.getBoundingClientRect = () => ({top:Number(h.window.getComputedStyle(node).order) * 32,height:32,left:0});
+    appearance.focus();
+    appearance.dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'Tab', bubbles:true,cancelable:true}));
+    assert.equal(h.document.activeElement, general);
+  } finally { h.dom.window.close(); }
+});
+
+test("account menu follows the measured sidebar width and restores on disable", async () => {
+  const h = await createHarness({source:starterSource, realObservers:true});
+  try {
+    let resize;
+    h.window.ResizeObserver = class { constructor(callback) { resize = callback; } observe() {} disconnect() {} };
+    let sidebarWidth = 400;
+    h.document.querySelector('.app-shell-left-panel').getBoundingClientRect = () => ({width:sidebarWidth});
+    h.document.querySelector('[aria-label="Open profile menu"]').click();
+    const menu = h.document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-labelledby', 'account-menu-trigger');
+    menu.style.width = '504px';
+    menu.innerHTML = '<div role="menuitem"><span class="truncate">Settings</span></div>';
+    h.document.body.append(menu); await flush();
+    const sizingRule = () => [...h.document.querySelector('[data-codex-workflow-navigation-style]').sheet.cssRules]
+      .find(rule => rule.selectorText === '[role="menu"][data-workflow-account-sizing]');
+    assert.equal(menu.hasAttribute('data-workflow-account-sizing'), true);
+    assert.equal(sizingRule().style.getPropertyValue('width'), 'calc(var(--codex-workflow-account-sidebar-width) - 2 * var(--padding-row-cell-x, var(--padding-row-x)))');
+    assert.equal(menu.style.getPropertyValue('--codex-workflow-account-sidebar-width'), '400px');
+    sidebarWidth = 240; resize();
+    assert.equal(menu.style.getPropertyValue('--codex-workflow-account-sidebar-width'), '240px');
+    sidebarWidth = 0; resize();
+    assert.equal(menu.style.getPropertyValue('--codex-workflow-account-sidebar-width'), '240px');
+    // JSDOM drops priority on calc() declarations with nested var(); Chromium is checked live.
+    assert.match(h.document.querySelector('[data-codex-workflow-navigation-style]').textContent,
+      /\[data-workflow-account-sizing\]\{width:calc\(var\(--codex-workflow-account-sidebar-width\)[^;]+!important;/);
+    menu.style.width = '224px';
+    assert.ok(sizingRule());
+    const replacement = menu.cloneNode(true);
+    replacement.removeAttribute('data-workflow-account-sizing');
+    menu.replaceWith(replacement); await flush();
+    assert.equal(replacement.hasAttribute('data-workflow-account-sizing'), true);
+    const unrelated = replacement.cloneNode(true);
+    unrelated.removeAttribute('data-workflow-account-sizing');
+    unrelated.setAttribute('aria-labelledby', 'sidebar-help-trigger');
+    replacement.replaceWith(unrelated); await flush();
+    assert.equal(unrelated.hasAttribute('data-workflow-account-sizing'), false);
+    unrelated.replaceWith(replacement); await flush();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]').click(); await flush();
+    assert.equal(sizingRule(), undefined);
+    assert.equal(replacement.style.width, '224px');
+    assert.equal(replacement.hasAttribute('data-workflow-account-sizing'), false);
+  } finally { h.dom.window.close(); }
+});
+
+test("account customization survives portal replacement and skips hidden rows in keyboard traversal", async () => {
+  const h = await createHarness({source:starterSource, realObservers:true, initialSettings:{focusedInterface:true,
+    sidebarNavigation:{accountOrder:['pet','usage','invite','settings','logout'], accountHidden:['invite']}}});
+  try {
+    h.document.querySelector('[aria-label="Open profile menu"]').click();
+    let menu = h.document.createElement('div'); menu.setAttribute('role','menu');
+    menu.innerHTML = '<div style="display:flex;flex-direction:column">' + ['Usage','Show pet','Invite a friend','Settings','Log out']
+      .map(label=>`<div role="menuitem" tabindex="-1"><span class="truncate">${label}</span></div>`).join('') + '</div>';
+    h.document.body.append(menu); await flush();
+    const item = id => menu.querySelector(`[data-workflow-account-item="${id}"]`);
+    assert.equal(h.window.getComputedStyle(item('invite')).display, 'none');
+    assert.equal(h.window.getComputedStyle(item('pet')).order, '1');
+    assert.equal(h.window.getComputedStyle(item('usage')).order, '2');
+    for (const node of menu.querySelectorAll('[role="menuitem"]')) node.getBoundingClientRect = () => ({
+      top:Number(h.window.getComputedStyle(node).order) * 32, height:h.window.getComputedStyle(node).display === 'none' ? 0 : 32, left:0});
+    item('pet').focus(); item('pet').dispatchEvent(new h.window.KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+    assert.equal(h.document.activeElement,item('usage'));
+    item('usage').dispatchEvent(new h.window.KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+    assert.equal(h.document.activeElement,item('settings'));
+    const replacement = menu.cloneNode(true);
+    replacement.querySelectorAll('[data-workflow-account-item]').forEach(node=>node.removeAttribute('data-workflow-account-item'));
+    menu.replaceWith(replacement); menu = replacement; await flush();
+    assert.equal(h.window.getComputedStyle(item('invite')).display,'none');
+  } finally { h.dom.window.close(); }
+});
+
+async function createHarness({ initialSettings, installUpdateResult, setSettings, sidebarWidth, updateStatus, getUpdateStatus, source = preloadSource, delayedRoots = false, nativeSidebar = false, realObservers = false } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <header id="top-toolbar" class="flex h-toolbar draggable">
       <div id="toolbar-actions" class="@container flex items-center">
@@ -94,7 +476,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
   let persistedSettings = initialSettings
     ? { ...initialSettings }
     : {
-      schemaVersion: 2,
+      schemaVersion: source === starterSource ? 3 : 2,
       focusedInterface: true,
       hidePullRequests: true,
       hidePetMenuItem: true,
@@ -108,6 +490,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
       if (channel === "codex-workflow:settings:get") {
         return Promise.resolve({ ...persistedSettings });
       }
+      if (channel === "codex-workflow:sidebar-width") return sidebarWidth ? sidebarWidth(patch) : Promise.resolve(275);
       if (channel === "codex-workflow:update:get") {
         if (getUpdateStatus) return getUpdateStatus();
         return Promise.resolve(updateStatus || { available: false });
@@ -212,7 +595,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
     item.setAttribute("aria-current", "page");
   });
 
-  new Script(preloadSource, { filename: "preload.cjs" }).runInContext(context);
+  new Script(source, { filename: "preload.cjs" }).runInContext(context);
   await flush();
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
   await flush();

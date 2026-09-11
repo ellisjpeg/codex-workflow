@@ -68,7 +68,8 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
   assert.deepEqual(
     loadSettings({ schemaVersion: 1, efficiencyMode: false }),
     {
-      schemaVersion: 2,
+      schemaVersion: 3,
+      sidebarNavigation: loadSettings({}).sidebarNavigation,
       focusedInterface: false,
       hiddenSettingsPages: [],
       hidePullRequests: true,
@@ -76,8 +77,33 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
       hideComposerMicrophone: false,
+      showUsageRemaining: true,
+      usageRemainingLocation: "toolbar",
     },
   );
+});
+
+test("navigation normalisation protects locked entries and rejects malformed IDs", () => {
+  const prefs = loadSettings({sidebarNavigation:{order:["explore","new-chat","explore"],
+    hidden:["new-chat","plugins"], settingsHidden:["workflow", "appearance", "\"{}"],
+    accountHidden:["settings","logout","pet"], width:NaN}}).sidebarNavigation;
+  assert.deepEqual(prefs.order, ["explore","pull-requests","scheduled","plugins","settings-shortcut"]);
+  assert.deepEqual(prefs.hidden,["plugins"]);
+  assert.deepEqual(prefs.settingsHidden,["appearance"]);
+  assert.deepEqual(prefs.accountHidden,["pet"]);
+  assert.equal(prefs.width,null);
+  assert.equal(prefs.showRecentChats,true);
+});
+
+test("schema 2 visibility choices migrate without overriding newer navigation choices", () => {
+  const legacy = {schemaVersion:2, hidePullRequests:true, hidePetMenuItem:true,
+    hideInviteFriendMenuItem:true, hiddenSettingsPages:["appearance", "workflow"], replaceHelpWithSettings:false};
+  const next = loadSettings(legacy);
+  assert.deepEqual(next.sidebarNavigation.hidden, ["pull-requests", "settings-shortcut"]);
+  assert.deepEqual(next.sidebarNavigation.settingsHidden, ["appearance"]);
+  assert.deepEqual(next.sidebarNavigation.accountHidden, ["pet", "invite"]);
+  assert.deepEqual(loadSettings({...legacy, sidebarNavigation:{hidden:[], settingsHidden:[], accountHidden:[]}}).sidebarNavigation.hidden, []);
+  assert.deepEqual(loadSettings(next), next);
 });
 
 test("main settings normalizer accepts only canonical booleans", () => {
@@ -93,7 +119,8 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hideComposerMicrophone: "yes",
     }),
     {
-      schemaVersion: 2,
+      schemaVersion: 3,
+      sidebarNavigation: loadSettings({}).sidebarNavigation,
       focusedInterface: false,
       hidePullRequests: false,
       hidePetMenuItem: true,
@@ -101,6 +128,8 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
       hideComposerMicrophone: false,
+      showUsageRemaining: true,
+      usageRemainingLocation: "toolbar",
     },
   );
   assert.equal(loadSettings({ hideComposerMicrophone: true }).hideComposerMicrophone, true);
@@ -160,6 +189,26 @@ test("Settings activation sends the native shortcut without moving the pointer",
     ),
     /untrusted renderer/u,
   );
+});
+
+test("numeric sidebar width accepts only bounded integers from the main Codex frame", async () => {
+  const h = createUpdateHarness(new Map());
+  const scripts = [];
+  const frame = {url:"app://-/index.html"};
+  const sender = {mainFrame:frame, isDestroyed:()=>false, getURL:()=>frame.url,
+    executeJavaScript:async script => { scripts.push(script); return 321; }};
+  const event = {sender,senderFrame:frame};
+  const resize = h.handlers.get("codex-workflow:sidebar-width");
+  assert.equal(await resize(event,{action:"get"}),321);
+  assert.doesNotMatch(scripts.at(-1),/native\.\$2t\('sidebar-width'/);
+  assert.equal(await resize(event,{action:"set",width:321}),321);
+  assert.match(scripts.at(-1),/native\.\$2t\('sidebar-width', 321\)/);
+  for (const width of [239,521,NaN,Infinity,"321",321.5]) {
+    await assert.rejects(resize(event,{action:"set",width}),/Invalid sidebar width/);
+  }
+  await assert.rejects(resize({...event,senderFrame:{url:frame.url}},{action:"get"}),/rejected sidebar width access/);
+  await assert.rejects(resize({...event,senderFrame:{url:"https://example.com"}},{action:"get"}),/untrusted renderer/);
+  assert.equal(scripts.length,2);
 });
 
 function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test", fileSystem) {

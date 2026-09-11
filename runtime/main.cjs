@@ -24,14 +24,25 @@ const updateWatchers = [];
 let updateLaunchInFlight = false;
 let updateCheckInFlight = false;
 const defaults = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   focusedInterface: true,
   hidePullRequests: true,
   hidePetMenuItem: true,
   hideInviteFriendMenuItem: true,
   replaceHelpWithSettings: true,
   hideComposerMicrophone: false,
+  showUsageRemaining: true, usageRemainingLocation: "toolbar",
   hiddenSettingsPages: [],
+  sidebarNavigation: {
+    order: ["pull-requests", "scheduled", "plugins", "explore", "settings-shortcut"],
+    hidden: [],
+    width: null,
+    showRecentChats: true,
+    settingsOrder: [],
+    settingsHidden: [],
+    accountOrder: ["usage", "pet", "invite", "settings", "logout"],
+    accountHidden: [],
+  },
 };
 
 fs.mkdirSync(logDir, { recursive: true });
@@ -52,8 +63,18 @@ function normaliseSettings(value) {
   const legacyFocusedInterface = typeof value?.efficiencyMode === "boolean"
     ? value.efficiencyMode
     : defaults.focusedInterface;
+  const sidebarDefaults = defaults.sidebarNavigation;
+  const sidebarNavigation = value?.sidebarNavigation &&
+    typeof value.sidebarNavigation === "object" && !Array.isArray(value.sidebarNavigation)
+    ? value.sidebarNavigation
+    : value?.schemaVersion < 3 ? {
+      hidden: [value.hidePullRequests === true && "pull-requests", value.replaceHelpWithSettings === false && "settings-shortcut"].filter(Boolean),
+      settingsHidden: value.hiddenSettingsPages,
+      accountHidden: [value.hidePetMenuItem === true && "pet", value.hideInviteFriendMenuItem === true && "invite"].filter(Boolean),
+    } : {};
+  const sidebarOrder = sidebarNavigation.order;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     focusedInterface: typeof value?.focusedInterface === "boolean"
       ? value.focusedInterface
       : legacyFocusedInterface,
@@ -72,11 +93,38 @@ function normaliseSettings(value) {
     hideComposerMicrophone: typeof value?.hideComposerMicrophone === "boolean"
       ? value.hideComposerMicrophone
       : defaults.hideComposerMicrophone,
+    showUsageRemaining: typeof value?.showUsageRemaining === "boolean" ? value.showUsageRemaining : defaults.showUsageRemaining,
+    usageRemainingLocation: ["toolbar", "composer"].includes(value?.usageRemainingLocation) ? value.usageRemainingLocation : defaults.usageRemainingLocation,
     hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
       ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
         typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
       : [],
+    sidebarNavigation: {
+      order: [...new Set([...(Array.isArray(sidebarOrder) ? sidebarOrder : []),
+        ...sidebarDefaults.order].filter((id) => sidebarDefaults.order.includes(id)))],
+      hidden: Array.isArray(sidebarNavigation.hidden)
+        ? [...new Set(sidebarNavigation.hidden.slice(0, 100).filter((id) =>
+          sidebarDefaults.order.includes(id)))]
+        : [...sidebarDefaults.hidden],
+      width: Number.isFinite(sidebarNavigation.width)
+        ? Math.min(520, Math.max(240, Math.round(sidebarNavigation.width)))
+        : sidebarDefaults.width,
+      showRecentChats: typeof sidebarNavigation.showRecentChats === "boolean"
+        ? sidebarNavigation.showRecentChats
+        : sidebarDefaults.showRecentChats,
+      settingsOrder: normaliseNavigationIds(sidebarNavigation.settingsOrder),
+      settingsHidden: normaliseNavigationIds(sidebarNavigation.settingsHidden).filter((id) => id !== "workflow"),
+      accountOrder: [...new Set([...normaliseNavigationIds(sidebarNavigation.accountOrder),
+        ...sidebarDefaults.accountOrder].filter((id) => sidebarDefaults.accountOrder.includes(id)))],
+      accountHidden: normaliseNavigationIds(sidebarNavigation.accountHidden)
+        .filter((id) => ["usage", "pet", "invite"].includes(id)),
+    },
   };
+}
+
+function normaliseNavigationIds(value) {
+  return Array.isArray(value) ? [...new Set(value.slice(0, 100).filter((id) =>
+    typeof id === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(id)))] : [];
 }
 
 function readSettings() {
@@ -242,6 +290,20 @@ function assertTrustedSender(event) {
   if (!isTrustedSender(event)) throw new Error("Codex Workflow rejected an untrusted renderer");
 }
 
+// Build 8576: native Z0n/Q0n read/write sidebar-width through Jx/Yx.
+// Settings unmounts the app sidebar. Updating the same native store makes the
+// next app mount use this width, while manual dragging keeps its normal ownership.
+function nativeSidebarWidthScript(width) {
+  return `(async () => {
+    if (!document.querySelector('nav[aria-label="Settings"]')) throw Error('Open Settings first');
+    const native = await import('app://-/assets/app-initial-a9514281e192.js');
+    if (typeof native.Y2t !== 'function' || typeof native.$2t !== 'function') throw Error('Unsupported sidebar store');
+    ${width === undefined ? "" : `native.$2t('sidebar-width', ${width});`}
+    const value = native.Y2t('sidebar-width', 275);
+    return Number.isFinite(value) ? Math.max(240, Math.min(520, Math.round(value))) : 275;
+  })()`;
+}
+
 function registerPreload(targetSession, label) {
   if (fs.existsSync(disabledPath)) {
     appendLog("info", `patch disabled; skipped ${label}`);
@@ -274,6 +336,20 @@ if (!globalThis.__codexWorkflowMainInstalled) {
   ipcMain.handle("codex-workflow:settings:set", (event, patch) => {
     assertTrustedSender(event);
     return writeSettings(patch);
+  });
+  ipcMain.handle("codex-workflow:sidebar-width", async (event, request) => {
+    assertTrustedSender(event);
+    const contents = event.sender;
+    if (!contents || contents.isDestroyed() || event.senderFrame !== contents.mainFrame ||
+      !/^app:\/\/-\/index\.html(?:[?#]|$)/u.test(contents.getURL())) {
+      throw new Error("Codex Workflow rejected sidebar width access");
+    }
+    if (request?.action === "get") return contents.executeJavaScript(nativeSidebarWidthScript());
+    if (request?.action !== "set" || !Number.isInteger(request.width) ||
+      request.width < 240 || request.width > 520) {
+      throw new Error("Invalid sidebar width");
+    }
+    return contents.executeJavaScript(nativeSidebarWidthScript(request.width));
   });
   ipcMain.handle("codex-workflow:settings:activate", (event, request) => {
     assertTrustedSender(event);

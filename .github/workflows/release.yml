@@ -29,11 +29,9 @@ jobs:
           npm prune --omit=dev
           find node_modules -type l -delete
           mkdir -p "dist/stage/codex-workflow-$version"
-          rsync -a \
-            --exclude .git \
-            --exclude .github \
-            --exclude dist \
-            "./" "dist/stage/codex-workflow-$version/"
+          cp -R loader.cjs runtime scripts node_modules package.json package-lock.json \
+            workflow-compatibility.json README.md LICENSE \
+            "dist/stage/codex-workflow-$version/"
           tar -C dist/stage -czf "dist/codex-workflow-$version.tar.gz" "codex-workflow-$version"
       - name: Publish release
         env:

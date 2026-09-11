@@ -45,6 +45,7 @@ The staging app must have all of the following:
 - an APFS clone or disposable copy under a uniquely generated temporary directory;
 - a distinct bundle identifier, bundle name, and display name;
 - its own Electron user-data directory and single-instance state;
+- the real macOS account `HOME` for Keychain lookup and OAuth browser launches; isolate shell startup with `ZDOTDIR` and app state with explicit paths, not a fabricated `HOME`;
 - its own Workflow runtime root, settings, logs, transaction journal, update state, and staged files;
 - a source-built candidate runtime, never the production runtime by symlink or shared path;
 - updated ASAR integrity metadata and an ad-hoc signature after staging-only changes;

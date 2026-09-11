@@ -3,37 +3,25 @@
 [![CI](https://github.com/ellisjpeg/codex-workflow/actions/workflows/ci.yml/badge.svg)](https://github.com/ellisjpeg/codex-workflow/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Codex Workflow is a version-guarded, native-style extension for Codex Desktop on macOS. It adds a Workflow settings page, focused interface controls, and a scoped synchronizer designed to avoid unrelated renderer work.
+Workflow lets you customise Codex to suit the way you work. It brings your preferences into the app through a native-feeling interface, with local settings and a reversible installation.
+
+Workflow is built around personal control: shape your workspace, keep useful controls within reach, and make the interface fit your routine. Each customisation belongs to one integrated settings experience.
 
 This is an independent community project and is not affiliated with or endorsed by OpenAI.
 
-## Features
-
-- Native-style **Workflow** category in Codex Settings.
-- **Focused Interface** master switch with individual visibility controls.
-- Optional hiding of **Pull requests**, account-menu pet controls, and **Invite a friend**.
-- Optional sidebar **Settings** shortcut with **Help & Updates** moved into the account menu.
-- Independent option to hide the idle composer microphone button.
-- **Customise settings sidebar**: hide or restore native Settings pages without disabling features; hidden pages remain searchable and accessible in a non-sticky **Hidden** disclosure. Workflow cannot be hidden.
-- Native hover-reveal **Workflow Update** control in the sidebar-aligned titlebar region.
-- One-click guarded runtime updates in the Workflow sidebar pill, with automatic relaunch and logged failures.
-- Immediate startup/visibility checks plus five-minute conditional GitHub Release checks with bounded backoff.
-- Optional exact-build automatic repair after a Codex Desktop replacement.
-- Scoped sidebar and settings observers with route/remount recovery.
-- Atomic local settings persistence and visible rollback after write failures.
-- Version, bundle identity, ASAR integrity, backup, transaction, recovery, and uninstall guards.
+See the [changelog](CHANGELOG.md) for release-specific changes and the compatibility section below before installing.
 
 ## Compatibility
 
-Sidebar customisation has source/fixture coverage; fixes from manual visual feedback await re-review. See [the evidence and manual review checklist](docs/SETTINGS_SIDEBAR_CUSTOMISATION.md).
+Current sidebar evidence is recorded in [Sidebar & navigation](docs/SIDEBAR_NAVIGATION.md).
 
 - macOS
-- Codex Desktop `26.901.41600` (build `7982`)
+- Codex Desktop `26.903.71938` (build `8576`)
 - Node.js 24 or newer
 
 The installer intentionally refuses unreviewed Codex versions and builds. A desktop update may change internal routes, DOM structure, preload behavior, or ASAR metadata even when the interface looks similar.
 
-Build `7982` has a [bundle compatibility audit](docs/CODEX_26.901.41600_AUDIT.md). Exact-build live staging remains pending while another task owns the sole staging instance; source support is not production installation or visual approval.
+Build `8576` is covered by the [release compatibility audit](docs/CODEX_26.903.71938_AUDIT.md).
 
 ## Install
 
@@ -54,7 +42,7 @@ npm run setup -- --yes --auto-repair
 
 The command is idempotent: if Workflow is already current it reports that state without launching or reinstalling anything. Recovery and unsupported states stop for inspection instead of being guessed through.
 
-After installation, Workflow checks packaged GitHub Releases at app startup and when the app becomes active, then no more often than every five minutes. Checks use ETags and exponential failure backoff capped at one hour. Only a verified staged release whose compatibility manifest matches the exact Codex version/build can surface the existing Workflow sidebar update pill; local checkout or commit drift is ignored. Clicking the pill applies a guarded external-runtime transaction, then relaunches Codex. Releases that change the embedded loader still require a reviewed guarded reapply.
+After installation, Workflow checks packaged GitHub Releases at app startup and when the app becomes active, then no more often than every five minutes. Checks use ETags and exponential failure backoff capped at one hour. Only a verified staged release whose compatibility manifest matches the exact Codex version/build can show Update Workflow in Workflow settings; local checkout or commit drift is ignored. Clicking Update Workflow applies a guarded external-runtime transaction, then relaunches Codex. Releases that change the embedded loader still require a reviewed guarded reapply.
 
 When `--auto-repair` was selected, the machine-local background agent can detect that Codex replaced the patched app. If no exact-build verified release exists, it records that state and shows one notification for the new build instead of failing silently or prompting repeatedly. When a compatible release exists, it waits for the app and bundle to become quiescent, runs the normal journaled installer once, verifies runtime hashes, ASAR integrity, and the ad-hoc signature, then relaunches once. An unknown build, pending recovery, failed attempt, or running app stops or defers safely; it never uses `--allow-version` or consumes the source backup.
 
@@ -101,7 +89,7 @@ npm run status
 
 Pull requests should include focused regression coverage and must not install into the contributor's live Codex app as part of automated tests. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
-Maintainers can prepare one isolated live-test clone with `npm run staging -- prepare --port <unique-port>`. The emitted manifest is required by the `launch`, `stop`, `restore`, and `cleanup` subcommands. The helper creates its own bundle identity, executable, home, temporary files, user data, `CODEX_HOME`, Workflow runtime, settings, logs, updates, backups, and transaction path under one short validated `/private/tmp` root. It launches with an allowlisted environment, proves the prepared fingerprint and loopback-only DevTools listener, disables Sparkle, installs a fail-closed staging updater, and never installs a LaunchAgent.
+Maintainers can prepare one isolated live-test clone with `npm run staging -- prepare --port <unique-port>`. The emitted manifest is required by the `launch`, `stop`, `restore`, and `cleanup` subcommands. The helper creates its own bundle identity, executable, shell startup directory, temporary files, user data, `CODEX_HOME`, Workflow runtime, settings, logs, updates, backups, and transaction path under one short validated `/private/tmp` root. It launches with an allowlisted environment, proves the prepared fingerprint and loopback-only DevTools listener, disables Sparkle, installs a fail-closed staging updater, and never installs a LaunchAgent.
 
 ## License
 

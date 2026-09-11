@@ -11,6 +11,7 @@ import {
   rmSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -185,7 +186,8 @@ export function assertInstalledFingerprint(manifest) {
 
 export function stagingEnvironment(layout, hostEnvironment = process.env) {
   const environment = {
-    HOME: layout.home,
+    // macOS Keychain and OAuth browser launches require the real account home.
+    HOME: userInfo().homedir,
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
     SHELL: "/bin/zsh",
     TMPDIR: layout.temporary,
@@ -238,14 +240,38 @@ function installStagingRuntime(layout, source) {
     version: patchVersion,
   });
   writeJsonAtomic(layout.settings, {
-    schemaVersion: 2,
-    focusedInterface: true,
-    hidePullRequests: true,
-    hidePetMenuItem: true,
-    hideInviteFriendMenuItem: true,
-    replaceHelpWithSettings: true,
-    hideComposerMicrophone: false,
-    hiddenSettingsPages: [],
+    "schemaVersion": 3,
+    "focusedInterface": true,
+    "hidePullRequests": true,
+    "hidePetMenuItem": true,
+    "hideInviteFriendMenuItem": true,
+    "replaceHelpWithSettings": true,
+    "hideComposerMicrophone": false,
+    "showUsageRemaining": true,
+    "usageRemainingLocation": "toolbar",
+    "hiddenSettingsPages": [],
+    "sidebarNavigation": {
+      "order": [
+        "pull-requests",
+        "scheduled",
+        "plugins",
+        "explore",
+        "settings-shortcut"
+      ],
+      "hidden": [],
+      "width": null,
+      "showRecentChats": true,
+      "settingsOrder": [],
+      "settingsHidden": [],
+      "accountOrder": [
+        "usage",
+        "pet",
+        "invite",
+        "settings",
+        "logout"
+      ],
+      "accountHidden": []
+    }
   });
   writeJsonAtomic(join(layout.workflowRoot, "update-config.json"), {
     schemaVersion: 1,

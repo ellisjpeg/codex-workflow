@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "workflowVersion": "0.5.19",
-  "codexVersion": "26.901.41600",
-  "codexBuild": "7982",
+  "workflowVersion": "0.5.24",
+  "codexVersion": "26.903.71938",
+  "codexBuild": "8576",
   "bundleIdentifier": "com.openai.codex",
   "packageName": "openai-codex-electron"
 }

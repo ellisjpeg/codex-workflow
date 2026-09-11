@@ -385,14 +385,38 @@ export function installRuntimeFiles({ autoRepairCodexUpdates } = {}) {
   const settingsPath = join(runtimeRoot, "settings.json");
   if (!existsSync(settingsPath)) {
     writeJsonAtomic(settingsPath, {
-      schemaVersion: 2,
-      focusedInterface: true,
-      hidePullRequests: true,
-      hidePetMenuItem: true,
-      hideInviteFriendMenuItem: true,
-      replaceHelpWithSettings: true,
-      hideComposerMicrophone: false,
-      hiddenSettingsPages: [],
+      "schemaVersion": 3,
+      "focusedInterface": true,
+      "hidePullRequests": true,
+      "hidePetMenuItem": true,
+      "hideInviteFriendMenuItem": true,
+      "replaceHelpWithSettings": true,
+      "hideComposerMicrophone": false,
+      "showUsageRemaining": true,
+      "usageRemainingLocation": "toolbar",
+      "hiddenSettingsPages": [],
+      "sidebarNavigation": {
+        "order": [
+          "pull-requests",
+          "scheduled",
+          "plugins",
+          "explore",
+          "settings-shortcut"
+        ],
+        "hidden": [],
+        "width": null,
+        "showRecentChats": true,
+        "settingsOrder": [],
+        "settingsHidden": [],
+        "accountOrder": [
+          "usage",
+          "pet",
+          "invite",
+          "settings",
+          "logout"
+        ],
+        "accountHidden": []
+      }
     });
   }
 }

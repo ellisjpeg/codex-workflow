@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { userInfo } from "node:os";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
@@ -218,7 +219,10 @@ test("staging launch environment is allowlisted and isolates shell startup files
       AWS_SECRET_ACCESS_KEY: "host-key",
       CODEX_SESSION_ID: "host-session",
     });
-    assert.equal(environment.HOME, layout.home);
+    assert.equal(environment.HOME, userInfo().homedir);
+    assert.notEqual(environment.HOME, hostHome);
+    assert.equal(environment.CODEX_HOME, layout.codexHome);
+    assert.equal(environment.CODEX_ELECTRON_USER_DATA_PATH, layout.userData);
     assert.equal(environment.ZDOTDIR, layout.home);
     assert.equal(environment.TMPDIR, layout.temporary);
     assert.equal(environment.XDG_CONFIG_HOME, join(layout.home, ".config"));
@@ -593,7 +597,7 @@ test("launch proves DevTools ownership and stop signals only the persisted proce
       },
     });
     assert.deepEqual(events, [`port:${fixturePort}`, "spawn"]);
-    assert.equal(launchEnvironment.HOME, manifest.home);
+    assert.equal(launchEnvironment.HOME, userInfo().homedir);
     assert.equal(launchEnvironment.ZDOTDIR, manifest.home);
     assert.equal(launchEnvironment.CODEX_HOME, manifest.codexHome);
     assert.equal(launchEnvironment.SSH_AUTH_SOCK, undefined);

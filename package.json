@@ -1,7 +1,7 @@
 {
   "name": "codex-workflow",
-  "version": "0.5.19",
-  "description": "A version-guarded, native-style Workflow extension for Codex Desktop on macOS.",
+  "version": "0.5.24",
+  "description": "Customise Codex to suit the way you work, with a native-feeling experience and local control.",
   "private": true,
   "type": "module",
   "license": "MIT",

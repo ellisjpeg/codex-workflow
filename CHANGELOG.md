@@ -2,6 +2,37 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.24 - 2026-09-11
+
+- Combine the Workflow home, Sidebar & navigation, Composer and Usage & indicators in one customisation experience.
+- Support Codex Desktop 26.903.71938 / build 8576 with audited native usage and sidebar-width bindings.
+- Show native remaining allowance in the toolbar or composer, with in-app placement controls and unavailable/reset handling.
+- Retain microphone visibility and exact-model Web Astra Pro labels without changing model selection, effort or permissions.
+- Keep guarded release updates available from Workflow settings and package only Workflow runtime/installer files.
+- Migrate existing visibility choices into the integrated navigation controls without overwriting newer preferences.
+- Keep pointer capture on the stationary navigation card so dragging rows does not cancel at the first swap.
+- Remove the Navigation items helper text and its spacing on all three tabs.
+
+## 0.5.23 - 2026-09-11
+
+- Match native Codex switches with blue checked tracks across the master, changed-only filter and recent-chat controls, including after saves and rollback.
+- Mark decorative switch tracks as hidden from accessibility tools, matching native controls.
+
+## 0.5.22 - 2026-09-11
+
+- Correct account-menu sizing to follow the measured visible sidebar width, replacing the mistaken fixed-width change.
+
+## 0.5.21 - 2026-09-11
+
+- Keep the account menu at its native default width while resizing the sidebar; disabling Workflow restores native sizing.
+
+## 0.5.20 - 2026-09-11
+
+- Add Sidebar & navigation to the pared-back Workflow homepage, using native settings controls.
+- Persist navigation ordering and visibility, keep New chat fixed, and hide the entire Recents section when requested.
+- Preview pointer reordering with native sortable timings, keyboard support, cancellation and failed-save rollback.
+- Read and set the actual native sidebar width through a bounded, main-frame-only IPC bridge, with an inline px unit.
+
 ## 0.5.19 - 2026-09-05
 
 - Guard Codex Desktop `26.901.41600` build `7982` after comparing its bootstrap, preload, settings routes, DOM contracts, CSS, and ASAR metadata with build `7868`.
