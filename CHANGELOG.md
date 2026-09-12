@@ -2,6 +2,15 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.35 - 2026-09-12
+
+- Add functional Conversation settings for message width, spacing, user-message style, tool activity and timestamps, with an interactive preview and section reset.
+- Keep plain-text prompts on the user side, put preview timestamps below tool details, and smoothly reveal copy/edit controls beside user timestamps with reduced-motion support.
+- Add Composer previews, compact model and reasoning labels, and native conversation/composer width controls.
+- Extend sidebar shortcuts and footer placement, improve remaining-usage presentation, and preserve navigation choices through schema-4 migration.
+- Keep staging Dock launches isolated from production with their own Chromium user-data path.
+- Verify the integrated update with 203 checks and focused live staging checks.
+
 ## 0.5.24 - 2026-09-11
 
 - Combine the Workflow home, Sidebar & navigation, Composer and Usage & indicators in one customisation experience.

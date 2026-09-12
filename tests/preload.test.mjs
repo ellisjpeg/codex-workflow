@@ -8,6 +8,257 @@ import { JSDOM } from "jsdom";
 const preloadSource = readFileSync(new URL("../parked/workflow-before-starter/preload.cjs", import.meta.url), "utf8");
 const starterSource = readFileSync(new URL("../runtime/preload.cjs", import.meta.url), "utf8");
 
+async function conversationHarness(options = {}) {
+  const h = await createHarness({source:starterSource,...options});
+  const thread = h.document.createElement('div');
+  thread.className = 'thread-scroll-container'; thread.setAttribute('data-app-action-timeline-scroll','');
+  thread.innerHTML = `<div data-thread-user-message-navigation-content="true" class="max-w-(--thread-content-max-width)" style="color: red !important"><div data-thread-find-target="conversation"><div data-content-search-turn-key="turn-1"><div data-local-conversation-user-anchor="true" data-content-search-unit-key="user-1"><div class="group"><div data-user-message-bubble="true">Prompt</div><div><div class="opacity-0"><span class="opacity-0">10:24</span><div class="turn-action-controls"><button>Copy message</button></div></div></div></div></div><div style="height:var(--conversation-item-gap, 16px)"></div><div><button class="max-w-full text-size-chat" aria-expanded="false"><span>Worked for 1s</span><svg class="icon-2xs"></svg></button><div data-native-activity hidden>Tool output</div></div><div data-local-conversation-final-assistant="true" data-content-search-unit-key="assistant-1"><div data-markdown-text-style="assistant-message">Answer</div><span data-assistant-message-sent-time="true" class="opacity-0">10:25</span></div></div></div></div>`;
+  h.document.body.append(thread);
+  const root = thread.firstElementChild;
+  const button = root.querySelector('button[aria-expanded]');
+  let clicks = 0;
+  button.addEventListener('click',()=>{clicks++;button.setAttribute('aria-expanded',String(button.getAttribute('aria-expanded')!=='true'));root.querySelector('[data-native-activity]').hidden=button.getAttribute('aria-expanded')!=='true';});
+  h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+  h.document.querySelector('[data-codex-workflow-section=conversation]').click();
+  await flush();
+  // The settings write triggers discovery just as the native route/composer mount does.
+  h.emitMutation(h.document.body,{addedNodes:[thread]});
+  h.document.querySelector('[data-settings-panel-slug=general-settings]').click();
+  h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+  await flush();
+  return {...h,thread,root,button,clicks:()=>clicks,choose:async(key,value)=>{
+    h.document.querySelector(`[aria-labelledby="codex-workflow-${key}-label"]`).click();
+    const item=[...h.document.querySelectorAll('[role=menuitemradio]')].find(n=>n.textContent===value);
+    assert.ok(item,value);item.click();await flush();
+  }};
+}
+
+test('Conversation preview and five settings use native tokens, preserve content and reset only their section',async()=>{
+  const h=await conversationHarness({initialSettings:{showUsageRemaining:false,composerWidth:'wide'}});
+  try {
+    const panel=h.document.querySelector('[data-codex-workflow-panel]');
+    assert.match(panel.textContent,/Make the sidebar more compact\./);
+    assert.match(panel.textContent,/Updated the spacing and kept the labels readable\./);
+    assert.doesNotMatch(panel.textContent,/Changes apply|Collapse long code/);
+    const range=panel.querySelector('input[type=range]');
+    range.value='880';range.dispatchEvent(new h.window.Event('input'));range.dispatchEvent(new h.window.Event('change'));await flush();
+    [...panel.querySelectorAll('button')].find(n=>n.textContent==='Relaxed').click();await flush();
+    await h.choose('userMessageStyle','Plain text');
+    await h.choose('toolActivity','Expanded');
+    panel.querySelector('[aria-labelledby=codex-workflow-showMessageTimestamps-label]').click();await flush();
+    assert.equal(h.button.getAttribute('aria-expanded'),'true');
+    const css=h.document.querySelector('[data-codex-workflow-conversation-style]').textContent;
+    assert.match(css,/min\(880px/);assert.match(css,/--conversation-item-gap: calc\(var\(--spacing\) \* 6\)/);
+    assert.match(css,/background: transparent/);assert.match(css,/--color-text-user-message: var\(--color-text\)/);assert.match(css,/data-assistant-message-sent-time/);
+    assert.equal(h.root.querySelector('[data-user-message-bubble]').textContent,'Prompt');
+    assert.equal(h.root.style.cssText,'color: red !important;');
+    assert.equal(panel.querySelectorAll('time').length,2);
+    const [userTime, assistantTime] = panel.querySelectorAll('time');
+    assert.equal(userTime.parentElement.firstElementChild.classList.contains('w-full'), false);
+    assert.equal(assistantTime.parentElement.lastElementChild, assistantTime);
+    assert.equal(assistantTime.previousElementSibling.querySelector('[aria-controls]').getAttribute('aria-expanded'), 'true');
+    assert.doesNotMatch(css, /padding: 0; max-width: 100%; width: 100%/);
+    assert.match(css, /interpolate-size: allow-keywords/);
+    assert.match(css, /inline-size: 0; opacity: 0; pointer-events: none/);
+    for(const n of panel.querySelectorAll('[aria-labelledby],[aria-describedby],[aria-controls]'))for(const a of ['aria-labelledby','aria-describedby','aria-controls'])for(const id of (n.getAttribute(a)||'').split(' ').filter(Boolean))assert.equal(h.document.querySelectorAll(`[id="${id}"]`).length,1);
+    [...panel.querySelectorAll('button')].find(n=>n.textContent==='Reset this section').click();await flush();
+    assert.equal(h.document.querySelector('[data-codex-workflow-conversation-style]'),null);
+    assert.equal(h.button.getAttribute('aria-expanded'),'false');
+    assert.equal(panel.querySelectorAll('time').length,0);
+    [...panel.querySelectorAll('button')].find(n=>n.textContent==='Workflow').click();
+    h.document.querySelector('[data-codex-workflow-section=composer]').click();
+    assert.equal([...h.document.querySelectorAll('[data-codex-workflow-panel] button')].find(n=>n.textContent==='Wide').getAttribute('aria-pressed'),'true');
+  }finally{h.dom.window.close();}
+});
+
+test('Conversation activity preserves manual disclosure choices and fails closed on ambiguous targets',async()=>{
+  const h=await conversationHarness();
+  try {
+    await h.choose('toolActivity','Expanded');
+    h.button.click();assert.equal(h.button.getAttribute('aria-expanded'),'false');
+    const before=h.clicks();h.emitMutation(h.root,{addedNodes:[h.button]});await flush();
+    assert.equal(h.clicks(),before,'background work must not override manual collapse');
+    const lookalike=h.button.cloneNode(true);h.button.parentElement.append(lookalike);
+    await h.choose('toolActivity','Summary');await h.choose('toolActivity','Expanded');
+    assert.equal(h.button.getAttribute('aria-expanded'),'false','ambiguous activity is not toggled');
+    lookalike.remove();
+    const duplicate=h.thread.cloneNode(true);h.document.body.append(duplicate);
+    await h.choose('userMessageStyle','Plain text');
+    assert.equal(h.document.querySelectorAll('[data-codex-workflow-conversation]').length,0);
+    duplicate.remove();
+    await h.choose('userMessageStyle','Bubble');
+    assert.equal(h.document.querySelectorAll('[data-codex-workflow-conversation]').length,1);
+  }finally{h.dom.window.close();}
+});
+
+test('Conversation failed save restores manual activity, preview and controls without concurrent writes',async()=>{
+  let reject;
+  const h=await conversationHarness({setSettings:()=>new Promise((_r,j)=>{reject=j;})});
+  try {
+    // Native manual expansion before changing the preference must survive a failed save.
+    h.button.click();
+    const panel=h.document.querySelector('[data-codex-workflow-panel]');
+    const switchButton=panel.querySelector('[aria-labelledby=codex-workflow-showMessageTimestamps-label]');
+    switchButton.click();assert.equal(switchButton.disabled,true);
+    switchButton.click();assert.equal(h.invokedChannels.filter(x=>x.endsWith(':set')).length,1);
+    reject(Error('disk full'));await flush();
+    assert.equal(switchButton.getAttribute('aria-checked'),'false');
+    assert.equal(switchButton.disabled,false);assert.match(panel.textContent,/Couldn’t save/);
+    assert.equal(h.button.getAttribute('aria-expanded'),'true');
+    assert.equal(panel.querySelectorAll('time').length,0);
+  }finally{h.dom.window.close();}
+});
+
+test('Conversation master switch restores native state and a failed disable preserves manual disclosure',async()=>{
+  let failure=false;
+  let settings={schemaVersion:4,focusedInterface:true,toolActivity:'expanded',showMessageTimestamps:true};
+  const h=await conversationHarness({initialSettings:settings,setSettings:async patch=>{if(failure)throw Error('disk full');settings={...settings,...patch};return settings;}});
+  try {
+    // Apply through a real settings update, then deliberately collapse the native disclosure.
+    await h.choose('userMessageStyle','Plain text');h.button.click();
+    const back=[...h.document.querySelectorAll('[data-codex-workflow-panel] button')].find(n=>n.textContent==='Workflow');back.click();
+    const master=h.document.querySelector('[aria-labelledby=codex-workflow-focusedInterface-label]');
+    failure=true;master.click();await flush();
+    assert.equal(master.getAttribute('aria-checked'),'true');
+    assert.equal(h.button.getAttribute('aria-expanded'),'false','failed master write preserves the manual collapse');
+    failure=false;master.click();await flush();
+    assert.equal(master.getAttribute('aria-checked'),'false');
+    assert.equal(h.root.hasAttribute('data-codex-workflow-conversation'),false);
+    assert.equal(h.document.querySelector('[data-codex-workflow-conversation-style]'),null);
+    assert.equal(h.button.getAttribute('aria-expanded'),'false');
+  }finally{h.dom.window.close();}
+});
+
+async function composerHarness(options = {}) {
+  const h = await createHarness({source:starterSource, ...options});
+  const old = h.document.querySelector('[role=presentation][data-composer-layout]');
+  const column = h.document.createElement('div');
+  column.className = 'thread-scroll-container';
+  column.setAttribute('data-app-action-timeline-scroll','');
+  column.style.setProperty('--thread-content-max-width','48rem','important');
+  column.innerHTML = `<div role="presentation" data-composer-layout="multiline"><div data-composer-attachments>PRIVATE ATTACHMENT</div><div contenteditable="true" id="draft" data-codex-composer="true">PRIVATE DRAFT</div><div data-composer-rows="stacked"><button data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium" id="picker"><span class="_ModelPickerTriggerModelText_90m7w_41">GPT-6 Astra</span><span class="_ModelPickerTriggerEffortLabel_90m7w_53">Medium</span></button><button aria-label="Dictate" aria-describedby="draft">Mic</button><button aria-label="Send">Send</button></div></div>`;
+  old.replaceWith(column);
+  h.emitMutation(h.document.body,{addedNodes:[column],removedNodes:[old]});
+  h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+  h.document.querySelector('[data-codex-workflow-section="composer"]').click();
+  await flush();
+  return {...h,column,choose:async(key,value)=>{
+    h.document.querySelector(`[aria-labelledby="codex-workflow-${key}-label"]`).click();
+    const item=[...h.document.querySelectorAll('[role=menuitemradio]')].find(n=>n.textContent.includes(value));
+    assert.ok(item, value); item.click(); await flush();
+  }};
+}
+
+test('Composer page clones native controls safely, saves labels and resets only its section', async () => {
+  const h=await composerHarness({initialSettings:{showUsageRemaining:false}});
+  try {
+    const panel=h.document.querySelector('[data-codex-workflow-panel]');
+    assert.doesNotMatch(panel.textContent,/Attachment button|Usage placement|Changes apply|PRIVATE/);
+    const back=[...panel.querySelectorAll('button')].find(n=>n.textContent==='Workflow');
+    assert.equal(back.classList.contains('bg-text/5'),false);
+    assert.equal(back.classList.contains('enabled:hover:bg-primary-ghost-hover'),true);
+    const preview=panel.querySelector('[data-codex-workflow-preview]');
+    assert.equal(preview.firstElementChild.inert,true);
+    assert.equal(preview.querySelector('[contenteditable]').getAttribute('contenteditable'),'false');
+    assert.equal(preview.querySelectorAll('[id], [aria-describedby], [data-codex-composer]').length,0);
+    assert.equal(h.column.querySelector('#draft').textContent,'PRIVATE DRAFT');
+    const mic=panel.querySelector('[role=switch]');
+    assert.equal(mic.getAttribute('aria-checked'),'true');
+    mic.click(); await flush();
+    assert.equal(mic.getAttribute('aria-checked'),'false');
+    assert.equal(h.column.querySelector('[aria-label=Dictate]').style.display,'none');
+    assert.equal(preview.querySelector('[aria-label=Dictate]').style.display,'none');
+    await h.choose('composerModelLabel','Short name');
+    await h.choose('composerReasoningLabel','Compact');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent,'Astra');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Med');
+    assert.match(preview.getAttribute('aria-label'),/Astra\. Med\./);
+    [...panel.querySelectorAll('button')].find(n=>n.textContent==='Wide').click(); await flush();
+    assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))');
+    [...panel.querySelectorAll('button')].find(n=>n.textContent==='Reset this section').click(); await flush();
+    assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'48rem');
+    assert.equal(h.column.style.getPropertyPriority('--thread-content-max-width'),'important');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent,'GPT-6 Astra');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Medium');
+    assert.equal(mic.getAttribute('aria-checked'),'true');
+    h.document.querySelector('[data-settings-panel-slug=general-settings]').click();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    [...h.document.querySelectorAll('[data-codex-workflow-panel] button')].find(n=>n.textContent==='Workflow')?.click();
+    h.document.querySelector('[data-codex-workflow-section=usage]').click();
+    assert.equal(h.document.querySelector('[aria-labelledby=codex-workflow-showUsageRemaining-label]').getAttribute('aria-checked'),'false');
+  } finally {h.dom.window.close();}
+});
+
+test('Composer label/width failure rolls back preview and real controls, rejecting concurrent writes', async () => {
+  let reject;
+  const h=await composerHarness({setSettings:()=>new Promise((_r,j)=>{reject=j;})});
+  try {
+    const panel=h.document.querySelector('[data-codex-workflow-panel]');
+    const wide=[...panel.querySelectorAll('button')].find(n=>n.textContent==='Wide');
+    wide.click();
+    assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))');
+    assert.equal(wide.disabled,true); wide.click();
+    assert.equal(h.invokedChannels.filter(n=>n.endsWith(':set')).length,1);
+    reject(Error('disk full')); await flush();
+    assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'48rem');
+    assert.match(panel.querySelector('[data-codex-workflow-preview]').getAttribute('aria-label'),/Default width/);
+    assert.match(panel.textContent,/Couldn’t save/);
+    assert.equal(wide.disabled,false);
+    const choice=h.choose('composerReasoningLabel','Compact'); await flush();
+    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Med');
+    reject(Error('disk full')); await choice; await flush();
+    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Medium');
+  } finally {h.dom.window.close();}
+});
+
+test('Composer presentation survives native text updates, ambiguity, remounts and settings navigation', async () => {
+  const h=await composerHarness({initialSettings:{composerModelLabel:'short',composerReasoningLabel:'compact',composerWidth:'wide'}});
+  try {
+    const root=h.column.firstElementChild;
+    const model=root.querySelector('._ModelPickerTriggerModelText_90m7w_41');
+    model.firstChild.data='GPT-5.6 Sol';
+    h.emitMutation(model); await flush();
+    assert.equal(model.textContent,'Sol');
+    const duplicate=root.querySelector('#picker').cloneNode(true);
+    root.append(duplicate); h.emitMutation(root,{addedNodes:[duplicate]}); await flush();
+    assert.equal(model.textContent,'GPT-5.6 Sol');
+    duplicate.remove(); h.emitMutation(root,{removedNodes:[duplicate]}); await flush();
+    assert.equal(model.textContent,'Sol');
+    const replacement=root.cloneNode(true);
+    replacement.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent='GPT-6 Astra';
+    root.replaceWith(replacement); h.emitMutation(h.column,{addedNodes:[replacement],removedNodes:[root]}); await flush();
+    assert.equal(replacement.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent,'Astra');
+    assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))');
+    h.document.querySelector('[data-settings-panel-slug=general-settings]').click();
+    assert.equal(h.document.querySelectorAll('[data-codex-workflow-preview]').length,0);
+    assert.equal(h.document.querySelectorAll('[data-codex-workflow-panel]').length,0);
+  } finally {h.dom.window.close();}
+});
+
+test('Composer preview retains a complete editor across partial native unmounts and cold Settings entry', async () => {
+  const h=await composerHarness();
+  try {
+    h.document.querySelector('[data-settings-panel-slug=general-settings]').click();
+    const editor=h.column.querySelector('[contenteditable]');
+    editor.remove();h.emitMutation(h.column.firstElementChild,{removedNodes:[editor]});await flush();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    const back=[...h.document.querySelectorAll('[data-codex-workflow-panel] button')].find(n=>n.textContent==='Workflow');
+    back?.click();
+    h.document.querySelector('[data-codex-workflow-section=composer]').click();
+    assert.ok(h.document.querySelector('[data-codex-workflow-preview] [contenteditable="false"]'));
+    assert.match(h.document.querySelector('[data-codex-workflow-preview]').getAttribute('aria-label'),/GPT-6 Astra/);
+  } finally {h.dom.window.close();}
+  const cold=await createHarness({source:starterSource});
+  try {
+    cold.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    cold.document.querySelector('[data-codex-workflow-section=composer]').click();
+    const preview=cold.document.querySelector('[data-codex-workflow-preview]');
+    assert.ok(preview.querySelector('[contenteditable="false"]'));
+    assert.equal(preview.querySelectorAll('[id]').length,0);
+    assert.match(preview.getAttribute('aria-label'),/GPT-6 Astra/);
+  } finally {cold.dom.window.close();}
+});
+
 test("all active Workflow switches use the native blue track, including refreshed recent-chat controls", async () => {
   const h = await createHarness({source:starterSource});
   try {
@@ -41,7 +292,7 @@ test("Workflow homepage exposes integrated sections and preserves unrelated navi
     assert.doesNotMatch(panel.textContent, /Active setup|Make Codex yours|Save as|Customise interface|Import setup|Export setup|Focused Interface|Hide microphone/iu);
     for (const row of panel.querySelectorAll("[data-codex-workflow-section]")) {
       assert.equal(row.disabled, false);
-      const available = ["sidebar", "composer", "usage"].includes(row.dataset.codexWorkflowSection);
+      const available = ["sidebar", "composer", "conversation", "usage"].includes(row.dataset.codexWorkflowSection);
       assert.equal(row.getAttribute("aria-disabled"), available ? null : "true");
       row.focus();
       assert.equal(h.document.activeElement, row);
@@ -172,7 +423,7 @@ async function flush() {
 }
 
 test("navigation hides and reorders native rows before paint, preserves New chat and reverses on disable", async () => {
-  const h = await createHarness({source:starterSource, realObservers:true, nativeSidebar:true});
+  const h = await createHarness({source:starterSource, realObservers:true, nativeSidebar:true, updateStatus:{available:false, installedVersion:"0.5.26"}});
   try {
     const aside = h.document.querySelector("aside");
     aside.innerHTML = `<div id="app-shell-sidebar"><nav><button class="sidebar-item"><span class="text-fade-truncate">New chat</span></button>
@@ -188,6 +439,21 @@ test("navigation hides and reorders native rows before paint, preserves New chat
     h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
     const page = () => h.document.querySelector('[data-codex-workflow-panel]');
     assert.match(page().textContent, /Sidebar & navigation/);
+    assert.equal(page().querySelector('[data-codex-workflow-version]').textContent, "v0.5.26");
+    assert.ok(page().querySelector('[data-codex-workflow-version]').classList.contains("text-secondary"));
+    for (const label of ["App sidebar", "Settings navigation", "Account menu", "App sidebar"]) {
+      [...page().querySelectorAll('[aria-label="Navigation area"] button')].find(button => button.textContent === label).click();
+      const tabs = [...page().querySelectorAll('[aria-label="Navigation area"] button')];
+      assert.equal(tabs.filter(button => button.getAttribute("aria-pressed") === "true").length, 1);
+      for (const button of tabs) {
+        assert.ok(button.classList.contains(button.textContent === label
+          ? "enabled:hover:bg-segmented-selected-hover" : "enabled:hover:bg-primary-ghost-hover"));
+        assert.equal(button.classList.contains("bg-segmented-selected"), button.textContent === label);
+        assert.ok(button.classList.contains("focus-visible:ring-2"));
+        assert.equal(button.classList.contains("bg-surface-secondary"), false);
+        assert.equal(button.classList.contains("text-default"), button.textContent === label);
+      }
+    }
     assert.doesNotMatch(page().textContent, /Show task previews|Changes apply to/);
     assert.equal(page().querySelector('[data-workflow-navigation-item="new-chat"] button').disabled, true);
     assert.equal(page().querySelector('[data-workflow-navigation-item="new-chat"] [aria-pressed]'), null);
@@ -219,7 +485,7 @@ test("navigation pointer sorting previews, cancels, settles and rolls failed sav
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
     h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
     const card = h.document.querySelector('[data-codex-workflow-navigation-rows]');
-    assert.equal(card.previousElementSibling.textContent, 'Navigation items');
+    assert.equal(card.previousElementSibling.querySelector('h2').textContent, 'Navigation items');
     let captured = null;
     for (const target of [card, ...card.querySelectorAll('button')]) {
       target.setPointerCapture = () => { captured = target; };
@@ -293,6 +559,72 @@ test("sidebar width displays its unit inside the field and rolls a failed native
     assert.equal(input.value, '317');
     assert.equal(input.disabled, false);
     assert.match(h.document.querySelector('[role="status"]').textContent, /Couldn’t resize/);
+  } finally { h.dom.window.close(); }
+});
+
+test("settings visibility applies before frames in fixed and floating sidebar mounts", async () => {
+  const h = await createHarness({source:starterSource, nativeSidebar:true,
+    initialSettings:{schemaVersion:4, sidebarNavigation:{settingsHidden:['voice']}}});
+  try {
+    const nav = h.document.querySelector('nav[aria-label="Settings"]');
+    const owner = nav.parentElement;
+    const voice = nav.querySelector('[data-settings-panel-slug="voice"]');
+    const display = () => h.window.getComputedStyle(voice).display;
+    assert.equal(display(), 'none');
+    // Native floating panels wrap the nav and do not carry the fixed-panel class.
+    owner.className = '';
+    owner.dataset.testid = 'app-shell-floating-left-panel';
+    const wrapper = h.document.createElement('div');
+    owner.append(wrapper); wrapper.append(nav);
+    assert.equal(display(), 'none');
+    voice.style.display = 'flex';
+    owner.hidden = true; owner.hidden = false;
+    assert.equal(display(), 'none');
+    assert.notEqual(h.window.getComputedStyle(nav.querySelector('[data-settings-panel-slug="appearance"]')).display, 'none');
+    owner.className = 'app-shell-left-panel';
+    delete owner.dataset.testid;
+    assert.equal(display(), 'none');
+    owner.setAttribute('role', 'dialog');
+    assert.equal(display(), 'flex');
+    owner.removeAttribute('role');
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]').click();
+    await flush();
+    assert.equal(display(), 'flex');
+  } finally { h.dom.window.close(); }
+});
+
+test("empty settings headings stay hidden before rows arrive and preserve unowned content", async () => {
+  const h = await createHarness({source:starterSource, nativeSidebar:true,
+    initialSettings:{schemaVersion:4, sidebarNavigation:{settingsHidden:['appshots']}}});
+  try {
+    const group = h.document.querySelector('#integrations');
+    const rows = group.lastElementChild;
+    const display = () => h.window.getComputedStyle(group).display;
+    rows.replaceChildren();
+    assert.equal(display(), 'none', 'empty heading must not paint while rows mount');
+    rows.innerHTML = '<button data-settings-panel-slug="appshots">Appshots</button>';
+    assert.equal(display(), 'none');
+    rows.firstElementChild.style.display = 'flex';
+    assert.equal(display(), 'none');
+    rows.insertAdjacentHTML('beforeend', '<button data-settings-panel-slug="computer-use">Computer use</button><button data-settings-panel-slug="chronicle">Computer history</button>');
+    assert.notEqual(display(), 'none', 'visible integrations remain available');
+    rows.lastElementChild.remove(); rows.lastElementChild.remove();
+    rows.firstElementChild.disabled = true;
+    assert.notEqual(display(), 'none', 'disabled native row is not owned');
+    rows.firstElementChild.disabled = false;
+    const extra = h.document.createElement('span'); extra.textContent = 'Extension settings';
+    rows.append(extra); assert.notEqual(display(), 'none');
+    extra.remove();
+    group.append(extra); assert.notEqual(display(), 'none'); extra.remove();
+    group.firstElementChild.append(h.document.createElement('button'));
+    assert.notEqual(display(), 'none', 'header action remains available');
+    group.firstElementChild.lastElementChild.remove();
+    assert.equal(display(), 'none');
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]').click();
+    await flush();
+    assert.notEqual(display(), 'none');
   } finally { h.dom.window.close(); }
 });
 
@@ -391,6 +723,166 @@ test("account customization survives portal replacement and skips hidden rows in
     replacement.querySelectorAll('[data-workflow-account-item]').forEach(node=>node.removeAttribute('data-workflow-account-item'));
     menu.replaceWith(replacement); menu = replacement; await flush();
     assert.equal(h.window.getComputedStyle(item('invite')).display,'none');
+  } finally { h.dom.window.close(); }
+});
+
+test("schema 4 renderer keeps removed Settings out of the list after restart", async () => {
+  const h = await createHarness({source:starterSource,initialSettings:{schemaVersion:4,sidebarNavigation:{order:['usage-shortcut','invalid','usage-shortcut'],hidden:['settings-shortcut']}}});
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    assert.deepEqual([...h.document.querySelectorAll('[data-workflow-navigation-item]')].map(x=>x.dataset.workflowNavigationItem),['new-chat','usage-shortcut','pull-requests','scheduled','plugins','explore']);
+    h.document.querySelector('[data-workflow-add-shortcut]').click();
+    assert.deepEqual([...h.document.querySelectorAll('#codex-workflow-add-shortcut-menu [role="menuitem"]')].map(x=>x.textContent),['Settings',"What's New",'Workflow','Profile']);
+    h.document.querySelector('[aria-label="Navigation area"] button[aria-pressed="false"]').click();
+    assert.equal(h.document.querySelector('#codex-workflow-add-shortcut-menu'),null);
+    assert.equal(h.document.querySelector('[data-workflow-add-shortcut]'),null);
+  } finally { h.dom.window.close(); }
+});
+
+test("shortcut picker adds, reorders, hides and removes shared rows with keyboard and rollback", async () => {
+  let reject = false;
+  let saved = {schemaVersion:4, focusedInterface:true};
+  const h = await createHarness({source:starterSource, realObservers:true, setSettings: patch => {
+    if (reject) return Promise.reject(new Error("disk full"));
+    saved = {...saved, ...patch}; return Promise.resolve(saved);
+  }});
+  try {
+    const aside = h.document.querySelector("aside");
+    const help = aside.querySelector('[aria-label="Open help menu"]');
+    const host = h.document.createElement("div");
+    host.id = "app-shell-sidebar";
+    host.innerHTML = `<button class="sidebar-item"><svg></svg><span class="text-fade-truncate">New chat</span></button><div>${["Pull requests","Scheduled","Plugins","Explore"].map(label => `<button class="sidebar-item"><svg></svg><span class="text-fade-truncate">${label}</span></button>`).join("")}</div>`;
+    aside.replaceChildren(host,help);
+    h.window.dispatchEvent(new h.window.Event("resize")); await flush();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    let add = h.document.querySelector('[data-workflow-add-shortcut]');
+    const row = id => h.document.querySelector(`[data-workflow-navigation-item="${id}-shortcut"]`);
+    const menu = () => h.document.querySelector('#codex-workflow-add-shortcut-menu');
+    const open = () => { add.click(); return menu(); };
+    assert.deepEqual([...open().querySelectorAll('[role="menuitem"]')].map(x=>x.textContent),["Usage","What's New","Workflow","Profile"]);
+    assert.equal(menu().querySelectorAll('svg').length,4);
+    menu().dispatchEvent(new h.window.KeyboardEvent("keydown",{key:"End",bubbles:true}));
+    assert.equal(h.document.activeElement.textContent,"Profile");
+    menu().dispatchEvent(new h.window.KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
+    assert.equal(h.document.activeElement,add); assert.equal(menu(),null);
+    for (const id of ["usage","whats-new","workflow","profile"]) {
+      open().querySelector(`[data-value="${id}-shortcut"]`).click(); await flush();
+      assert.ok(row(id)); assert.ok(row(id).querySelector('svg'));
+    }
+    assert.equal(add.disabled,true);
+    assert.equal(aside.querySelectorAll('[data-workflow-shortcut]').length,5);
+    const messages=[]; h.window.addEventListener('message',e=>messages.push(e.data));
+    for(const id of ["usage","profile"]) aside.querySelector(`[data-workflow-native-nav="${id}-shortcut"]`).click();
+    assert.deepEqual(messages.map(x=>x.path),['/settings/usage','/settings/profile']);
+    assert.equal(h.document.querySelector('[data-codex-workflow-panel]'),null);
+    aside.querySelector('[data-workflow-native-nav="workflow-shortcut"]').click();
+    assert.equal(h.document.querySelector('[data-codex-workflow-panel] h1').textContent,'Workflow');
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    add = h.document.querySelector('[data-workflow-add-shortcut]');
+    const news = aside.querySelector('[data-workflow-native-nav="whats-new-shortcut"]');
+    let anchorTop = 200;
+    news.getBoundingClientRect = () => ({left:8,right:248,top:anchorTop,bottom:anchorTop+32,width:240,height:32});
+    const popup = h.document.createElement('div');
+    popup.setAttribute('role','menu'); popup.setAttribute('aria-labelledby',help.id);
+    Object.defineProperty(popup,'scrollHeight',{value:160});
+    popup.getBoundingClientRect = () => {
+      const [x=0,y=0] = popup.style.translate.split(' ').map(value=>parseFloat(value)||0);
+      return {left:8+x,right:248+x,top:400+y,bottom:560+y,width:240,height:160};
+    };
+    let helpOpened=0; help.addEventListener('keydown',event=>{
+      if(event.key==='ArrowDown' && event.cancelable && event.composed) { helpOpened++; h.document.body.append(popup); }
+    });
+    popup.addEventListener('keydown', event => { if (event.key === 'Escape') popup.remove(); });
+    news.click(); assert.equal(helpOpened,1);
+    assert.equal(help.style.display, 'none');
+    assert.equal(aside.querySelector('[data-workflow-footer-shortcut]').getAttribute('aria-expanded'), 'false');
+    assert.equal(news.getAttribute('aria-expanded'), 'true');
+    assert.equal(popup.getBoundingClientRect().top,236);
+    assert.equal(popup.style.width,'240px');
+    anchorTop=700; h.window.dispatchEvent(new h.window.Event('resize'));
+    assert.equal(popup.getBoundingClientRect().bottom,696);
+    popup.remove(); await flush();
+    assert.equal(popup.style.translate,''); assert.equal(popup.style.width,'');
+    assert.equal(popup.hasAttribute('data-workflow-news-popup'),false);
+    news.click(); assert.equal(helpOpened,2);
+    news.dispatchEvent(new h.window.MouseEvent('pointerdown', {bubbles:true,cancelable:true}));
+    news.click(); assert.equal(helpOpened,2); assert.equal(popup.isConnected,false);
+    assert.equal(news.getAttribute('aria-expanded'), 'false');
+    row('workflow').querySelector('button').dispatchEvent(new h.window.KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true})); await flush();
+    assert.ok(saved.sidebarNavigation.order.indexOf('workflow-shortcut') < saved.sidebarNavigation.order.indexOf('whats-new-shortcut'));
+    row('usage').querySelector('[aria-pressed]').click(); await flush();
+    assert.ok(saved.sidebarNavigation.hidden.includes('usage-shortcut'));
+    const controls=row('usage').lastElementChild;
+    assert.equal(controls.querySelectorAll('button')[0].className,controls.querySelectorAll('button')[1].className);
+    assert.equal(controls.lastElementChild.getAttribute('aria-label'), 'Show Usage');
+    assert.equal(controls.querySelector('button').getAttribute('aria-label'), 'Remove Usage shortcut');
+    reject=true; row('usage').querySelector('[aria-label="Remove Usage shortcut"]').click(); await flush();
+    assert.ok(row('usage')); assert.match(h.document.querySelector('[role="status"]').textContent,/Couldn’t save/);
+    reject=false; row('usage').querySelector('[aria-label="Remove Usage shortcut"]').click(); await flush();
+    assert.equal(row('usage'),null); assert.equal(add.disabled,false);
+    assert.equal(h.document.activeElement,add);
+    assert.ok(!saved.sidebarNavigation.hidden.includes('usage-shortcut'));
+    assert.deepEqual([...open().querySelectorAll('[role="menuitem"]')].map(x=>x.textContent),['Usage']);
+    h.window.dispatchEvent(new h.window.Event('resize')); assert.equal(menu(),null);
+    const before=aside.querySelectorAll('[data-workflow-shortcut]').length;
+    host.replaceWith(host.cloneNode(true)); await flush();
+    assert.equal(aside.querySelectorAll('[data-workflow-shortcut]').length,before);
+    row('settings').querySelector('[aria-label="Remove Settings shortcut"]').click(); await flush();
+    assert.equal(row('settings'),null);
+    assert.ok(!saved.sidebarNavigation.order.includes('settings-shortcut'));
+    [...h.document.querySelectorAll('button')].find(button=>button.textContent==='Account menu').click();
+    const footer = h.document.querySelector('[aria-label="Footer shortcut"]');
+    assert.ok(footer); assert.equal(footer.closest('[data-codex-workflow-navigation-rows]'),null);
+    footer.click();
+    const footerMenu = () => h.document.querySelector('#codex-workflow-footer-shortcut-menu');
+    assert.equal(footerMenu().querySelectorAll('[role="menuitemradio"]').length,5);
+    footerMenu().querySelector('[data-value="usage-shortcut"]').click(); await flush();
+    assert.equal(saved.sidebarNavigation.footerShortcut,'usage-shortcut');
+    assert.match(footer.textContent,/Usage/);
+    const footerAction=aside.querySelector('[data-workflow-footer-shortcut]');
+    footerAction.click(); assert.equal(messages.at(-1).path,'/settings/usage');
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    const footerAgain=h.document.querySelector('[aria-label="Footer shortcut"]');
+    reject=true; footerAgain.click(); footerMenu().querySelector('[data-value="profile-shortcut"]').click(); await flush();
+    assert.match(footerAgain.textContent,/Usage/);
+    assert.equal(footerAction.getAttribute('aria-label'),'Usage unavailable. Open Usage settings');
+    reject=false;
+    footerAgain.click(); footerMenu().querySelector('[data-value="profile-shortcut"]').click(); await flush();
+    assert.ok(footerAction.querySelector('svg'));
+    assert.equal(footerAction.className, help.className);
+    footerAction.click(); assert.equal(messages.at(-1).path,'/settings/profile');
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[aria-label="Footer shortcut"]').click();
+    footerMenu().querySelector('[data-value="workflow-shortcut"]').click(); await flush();
+    footerAction.click();
+    assert.equal(h.document.querySelector('[data-codex-workflow-panel] h1').textContent,'Workflow');
+    assert.equal(h.document.querySelectorAll('[data-codex-workflow-panel]').length,1);
+  } finally { h.dom.window.close(); }
+});
+
+test("Workflow footer waits for the settings shell and General migrates without duplicate rows", async () => {
+  const h = await createHarness({source:starterSource,realObservers:true,initialSettings:{schemaVersion:4,focusedInterface:true,
+    sidebarNavigation:{order:['general-shortcut','settings-shortcut','workflow-shortcut','profile-shortcut'],hidden:['general-shortcut'],footerShortcut:'workflow-shortcut'}}});
+  try {
+    const host=h.document.createElement('div'); host.id='app-shell-sidebar';
+    h.document.querySelector('aside').prepend(host);
+    h.window.dispatchEvent(new h.window.Event('resize')); await flush();
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
+    assert.equal(h.document.querySelectorAll('[data-workflow-navigation-item="settings-shortcut"]').length,1);
+    assert.equal(h.document.querySelector('[data-workflow-navigation-item="general-shortcut"]'),null);
+    assert.equal(h.document.querySelector('[data-workflow-navigation-item="settings-shortcut"]').dataset.workflowNavigationHidden,'true');
+    const shell=h.document.querySelector('#settings-shell');
+    shell.remove(); await flush();
+    const messages=[]; h.window.addEventListener('message',e=>messages.push(e.data));
+    h.document.querySelector('[data-workflow-footer-shortcut]').click();
+    assert.equal(messages.at(-1).path,'/settings/general-settings');
+    h.document.body.append(shell); await flush();
+    assert.equal(h.document.querySelector('[data-codex-workflow-panel] h1').textContent,'Workflow');
+    assert.equal(h.document.querySelectorAll('[data-codex-workflow-panel]').length,1);
   } finally { h.dom.window.close(); }
 });
 
@@ -510,7 +1002,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
         return Promise.resolve(true);
       }
       if (setSettings) return setSettings(patch);
-      persistedSettings = { ...persistedSettings, ...patch, schemaVersion: 2 };
+      persistedSettings = { ...persistedSettings, ...patch, schemaVersion: source === starterSource ? 4 : 2 };
       return Promise.resolve({ ...persistedSettings });
     },
     on() {},

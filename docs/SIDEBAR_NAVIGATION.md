@@ -1,5 +1,129 @@
 # Sidebar & navigation, 11 September 2026
 
+## Workflow and Profile shortcuts, 0.5.29
+
+Both App sidebar > Add shortcut and Account menu > Footer shortcut offer
+Settings, Usage, What's New, Workflow and Profile. General is removed from
+both catalogues; existing General selections migrate to Settings with deduped
+membership and preserved visibility. The schema 4 object shape is unchanged.
+Workflow opens its overview through the existing native Settings shell and
+bounded discovery lifecycle; Profile uses the native `/settings/profile` route.
+Both normalisers accept the new IDs and continue using atomic persistence.
+
+Native evidence: installed Codex 26.903.71938 / 8576, settings-page-10f72f72ae31.js,
+and live staging Profile/Workflow navigation. Profile uses the exact native
+20px profile glyph; Workflow reuses its settings glyph.
+The live chat header measured equal 6px button gaps, but the usage text button
+had 8px horizontal padding. Its existing native `px-1` utility now gives 4px;
+Share retains 8px padding and its exact position, and all 6px gaps are unchanged.
+Composer padding is unchanged.
+
+Verification: all 189 `npm run check` tests pass on the full rerun. The first
+run had one unrelated Web Astra observer timing failure; its isolated rerun
+and subsequent full run both passed without changing that code or test.
+Regression checks cover both pickers, migration/deduplication, persistence,
+failed-save rollback, native Profile routing and delayed Workflow shell mount.
+Staging was restarted through `output/refresh-staging.mjs` at
+`/private/tmp/codex-workflow-staging-uDKpBB`, PID 93795, DevTools 9444, with the
+manifest's isolated bundle identity, user data and Workflow runtime. Live clicks
+verified all four sidebar/footer destinations, General's removal, and 0.5.29.
+Dark/light and 100%/110% zoom were visually checked; System theme and 100% zoom
+were restored. A separate narrow-window/RTL check was not performed.
+The guarded runtime-only dry-run passed. The explicitly authorised runtime-only
+installer then installed 0.5.29 with no warnings. Fresh status is healthy with
+source/loader/runtime current, valid signature, matching integrity, no pending
+transaction and the source backup present. Production settings and bundle
+integrity are unchanged. Evidence is in `output/shortcut-0529-{install,after-install}.json`.
+Official Codex stays running; the user will restart it to load the new runtime.
+
+## Shortcuts and footer action, staging 0.5.28
+
+Production promotion: after Jayden explicitly approved installation, the guarded
+runtime-only installer installed 0.5.28 with no warnings. Fresh status reports
+ok=true, source/loader/runtime current, valid signature and ASAR integrity, no
+pending transaction and recommendedAction=none. Existing production settings
+were preserved. Codex was not interrupted; the installed runtime requires the
+user's next restart before the running app uses it. Evidence: local
+`output/promotion-before.json` and `output/promotion-after.json`.
+
+Settings, Usage, What's New and General share the App sidebar's existing order
+and visibility list. Add shortcut offers only absent entries. Removing an entry
+also clears its hidden state, and schema 4 preserves removal across restart.
+Older preferences retain their existing Settings shortcut. Both normalisers
+validate membership; saves use the existing atomic writer and optimistic rollback.
+Shortcut rows place delete before the rightmost eye, keeping built-in eye padding.
+
+Account menu has a separate Footer shortcut card: “Choose the shortcut beside
+your account.” Its native-style dropdown selects one of the same four actions,
+independently of sidebar membership. The default is What's New. The footer uses
+a scrubbed native button clone; its React-owned help trigger remains available
+to open the original news menu, but is hidden while the clone owns presentation.
+Disabling customisations or remounting restores the native trigger.
+
+The news popup retains native contents and behaviour. Its visible owner controls
+expanded state; repeat click sends native Escape instead of reopening. A scoped
+capture handler keeps the owner clickable through the native modal pointer guard.
+Sidebar popups align below their row and flip when needed; footer popups align
+above, using measured native sidebar-row width. Position styles, observers and
+pointer handling are released on dismissal or unmount. No new animation or colour
+system is introduced. Icons come from installed Settings, Gauge, CircleHelp,
+Plus and Trash2 assets. Controls share the existing usage selector/menu primitives.
+
+Verification on 26.903.71938 / 8576:
+
+- Focused main/renderer/usage checks: 79 passed. Full check: 187/188 passed;
+  the unrelated Web Astra composer observer's 100ms timing assertion failed
+  under concurrent load. Its unchanged file passed both tests on isolated rerun.
+- Regression checks cover migration, atomic restart persistence, membership,
+  action order, menu keyboard controls, repeat toggle, popup reposition/cleanup,
+  footer independence, routing and rejected-save rollback.
+- Staging live: repeat click opens/closes native news; footer Usage survives
+  restart and opens native Usage. Navigation and footer cards were visually
+  checked in light/dark and at 1200px/920px window widths. System theme restored.
+- Native menu accessibility contents were verified; computer-use screenshots
+  are unavailable while native menus are open. Popup geometry is covered by
+  fixtures, but pixel inspection of the open popup remains a user-review gate.
+- Dry-run passed with no warnings; signature and ASAR integrity remain valid.
+  Production remains 0.5.27; candidate status correctly reports runtime drift.
+  Only `/private/tmp/codex-workflow-staging-uDKpBB` received the candidate runtime.
+
+This supersedes the earlier deferral of general shortcut creation below.
+
+## Native segmented states, 0.5.27
+
+Supersedes the two incorrect interpretations below. The user wants native hover
+and selection feedback, not their removal. Current installed
+`segmented-toggle-9de0b8eb86ad.js` defaults to `segmentedSelected` and `ghost`;
+`app-initial-a9514281e192.js` defines their theme-aware background/hover tokens.
+The three navigation buttons now use those exact colour variants, preserving
+their geometry, keyboard focus and aria-pressed. Regression checks cover every
+tab becoming selected and retaining the appropriate hover class. Restarted
+staging 0.5.27 visually shows selected App sidebar alongside hovered inactive
+Account menu in both dark and light themes; pointer and keyboard selection work.
+
+## Selected background and version footer, 0.5.26
+
+The user's follow-up screenshot identified the selected pill, which 0.5.25
+preserved. Removed that background too, keeping selected text and aria-pressed.
+Home and navigation now show the installed runtime version opposite Reset,
+using existing update-status IPC and native secondary text. Save/error messages
+remain separate. Restarted staging and visually checked the label and tabs in
+light and dark appearance; the version reads v0.5.26 in both.
+
+## Hover correction, 0.5.25
+
+Removed the inactive navigation tabs' explicit `hover:bg-surface-secondary`.
+Selected backgrounds and keyboard focus rings remain intact. All three tabs
+are covered across selection changes by the renderer regression. This follows
+the design bible's native-state requirement; the installed 26.903.71938 / 8576
+segmented controls and native General/Appearance pages were inspected.
+All 185 checks passed. The isolated staging app at
+`/private/tmp/codex-workflow-staging-uDKpBB` was restarted and visually checked
+in dark and light appearance, including an inactive tab under the pointer,
+tab switching, keyboard focus and native-page return. System theme was restored.
+Production received the same external runtime without a restart; Jayden owns
+the production restart and visual check.
+
 Continuation of the pared-back starter screen. The three supplied images are
 visual references; the user's written exclusions and the installed native UI
 take precedence. General shortcut creation is deferred for a later brainstorm.

@@ -9,6 +9,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { userInfo } from "node:os";
@@ -44,6 +45,7 @@ export const stagingBaseRoot = "/private/tmp";
 export const stagingBundleIdentifier = "com.openai.codex.workflow-staging.v2690131953";
 export const stagingName = "Codex Workflow Staging";
 export const stagingExecutableName = "CodexWorkflowStaging-2690131953";
+export const stagingLauncherName = "launch-workflow-staging";
 export const stagingUnixSocketPathMaxBytes = 103;
 export const stagingUpdaterPath = join(sourceRoot, "scripts", "staging-updater-disabled.cjs");
 
@@ -302,6 +304,19 @@ function installStagingRuntime(layout, source) {
   });
 }
 
+export function configureStagingLaunchEnvironment(layout) {
+  assertStagingLayoutManaged(layout);
+  const launcher = join(layout.app, 'Contents', 'MacOS', stagingLauncherName);
+  assertManagedStagingPath(layout.root, launcher, 'staging launcher');
+  const quote = value => `'${value.replaceAll("'", "'\"'\"'")}'`;
+  const args = Object.entries(stagingEnvironment(layout, {})).map(([key,value]) => `${key}=${value}`);
+  // Chromium's singleton check runs before Electron reads environment paths.
+  args.push(layout.executable, `--user-data-dir=${layout.userData}`);
+  writeFileSync(launcher, `#!/bin/sh\nexec /usr/bin/env -i ${args.map(quote).join(' ')} "$@"\n`, {mode:0o755});
+  removePlistKey('LSEnvironment', layout.plist);
+  setPlistString('CFBundleExecutable', stagingLauncherName, layout.plist);
+}
+
 function verifyStagingApp(layout, source, {
   restored = false,
   signatureCheck = signatureIsValid,
@@ -327,7 +342,7 @@ function verifyStagingApp(layout, source, {
     bundleIdentifier: plistValue("CFBundleIdentifier", layout.plist) === stagingBundleIdentifier,
     bundleName: plistValue("CFBundleName", layout.plist) === stagingName,
     displayName: plistValue("CFBundleDisplayName", layout.plist) === stagingName,
-    executableName: plistValue("CFBundleExecutable", layout.plist) === stagingExecutableName,
+    executableName: plistValue("CFBundleExecutable", layout.plist) === stagingLauncherName,
     executablePresent: existsSync(layout.executable),
     urlHandlersAbsent: !plistHasKey("CFBundleURLTypes", layout.plist),
     documentHandlersAbsent: !plistHasKey("CFBundleDocumentTypes", layout.plist),
@@ -440,6 +455,7 @@ export async function prepareStaging(devToolsPort, hooks = {}) {
     setPlistString("CFBundleExecutable", stagingExecutableName, layout.plist);
     removePlistKey("CFBundleURLTypes", layout.plist);
     removePlistKey("CFBundleDocumentTypes", layout.plist);
+    configureStagingLaunchEnvironment(layout);
 
     assertStagingLayoutManaged(layout);
     mkdirSync(layout.sourceBackup, { recursive: true, mode: 0o700 });

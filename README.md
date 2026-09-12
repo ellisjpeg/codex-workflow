@@ -14,6 +14,8 @@ See the [changelog](CHANGELOG.md) for release-specific changes and the compatibi
 ## Compatibility
 
 Current sidebar evidence is recorded in [Sidebar & navigation](docs/SIDEBAR_NAVIGATION.md).
+Composer controls, native preview, width behaviour and staging verification are documented in [Composer settings](docs/COMPOSER_SETTINGS.md).
+Conversation width, spacing, message styles, activity and timestamps are documented in [Conversation settings](docs/CONVERSATION_SETTINGS.md).
 
 - macOS
 - Codex Desktop `26.903.71938` (build `8576`)

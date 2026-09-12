@@ -353,6 +353,21 @@ test("prepare clones once, builds only the verified clone, and installs a fail-c
     assert.notEqual(fileHash(manifest.asar), sourceHash);
     assert.equal(fileHash(fixture.asar), sourceHash);
     assert.equal(fileHash(fixture.plist), sourcePlistHash);
+    const launcherName = spawnSync('/usr/libexec/PlistBuddy',
+      ['-c', 'Print :CFBundleExecutable', manifest.plist], {encoding:'utf8'}).stdout.trim();
+    const launcher = readFileSync(join(manifest.app,'Contents','MacOS',launcherName),'utf8');
+    assert.match(launcher, /exec \/usr\/bin\/env -i/);
+    assert.ok(launcher.includes(`'--user-data-dir=${manifest.userData}'`));
+    for(const [key,value] of Object.entries(stagingEnvironment(manifest, {}))) assert.ok(launcher.includes(`'${key}=${value}'`));
+    const binary = readFileSync(manifest.executable);
+    try {
+      writeFileSync(manifest.executable, '#!/bin/sh\n/usr/bin/printf "%s\\n" "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH" "$@"\n');
+      const launched = spawnSync(join(manifest.app,'Contents','MacOS',launcherName), ['--test-argument'], {
+        encoding:'utf8', env:{CODEX_HOME:'/wrong/profile',CODEX_ELECTRON_USER_DATA_PATH:'/wrong/user-data'},
+      });
+      assert.equal(launched.status,0);
+      assert.deepEqual(launched.stdout.trim().split('\n'), [manifest.codexHome,manifest.userData,`--user-data-dir=${manifest.userData}`,'--test-argument']);
+    } finally { writeFileSync(manifest.executable,binary); }
     assert.equal(fileHash(join(manifest.sourceBackup, "app.asar")), sourceHash);
     assert.deepEqual(manifest.sourceEvidence, {
       kind: "live-stock-app",

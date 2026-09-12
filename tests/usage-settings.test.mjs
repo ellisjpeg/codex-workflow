@@ -44,11 +44,44 @@ function temporaryRoot(t) {
   return root;
 }
 
-test("usage defaults remain schema 3 and reject malformed values", (t) => {
+test("conversation preferences validate and survive atomic save/reopen without changing Composer", t => {
+  const root = temporaryRoot(t);
+  const runtime = loadRuntime(root);
+  runtime.set({composerWidth:"wide",showUsageRemaining:false});
+  const choices = {messageSpacing:["default","relaxed"],userMessageStyle:["bubble","plain"],toolActivity:["summary","expanded"]};
+  for (const [key,[fallback,value]] of Object.entries(choices)) {
+    for (const invalid of [null,true,4,[],{},"unknown"]) assert.equal(runtime.set({[key]:invalid})[key],fallback);
+    assert.equal(runtime.set({[key]:value})[key],value);
+    assert.equal(loadRuntime(root).get()[key],value);
+  }
+  for (const invalid of [null,true,"880",[],{}]) assert.equal(runtime.set({conversationWidth:invalid}).conversationWidth,null);
+  for (const [value,expected] of [[1,480],[9999,1440],[883,880],[880,880]]) assert.equal(runtime.set({conversationWidth:value}).conversationWidth,expected);
+  for (const value of [null,1,"true",[],{}]) assert.equal(runtime.set({showMessageTimestamps:value}).showMessageTimestamps,false);
+  runtime.set({showMessageTimestamps:true});
+  assert.equal(loadRuntime(root).get().showMessageTimestamps,true);
+  assert.equal(runtime.get().composerWidth,"wide");
+  assert.equal(runtime.get().showUsageRemaining,false);
+});
+
+test("composer preferences validate, preserve unrelated settings and survive reopening", t => {
+  const root = temporaryRoot(t);
+  const runtime = loadRuntime(root);
+  const choices = {composerModelLabel:["full","short"], composerReasoningLabel:["full","compact"], composerWidth:["default","wide"]};
+  runtime.set({showUsageRemaining:false, hideComposerMicrophone:true});
+  for (const [key,[fallback,value]] of Object.entries(choices)) {
+    for (const invalid of [null, true, 4, [], {}, "unknown"]) assert.equal(runtime.set({[key]:invalid})[key], fallback);
+    assert.equal(runtime.set({[key]:value})[key], value);
+    assert.equal(loadRuntime(root).get()[key], value);
+  }
+  assert.equal(runtime.get().showUsageRemaining, false);
+  assert.equal(runtime.get().hideComposerMicrophone, true);
+});
+
+test("usage defaults follow schema 4 and reject malformed values", (t) => {
   const root = temporaryRoot(t);
   const runtime = loadRuntime(root);
   const defaults = runtime.get();
-  assert.equal(defaults.schemaVersion, 3);
+  assert.equal(defaults.schemaVersion, 4);
   assert.equal(defaults.showUsageRemaining, true);
   assert.equal(defaults.usageRemainingLocation, "toolbar");
   const settingsPath = path.join(root, "settings.json");

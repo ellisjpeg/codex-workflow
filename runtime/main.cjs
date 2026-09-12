@@ -24,13 +24,16 @@ const updateWatchers = [];
 let updateLaunchInFlight = false;
 let updateCheckInFlight = false;
 const defaults = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   focusedInterface: true,
   hidePullRequests: true,
   hidePetMenuItem: true,
   hideInviteFriendMenuItem: true,
   replaceHelpWithSettings: true,
   hideComposerMicrophone: false,
+  composerModelLabel: "full", composerReasoningLabel: "full", composerWidth: "default",
+  conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble",
+  toolActivity: "summary", showMessageTimestamps: false,
   showUsageRemaining: true, usageRemainingLocation: "toolbar",
   hiddenSettingsPages: [],
   sidebarNavigation: {
@@ -38,6 +41,7 @@ const defaults = {
     hidden: [],
     width: null,
     showRecentChats: true,
+    footerShortcut: "whats-new-shortcut",
     settingsOrder: [],
     settingsHidden: [],
     accountOrder: ["usage", "pet", "invite", "settings", "logout"],
@@ -72,9 +76,13 @@ function normaliseSettings(value) {
       settingsHidden: value.hiddenSettingsPages,
       accountHidden: [value.hidePetMenuItem === true && "pet", value.hideInviteFriendMenuItem === true && "invite"].filter(Boolean),
     } : {};
-  const sidebarOrder = sidebarNavigation.order;
+  const builtins = sidebarDefaults.order.filter(id => id !== "settings-shortcut");
+  const allowed = [...sidebarDefaults.order, "usage-shortcut", "whats-new-shortcut", "workflow-shortcut", "profile-shortcut"];
+  const sidebarOrder = Array.isArray(sidebarNavigation.order) ? sidebarNavigation.order.slice(0, 100) : sidebarDefaults.order;
+  const order = [...new Set([...sidebarOrder, ...(value?.schemaVersion >= 4 ? builtins : sidebarDefaults.order)]
+    .map(id => id === "general-shortcut" ? "settings-shortcut" : id).filter(id => allowed.includes(id)))];
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     focusedInterface: typeof value?.focusedInterface === "boolean"
       ? value.focusedInterface
       : legacyFocusedInterface,
@@ -94,17 +102,27 @@ function normaliseSettings(value) {
       ? value.hideComposerMicrophone
       : defaults.hideComposerMicrophone,
     showUsageRemaining: typeof value?.showUsageRemaining === "boolean" ? value.showUsageRemaining : defaults.showUsageRemaining,
+    composerModelLabel: value?.composerModelLabel === "short" ? "short" : "full",
+    composerReasoningLabel: value?.composerReasoningLabel === "compact" ? "compact" : "full",
+    composerWidth: value?.composerWidth === "wide" ? "wide" : "default",
+    conversationWidth: typeof value?.conversationWidth === "number" && Number.isFinite(value.conversationWidth)
+      ? Math.min(1440, Math.max(480, Math.round(value.conversationWidth / 8) * 8)) : null,
+    messageSpacing: ["compact", "relaxed"].includes(value?.messageSpacing) ? value.messageSpacing : "default",
+    userMessageStyle: value?.userMessageStyle === "plain" ? "plain" : "bubble",
+    toolActivity: value?.toolActivity === "expanded" ? "expanded" : "summary",
+    showMessageTimestamps: value?.showMessageTimestamps === true,
     usageRemainingLocation: ["toolbar", "composer"].includes(value?.usageRemainingLocation) ? value.usageRemainingLocation : defaults.usageRemainingLocation,
     hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
       ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
         typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
       : [],
     sidebarNavigation: {
-      order: [...new Set([...(Array.isArray(sidebarOrder) ? sidebarOrder : []),
-        ...sidebarDefaults.order].filter((id) => sidebarDefaults.order.includes(id)))],
+      order,
+      footerShortcut: sidebarNavigation.footerShortcut === "general-shortcut" ? "settings-shortcut" :
+        ["settings-shortcut", "usage-shortcut", "whats-new-shortcut", "workflow-shortcut", "profile-shortcut"].includes(sidebarNavigation.footerShortcut) ? sidebarNavigation.footerShortcut : sidebarDefaults.footerShortcut,
       hidden: Array.isArray(sidebarNavigation.hidden)
-        ? [...new Set(sidebarNavigation.hidden.slice(0, 100).filter((id) =>
-          sidebarDefaults.order.includes(id)))]
+        ? [...new Set(sidebarNavigation.hidden.slice(0, 100).map(id => id === "general-shortcut" ? "settings-shortcut" : id).filter((id) =>
+          order.includes(id)))]
         : [...sidebarDefaults.hidden],
       width: Number.isFinite(sidebarNavigation.width)
         ? Math.min(520, Math.max(240, Math.round(sidebarNavigation.width)))

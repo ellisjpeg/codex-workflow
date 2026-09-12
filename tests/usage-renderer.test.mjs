@@ -19,7 +19,7 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness(t, { placement = "toolbar", setSettings, toolbarCount = 1 } = {}) {
+async function createHarness(t, { placement = "toolbar", setSettings, toolbarCount = 1, footerUsage = false, showUsageRemaining = true } = {}) {
   const toolbar = `<header data-app-shell-header-layout="true" class="flex h-toolbar draggable">
     <div data-app-shell-header-toolbar="true" class="flex min-w-0 flex-1 items-center justify-between">
       <div class="flex min-w-0 items-center"><button aria-label="Back" class="no-drag flex items-center">Back</button></div>
@@ -28,7 +28,7 @@ async function createHarness(t, { placement = "toolbar", setSettings, toolbarCou
   </header>`;
   const dom = new JSDOM(`<!doctype html><html><body>
     ${toolbar.repeat(toolbarCount)}
-    <aside class="app-shell-left-panel"></aside>
+    <aside class="app-shell-left-panel">${footerUsage ? '<div id="app-shell-sidebar"></div><button aria-label="Open help menu" class="size-8 shrink-0 focus-visible:ring-2"><svg></svg></button>' : ''}</aside>
     <div role="presentation" data-composer-layout="multiline">
       <div data-composer-footer-responsive="" data-composer-rows="inline" class="flex items-center justify-between">
         <div id="composer-controls" class="flex min-w-0 items-center gap-2">
@@ -49,6 +49,7 @@ async function createHarness(t, { placement = "toolbar", setSettings, toolbarCou
   const { window } = dom;
   const { document } = window;
   const calls = [];
+  const bridgeStates = [];
   const messages = [];
   const listeners = new Map(["pointerdown", "scroll"].map((type) => [type, new Set()]));
   for (const method of ["addEventListener", "removeEventListener"]) {
@@ -58,11 +59,14 @@ async function createHarness(t, { placement = "toolbar", setSettings, toolbarCou
       return original(type, callback, options);
     };
   }
-  let settings = { schemaVersion: 2, focusedInterface: false, showUsageRemaining: true, usageRemainingLocation: placement };
+  let settings = { schemaVersion: 4, focusedInterface: footerUsage, showUsageRemaining, usageRemainingLocation: placement,
+    sidebarNavigation: {footerShortcut: footerUsage ? 'usage-shortcut' : 'whats-new-shortcut'} };
   const context = dom.getInternalVMContext();
   context.require = (name) => {
     assert.equal(name, "electron");
-    return { ipcRenderer: {
+    return { webFrame: footerUsage ? { async executeJavaScript(source) {
+      if (source.startsWith('(async function installNativeUsageBridge(')) bridgeStates.push(source.endsWith('(true)'));
+    } } : undefined, ipcRenderer: {
       async invoke(channel, patch) {
         calls.push({ channel, patch: patch === undefined ? undefined : plain(patch) });
         if (channel === "codex-workflow:settings:get") return settings;
@@ -98,7 +102,7 @@ async function createHarness(t, { placement = "toolbar", setSettings, toolbarCou
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
   await flush();
   return {
-    window, document, calls, messages,
+    window, document, calls, messages, bridgeStates,
     listenerCounts: () => [...listeners.values()].map((callbacks) => callbacks.size),
     emitMutation(target, removedNodes = []) {
       for (const observer of observers.slice()) {
@@ -147,8 +151,11 @@ for (const placement of ["toolbar", "composer"]) {
     if (placement === "toolbar") {
       assert.equal(button.nextElementSibling.id, "share");
       assert.ok(button.classList.contains("rounded-lg"), "Uses the Share template rather than Back");
+      assert.ok(button.classList.contains("px-1"), "Toolbar counter uses the native 4px padding token");
+      assert.ok(!h.document.querySelector('#share').classList.contains('px-1'), "Native Share stays unchanged");
     }
     else {
+      assert.ok(!button.classList.contains("px-1"), "Composer retains its native padding");
       assert.equal(button.previousElementSibling.id, "permissions");
       assert.equal(button.nextElementSibling.id, "model");
     }
@@ -175,6 +182,43 @@ test("ambiguous native toolbars do not mount a usage counter", async (t) => {
   const h = await createHarness(t, { toolbarCount: 2 });
   assert.equal(h.counter(), null);
 });
+
+for (const showUsageRemaining of [true, false]) {
+  test(`footer usage shares live values with toolbar enabled=${showUsageRemaining}`, async (t) => {
+    const h = await createHarness(t, { footerUsage: true, showUsageRemaining });
+    const footer = () => h.document.querySelector('[data-workflow-footer-shortcut]');
+    assert.equal(footer().textContent, '—');
+    assert.equal(footer().querySelector('svg'), null);
+    assert.ok(footer().classList.contains('tabular-nums'));
+    assert.ok(footer().classList.contains('text-sm'));
+    assert.ok(footer().classList.contains('leading-[18px]'));
+    assert.ok(!footer().classList.contains('size-8'));
+    assert.deepEqual(h.bridgeStates, [true]);
+    for (const [value, text] of [
+      [{windows:[allowance(300, 27)]}, '73%'],
+      [{windows:[allowance(10080, 100)]}, '0%'],
+      [{unavailable:true}, '—'],
+      [{windows:[allowance(300, 0)]}, '100%'],
+    ]) {
+      h.emit(value);
+      assert.equal(footer().textContent, text);
+      if (showUsageRemaining) assert.equal(h.counter().textContent, text);
+      else assert.equal(h.counter(), null);
+    }
+    footer().click();
+    assert.equal(h.messages.at(-1).path, '/settings/usage');
+    footer().remove();
+    h.emitMutation(h.document.querySelector('aside'));
+    assert.equal(footer().textContent, '100%');
+    await h.openSettings();
+    [...h.document.querySelectorAll('[data-codex-workflow-panel] button')].find(button => button.textContent === 'Workflow').click();
+    h.document.querySelector('[aria-labelledby="codex-workflow-focusedInterface-label"]').click();
+    await flush();
+    assert.equal(footer(), null);
+    assert.deepEqual(h.bridgeStates, showUsageRemaining ? [true] : [true, false]);
+    assert.notEqual(h.document.querySelector('[aria-label="Open help menu"]').style.display, 'none');
+  });
+}
 
 test("usage toggle removes owned counter and tooltip and disables placement", async (t) => {
   const h = await createHarness(t);

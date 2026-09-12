@@ -362,9 +362,12 @@ function isTopFrame() { try { return window.top === window; } catch { return fal
 if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   globalThis.__codexWorkflowPreloadInstalled = true;
   const defaults = {
-    schemaVersion: 3, focusedInterface: true, hidePullRequests: true,
+    schemaVersion: 4, focusedInterface: true, hidePullRequests: true,
     hidePetMenuItem: true, hideInviteFriendMenuItem: true,
     replaceHelpWithSettings: true, hideComposerMicrophone: false,
+    composerModelLabel: "full", composerReasoningLabel: "full", composerWidth: "default",
+    conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble",
+    toolActivity: "summary", showMessageTimestamps: false,
     showUsageRemaining: true, usageRemainingLocation: "toolbar",
     hiddenSettingsPages: [],
     sidebarNavigation: {
@@ -372,13 +375,14 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       hidden: [],
       width: null,
       showRecentChats: true,
+      footerShortcut: "whats-new-shortcut",
       settingsOrder: [], settingsHidden: [],
       accountOrder: ["usage", "pet", "invite", "settings", "logout"], accountHidden: [],
     },
   };
   const sections = [
     ["sidebar", "Sidebar & navigation", "Visibility, ordering and shortcuts"],
-    ["composer", "Composer", "Controls, microphone and usage placement"],
+    ["composer", "Composer", "Microphone, model labels and composer width"],
     ["conversation", "Conversation", "Width, spacing and tool output"],
     ["appearance", "Appearance & spacing", "Density, fonts and native theme settings"],
     ["usage", "Usage & indicators", "Choose what appears and where"],
@@ -388,15 +392,18 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     settingsShell: null, settingsNav: null, navWithListener: null, customNav: null,
     customInactiveSnapshot: null, nativeSnapshot: null, loggedSettingsShell: false,
     panel: null, contentArea: null, activeWorkflow: false,
-    workflowEntryLocation: null, workflowNativeSlug: null,
+    workflowEntryLocation: null, workflowNativeSlug: null, pendingWorkflowShortcut: false,
     hiddenContent: new Map(), observer: null, mountObservers: [],
     discoveryObserver: null, discoveryTimer: null, scheduled: false,
     query: "", changedOnly: false, filterSwitch: null, resetButton: null, status: null, sectionRows: [],
     page: "home", navigationTab: "app", navigationStyle: null,
     navigationRoot: null, navigationObserver: null, navigationMountObservers: [],
-    accountObserver: null, accountTimer: null, accountSizing: null, icons: new Map(),
+    accountObserver: null, accountTimer: null, accountSizing: null, whatsNewPopup: null, footerShortcut: null, icons: new Map(),
     navigationControls: [], widthInput: null, drag: null,
     composerRoot: null, composerObserver: null, composerMountObservers: [],
+    composerTemplate: null, composerLabels: new Map(), composerWidthOwner: null, composerWidthStyle: null,
+    conversationRoot: null, conversationObserver: null, conversationMountObservers: [],
+    conversationStyle: null, conversationActivity: new Map(), conversationFrame: null,
     webAstraProPortals: new Map(), webAstraProPending: false, webAstraProDirty: false,
     usageData: null, usageButton: null, usagePlacement: null,
     usageToolbar: null, usageToolbarObserver: null, usageMountObservers: [],
@@ -424,7 +431,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         refreshUpdateControl();
       }).catch(error => log("error", `update status unavailable: ${error?.message || error}`));
       window.addEventListener("codex-workflow:usage", (event) => {
-        if (!state.settings.showUsageRemaining || typeof event.detail !== "string" || event.detail.length > 4096) return;
+        if (!needsUsageData() || typeof event.detail !== "string" || event.detail.length > 4096) return;
         try { state.usageData = JSON.parse(event.detail); updateUsageText(); } catch {}
       });
       window.addEventListener("blur", () => { hideUsageTooltip(); closeUsageLocationMenu(); });
@@ -494,6 +501,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function stopDiscovery() {
+    state.pendingWorkflowShortcut = false;
     state.discoveryObserver?.disconnect();
     state.discoveryObserver = null;
     clearTimeout(state.discoveryTimer);
@@ -630,7 +638,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const toolbar = div("flex items-center px-panel draggable electron:h-toolbar extension:h-toolbar-sm");
     const scroller = div("flex-1 scrollbar-stable overflow-y-auto p-panel");
     const page = div("mx-auto flex w-full max-w-3xl flex-col electron:min-w-[calc(320px*var(--codex-window-zoom))]");
-    if (["composer", "usage"].includes(state.page)) {
+    if (["composer", "conversation", "usage"].includes(state.page)) {
       renderControlsPage(page);
       scroller.append(page);
       shell.append(toolbar, scroller);
@@ -678,7 +686,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       row.type = "button";
       row.className = "no-drag cursor-interaction flex items-center justify-between px-4 gap-6 py-3 text-start enabled:hover:bg-text/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring";
       row.dataset.codexWorkflowSection = key;
-      if (!["sidebar", "composer", "usage"].includes(key)) row.setAttribute("aria-disabled", "true");
+      if (!["sidebar", "composer", "conversation", "usage"].includes(key)) row.setAttribute("aria-disabled", "true");
       else row.addEventListener("click", () => { state.page = key; redrawWorkflowPanel(); });
       row.setAttribute("aria-label", label);
       const copy = div("flex min-w-0 flex-1 flex-col gap-0.5");
@@ -746,7 +754,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         refreshUpdateControl();
       }
     });
-    footer.append(status, update, reset);
+    const footerCopy = div("flex min-w-0 flex-col gap-1");
+    footerCopy.append(renderVersionLabel(), status);
+    footer.append(footerCopy, update, reset);
     refreshUpdateControl();
     stack.append(setup, customise, footer);
     page.append(titleWrap, stack);
@@ -758,7 +768,17 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
 
+  function renderVersionLabel() {
+    const label = div("text-xs leading-4 text-secondary");
+    label.dataset.codexWorkflowVersion = "true";
+    label.textContent = state.updateStatus.installedVersion ? `v${state.updateStatus.installedVersion}` : "";
+    return label;
+  }
+
   function refreshUpdateControl() {
+    for (const label of document.querySelectorAll('[data-codex-workflow-version]')) {
+      label.textContent = state.updateStatus.installedVersion ? `v${state.updateStatus.installedVersion}` : "";
+    }
     const button = state.updateButton;
     if (!button) return;
     button.hidden = !state.updateStatus.available;
@@ -769,7 +789,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function sectionChangeCount(key) {
     if (key === "sidebar") return navigationChangeCount();
-    const keys = key === "composer" ? ["hideComposerMicrophone"] : key === "usage" ? ["showUsageRemaining", "usageRemainingLocation"] : [];
+    const keys = key === "composer" ? composerSettingKeys : key === "conversation" ? conversationSettingKeys : key === "usage" ? ["showUsageRemaining", "usageRemainingLocation"] : [];
     return keys.filter(name => state.settings[name] !== defaults[name]).length;
   }
 
@@ -784,6 +804,14 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     title.tabIndex = -1;
     title.textContent = sections.find(([key]) => key === state.page)[1];
     header.append(back, title);
+    if (state.page === "conversation") {
+      renderConversationPage(page, header);
+      return;
+    }
+    if (state.page === "composer") {
+      renderComposerPage(page, header);
+      return;
+    }
     const card = settingsCard();
     card.append(state.page === "usage" ? renderUsageRemainingRow() : renderSettingRow({
       key: "hideComposerMicrophone", label: "Hide microphone button", description: "Remove the idle Dictate button from the composer.",
@@ -793,6 +821,470 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.status = status;
     page.append(header, card, status);
     refreshSettingControls();
+  }
+
+  // Sanitized native composer from audited Codex 26.903.71938 / 8576.
+  // Fallback for opening Settings before a composer has mounted; live clones take priority.
+  const nativeComposerExample = "<div class=\"_ComposerLayoutRoot_kbwao_2\" data-composer-dark=\"\" data-composer-layout=\"multiline\" data-composer-radius-variant=\"default\" data-composer-surface-overflow=\"auto\" data-composer-surface-variant=\"default\" data-composer-utility-bar-variant=\"default\" role=\"presentation\"><div class=\"_ComposerLayoutBody_kbwao_2\" data-composer-layout=\"multiline\"><div class=\"contents\"><div class=\"_ComposerLayoutAttachments_kbwao_2\" data-composer-attachments=\"\" data-composer-spacing=\"default\"></div></div><div class=\"contents\"><div class=\"_ComposerLayoutFooter_kbwao_2\" data-composer-footer-responsive=\"\" data-composer-layout=\"multiline\" data-composer-rows=\"stacked\" data-composer-spacing=\"default\"><div class=\"min-w-0 _AdaptiveFooterInput_kbwao_2 col-span-full row-start-1 -mx-2\"><div class=\"_ComposerLayoutInput_kbwao_2 flex-grow overflow-y-auto\" data-composer-layout=\"multiline\" data-composer-spacing=\"default\" data-composer-input-variant=\"default\"><div class=\"_RichTextInput_9mkbi_1 vertical-scroll-fade-mask text-base transition-[min-height] duration-relaxed ease-enter-snappy motion-reduce:transition-none min-h-0\" data-rich-text-layout=\"multiline\" role=\"presentation\"><div contenteditable=\"false\" aria-multiline=\"true\" dir=\"auto\" role=\"textbox\" spellcheck=\"true\" translate=\"no\" class=\"ProseMirror\" data-composer-markdown=\"\" style=\"font-size: var(--codex-chat-font-size); height: auto; resize: none; min-height: var(--composer-editor-min-height, 2.5rem);\" aria-label=\"Do anything\"><p class=\"placeholder\" data-placeholder=\"Ask Codex anything…\"><br></p></div></div></div></div><div class=\"min-w-0 col-start-1 row-start-2\"><div class=\"flex min-w-0 items-center gap-[5px]\"><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px) aspect-square shrink-0 items-center justify-center !px-0\" aria-label=\"Add files and more\" aria-expanded=\"false\" data-composer-navigation-target=\"add-context\" data-state=\"closed\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"icon-leading text-default\"><path d=\"M9.33496 16.5V10.665H3.5C3.13273 10.665 2.83496 10.3673 2.83496 10C2.83496 9.63273 3.13273 9.33496 3.5 9.33496H9.33496V3.5C9.33496 3.13273 9.63273 2.83496 10 2.83496C10.3673 2.83496 10.665 3.13273 10.665 3.5V9.33496H16.5L16.6338 9.34863C16.9369 9.41057 17.165 9.67857 17.165 10C17.165 10.3214 16.9369 10.5894 16.6338 10.6514L16.5 10.665H10.665V16.5C10.665 16.8673 10.3673 17.165 10 17.165C9.63273 17.165 9.33496 16.8673 9.33496 16.5Z\" fill=\"currentColor\"></path></svg></button></span><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-1.5 py-0 text-sm leading-[18px] min-w-0 outline-hidden cursor-interaction\" aria-label=\"Change permissions\" data-composer-navigation-target=\"permissions\" data-state=\"closed\" aria-haspopup=\"menu\" aria-expanded=\"false\"><span class=\"_ComposerDropdownLabel_15184_1\" data-composer-dropdown-foreground=\"tertiary\"><span class=\"_ComposerDropdownLabelIcon_15184_15\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"icon-xs shrink-0 text-tertiary\"><path d=\"M12.6683 4.16699C12.6683 3.84391 12.4065 3.58203 12.0834 3.58203C11.7603 3.58203 11.4984 3.84391 11.4984 4.16699V7.91699L11.4847 8.05078C11.4227 8.35375 11.1547 8.58203 10.8334 8.58203C10.4662 8.58203 10.1685 8.28411 10.1683 7.91699V3.75C10.1683 3.42691 9.90646 3.16504 9.58337 3.16504C9.26029 3.16504 8.99841 3.42691 8.99841 3.75V7.91699C8.99824 8.28411 8.70053 8.58203 8.33337 8.58203C7.96621 8.58203 7.66851 8.28411 7.66833 7.91699V5C7.66833 4.67691 7.40646 4.41504 7.08337 4.41504C6.76029 4.41504 6.49841 4.67691 6.49841 5V9.30371C6.53326 9.3429 6.56715 9.38359 6.59998 9.42578L8.02478 11.2588C8.25005 11.5486 8.19821 11.9659 7.90857 12.1914C7.6187 12.4169 7.20048 12.365 6.97498 12.0752L5.55017 10.2432C5.15812 9.7391 4.41813 9.73637 4.01501 10.1924C4.04396 10.426 4.11486 10.8323 4.25525 11.3486C4.44664 12.0525 4.75404 12.9113 5.21619 13.7383C6.14103 15.3931 7.62465 16.835 10.0004 16.835C12.8545 16.8348 15.1682 14.5211 15.1683 11.667V6.25C15.1683 5.92691 14.9065 5.66504 14.5834 5.66504C14.2603 5.66504 13.9984 5.92691 13.9984 6.25V9.16699C13.9982 9.53411 13.7005 9.83203 13.3334 9.83203C12.9662 9.83203 12.6685 9.53411 12.6683 9.16699V4.16699ZM13.9984 4.42578C14.1828 4.36671 14.3794 4.33496 14.5834 4.33496C15.641 4.33496 16.4984 5.19237 16.4984 6.25V11.667C16.4982 15.2557 13.589 18.1649 10.0004 18.165C6.95953 18.165 5.10939 16.2734 4.05505 14.3867C3.52774 13.4431 3.1843 12.4787 2.97205 11.6982C2.76447 10.9349 2.66834 10.2954 2.66833 10C2.66833 9.87959 2.70117 9.76148 2.76306 9.6582C3.28988 8.78018 4.26555 8.40372 5.16833 8.56152V5C5.16833 3.94237 6.02575 3.08496 7.08337 3.08496C7.31706 3.08496 7.54039 3.12845 7.74744 3.20508C7.98218 2.41297 8.7151 1.83496 9.58337 1.83496C10.1836 1.83496 10.7186 2.11176 11.0697 2.54395C11.3639 2.35978 11.7107 2.25195 12.0834 2.25195C13.141 2.25195 13.9984 3.10937 13.9984 4.16699V4.42578Z\" fill=\"currentColor\"></path></svg></span><span class=\"_ComposerDropdownLabelText_15184_34\"><span class=\"_ComposerFooterLabel_qf7ox_1 _ComposerDropdownLabelValue_15184_57 max-w-40\" data-composer-footer-collapse=\"secondary\"><span class=\"_ComposerDropdownLabelValueContent_15184_96\" data-tooltip-overflow-target=\"true\">Ask for approval</span></span></span></span></button></div></div><div class=\"min-w-0 col-start-3 row-start-2\"><div class=\"flex min-w-0 items-center justify-end w-full\"><div class=\"flex min-w-0 flex-1 justify-end\"><div class=\"flex min-w-0 items-center gap-1\"><span><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px) min-w-0\" aria-haspopup=\"menu\" aria-expanded=\"false\" data-state=\"closed\" data-codex-intelligence-trigger=\"true\" data-composer-navigation-target=\"reasoning\" data-selected-reasoning-effort=\"medium\"><span class=\"_ComposerDropdownLabel_15184_1\" data-composer-dropdown-foreground=\"tertiary\" data-composer-dropdown-viewport=\"expanded\"><span class=\"_ComposerDropdownLabelText_15184_34\"><span class=\"_ComposerFooterLabel_qf7ox_1 _ComposerDropdownLabelValue_15184_57\" data-composer-footer-collapse=\"none\"><span class=\"_ComposerDropdownLabelValueContent_15184_96\" data-tooltip-overflow-target=\"true\"><span class=\"_ModelPickerTriggerContent_90m7w_1\"><span aria-hidden=\"true\" class=\"_ModelPickerTriggerMeasurement_90m7w_9\">Select model</span><span class=\"_ModelPickerTriggerLabel_90m7w_18\"><span class=\"_ModelPickerTriggerModelLabel_90m7w_40\"><span class=\"flex min-w-0 items-center gap-1 tabular-nums\"><span class=\"truncate whitespace-nowrap _ModelPickerTriggerModelText_90m7w_41\">GPT-6 Astra</span></span></span><span class=\"_ComposerFooterLabel_qf7ox_1 _ModelPickerTriggerEffortLabel_90m7w_53\" data-composer-footer-collapse=\"none\" data-max-effort=\"false\">Medium</span></span></span></span></span></span></span><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\" class=\"me-0.5 h-3.5 w-3.5 shrink-0 text-tertiary\"><path d=\"M12.1338 5.94433C12.3919 5.77382 12.7434 5.80202 12.9707 6.02929C13.1979 6.25656 13.2261 6.60807 13.0556 6.8662L12.9707 6.9707L8.47067 11.4707C8.21097 11.7304 7.78896 11.7304 7.52926 11.4707L3.02926 6.9707L2.9443 6.8662C2.77379 6.60807 2.80199 6.25656 3.02926 6.02929C3.25653 5.80202 3.60804 5.77382 3.86617 5.94433L3.97067 6.02929L7.99996 10.0586L12.0293 6.02929L12.1338 5.94433Z\"></path></svg></button></span></span></div></div><div class=\"flex shrink-0 items-center\"><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px) aspect-square shrink-0 items-center justify-center !px-0\" aria-busy=\"false\" aria-label=\"Dictate\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\" class=\"icon-leading text-default\"><g transform=\"scale(0.8333333333333334)\"><path d=\"M18.5848 13.4121C18.7715 12.9516 19.2961 12.7296 19.7567 12.916C20.217 13.1027 20.4391 13.6274 20.2528 14.0879C19.0405 17.0826 16.2438 19.2675 12.9003 19.6035V22C12.9003 22.4971 12.4969 22.9004 11.9999 22.9004C11.5029 22.9003 11.0995 22.497 11.0995 22V19.6035C7.75618 19.2673 4.96018 17.0823 3.74791 14.0879C3.56144 13.6272 3.78344 13.1026 4.244 12.916C4.70458 12.7298 5.22933 12.9517 5.41588 13.4121C6.46985 16.0157 9.02264 17.8496 12.0008 17.8496C14.9787 17.8493 17.531 16.0155 18.5848 13.4121Z\"></path><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M11.9999 1.34961C14.7061 1.34961 16.9003 3.5438 16.9003 6.25V10.7334C16.9003 13.4396 14.7061 15.6338 11.9999 15.6338C9.29371 15.6337 7.09947 13.4396 7.09947 10.7334V6.25C7.09947 3.54384 9.29372 1.34967 11.9999 1.34961ZM11.9999 3.15039C10.2878 3.15045 8.90025 4.53795 8.90025 6.25V10.7334C8.90025 12.4454 10.2878 13.8339 11.9999 13.834C13.7119 13.834 15.0995 12.4455 15.0995 10.7334V6.25C15.0995 4.53792 13.7119 3.15039 11.9999 3.15039Z\"></path></g></svg></button></span><div class=\"ms-2 flex items-center\"><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"cursor-interaction size-token-button-composer flex items-center justify-center rounded-full transition-opacity focus-visible:outline-2 bg-composer-primary p-0.5 focus-visible:outline-background-composer-primary\" aria-label=\"Start voice chat\"><svg aria-hidden=\"true\" class=\"_Icon_qvjuo_1 icon-primary-action text-composer-primary\" focusable=\"false\" height=\"16\" viewBox=\"0 0 16 16\" width=\"16\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M6.44434 1.91675C6.85855 1.91675 7.19434 2.25253 7.19434 2.66675V13.3337C7.19412 13.7478 6.85841 14.0837 6.44434 14.0837C6.03037 14.0836 5.69455 13.7477 5.69434 13.3337V2.66675C5.69434 2.25262 6.03023 1.91688 6.44434 1.91675Z\" fill=\"currentColor\"></path> <path d=\"M9.88867 3.74976C10.3028 3.74976 10.6385 4.08565 10.6387 4.49976V11.1667C10.6385 11.5808 10.3028 11.9167 9.88867 11.9167C9.47468 11.9166 9.13885 11.5807 9.13867 11.1667V4.49976C9.1388 4.08574 9.47465 3.74989 9.88867 3.74976Z\" fill=\"currentColor\"></path> <path d=\"M3 5.41675C3.41421 5.41675 3.75 5.75253 3.75 6.16675V9.83374C3.74982 10.2478 3.41411 10.5837 3 10.5837C2.58589 10.5837 2.25018 10.2478 2.25 9.83374V6.16675C2.25 5.75253 2.58579 5.41675 3 5.41675Z\" fill=\"currentColor\"></path> <path d=\"M13.334 5.91675C13.748 5.91701 14.084 6.2527 14.084 6.66675V9.33374C14.0838 9.74764 13.7479 10.0835 13.334 10.0837C12.9199 10.0837 12.5842 9.7478 12.584 9.33374V6.66675C12.584 6.25253 12.9198 5.91675 13.334 5.91675Z\" fill=\"currentColor\"></path></svg></button></span></div></div></div></div></div></div><div class=\"contents\"></div></div></div>";
+  const composerSettingKeys = ["hideComposerMicrophone", "composerModelLabel", "composerReasoningLabel", "composerWidth"];
+  // Guarded 26.903.71938 model picker; semantic trigger scopes these CSS-module leaves.
+  const composerModelSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"] ._ModelPickerTriggerModelText_90m7w_41';
+  const composerEffortSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"] ._ModelPickerTriggerEffortLabel_90m7w_53';
+  // Native thread-scroll-layout shifts both columns for side panels. Keep its free-space allowance.
+  const wideComposerWidth = "calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))";
+
+  function renderComposerPage(page, header) {
+    const back = header.firstElementChild;
+    back.classList.remove("bg-text/5", "enabled:hover:bg-text/10", "data-[state=open]:bg-text/10");
+    back.classList.add("enabled:hover:bg-primary-ghost-hover", "focus-visible:bg-primary-ghost-hover");
+    const subtitle = div("text-base text-secondary text-balance");
+    subtitle.textContent = "Arrange the controls you use before sending a message.";
+    const titleStack = div("flex min-w-0 flex-col gap-1.5");
+    titleStack.append(header.lastElementChild, subtitle);
+    header.append(titleStack);
+    const stack = div("flex flex-col gap-10");
+    const preview = sectionHeading("Preview");
+    const frame = settingsCard();
+    frame.classList.add("p-4");
+    frame.dataset.codexWorkflowPreview = "true";
+    frame.setAttribute("role", "img");
+    preview.append(frame);
+    const controls = sectionHeading("Controls");
+    const card = settingsCard();
+    const microphone = renderSettingRow({key:"hideComposerMicrophone", label:"Microphone", description:"Show the dictation button."});
+    const control = state.settingControls.get("hideComposerMicrophone");
+    const applyHidden = control.apply;
+    control.apply = hidden => applyHidden(!hidden);
+    card.append(microphone,
+      renderComposerChoice("composerModelLabel", "Model label", "Choose how much of the model name is shown.", [["full", "Full name"], ["short", "Short name"]]),
+      renderComposerChoice("composerReasoningLabel", "Reasoning label", "Choose the label beside your model.", [["full", "Full name"], ["compact", "Compact"]]));
+    controls.append(card);
+    const layout = sectionHeading("Layout");
+    const layoutCard = settingsCard();
+    layoutCard.append(renderComposerChoice("composerWidth", "Composer width", "Set the width of the message input and conversation.", [["default", "Default"], ["wide", "Wide"]], true));
+    layout.append(layoutCard);
+    const footer = div("flex flex-wrap items-center justify-between gap-4");
+    const status = div("text-xs leading-4 text-secondary");
+    status.setAttribute("role", "status");
+    state.status = status;
+    const reset = renderActionButton("Reset this section", true);
+    reset.addEventListener("click", () => persistSetting("resetComposer", true));
+    state.resetButton = reset;
+    footer.append(status, reset);
+    stack.append(preview, controls, layout, footer);
+    page.append(header, stack);
+    refreshSettingControls();
+    refreshComposerPreview(frame);
+  }
+
+  const conversationSettingKeys = ["conversationWidth", "messageSpacing", "userMessageStyle", "toolActivity", "showMessageTimestamps"];
+  // Audited 26.903.71938: the native message column, separate from the composer column.
+  const conversationSelector = '.thread-scroll-container[data-app-action-timeline-scroll] [data-thread-user-message-navigation-content="true"]';
+  const activitySelector = 'button[aria-expanded].max-w-full.text-size-chat:not([aria-haspopup])';
+
+  function renderConversationPage(page, header) {
+    const back = header.firstElementChild;
+    back.classList.remove("bg-text/5", "enabled:hover:bg-text/10", "data-[state=open]:bg-text/10");
+    back.classList.add("enabled:hover:bg-primary-ghost-hover", "focus-visible:bg-primary-ghost-hover");
+    const titleStack = div("flex min-w-0 flex-col gap-1.5");
+    const subtitle = div("text-base text-secondary text-balance");
+    subtitle.textContent = "Make long conversations easier to read.";
+    titleStack.append(header.lastElementChild, subtitle);
+    header.append(titleStack);
+    const stack = div("flex flex-col gap-10");
+    const preview = sectionHeading("Preview");
+    const frame = settingsCard();
+    frame.classList.add("p-4");
+    frame.dataset.codexWorkflowConversationPreview = "true";
+    frame.setAttribute("aria-label", "Conversation preview");
+    frame.setAttribute("role", "group");
+    preview.append(frame);
+    const layout = sectionHeading("Layout");
+    const card = settingsCard();
+    const widthRow = renderSettingRow({key:"conversationWidth", label:"Conversation width", description:"Set the maximum width of messages."});
+    widthRow.classList.add("flex-wrap");
+    const slot = widthRow.lastElementChild;
+    slot.replaceChildren();
+    slot.className = "flex h-9 min-w-0 flex-1 basis-64 items-center gap-2.5";
+    const input = document.createElement("input");
+    input.type = "range"; input.min = "480"; input.max = "1440"; input.step = "8";
+    input.setAttribute("aria-labelledby", "codex-workflow-conversationWidth-label");
+    input.setAttribute("aria-describedby", "codex-workflow-conversationWidth-description");
+    // Native Appearance contrast slider, including its platform thumb geometry.
+    input.className = "h-0.5 min-w-0 flex-1 appearance-none rounded-full cursor-interaction focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border [&::-moz-range-thumb]:border-transparent [&::-moz-range-thumb]:bg-current [&::-moz-range-thumb]:shadow-sm [&::-moz-range-track]:h-0.5 [&::-moz-range-track]:rounded-full [&::-webkit-slider-runnable-track]:h-0.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-thumb]:mt-[-9px] [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-transparent [&::-webkit-slider-thumb]:bg-current [&::-webkit-slider-thumb]:shadow-sm";
+    const value = div("shrink-0 text-end text-sm text-secondary tabular-nums");
+    const apply = width => {
+      input.value = String(width ?? 768); // Native default column is 48rem on this build.
+      value.textContent = width == null ? "Default" : `${input.value} px`;
+      input.setAttribute("aria-valuetext", width == null ? "Native default" : `${input.value} pixels`);
+      const percentage = (Number(input.value) - 480) / 960 * 100;
+      input.style.background = `linear-gradient(to right, var(--color-accent-blue) ${percentage}%, var(--color-border) ${percentage}%)`;
+      input.style.color = "var(--color-text)";
+    };
+    input.addEventListener("input", () => { apply(input.valueAsNumber); refreshConversationPreview(frame, input.valueAsNumber); });
+    input.addEventListener("change", () => persistSetting("conversationWidth", input.valueAsNumber));
+    state.settingControls.set("conversationWidth", {apply, applyDisabled:disabled=>{input.disabled=disabled;}});
+    slot.append(input, value);
+    card.append(widthRow,
+      renderComposerChoice("messageSpacing", "Message spacing", "Choose the gap between messages.", [["compact","Compact"],["default","Default"],["relaxed","Relaxed"]], true),
+      renderComposerChoice("userMessageStyle", "User messages", "Choose how your prompts are displayed.", [["bubble","Bubble"],["plain","Plain text"]]));
+    // Preserve usable controls when the settings pane is narrower than the window.
+    for (const row of card.children) {
+      row.classList.add("flex-wrap");
+      row.firstElementChild.classList.add("basis-64");
+    }
+    layout.append(card);
+    const details = sectionHeading("Message details");
+    const detailCard = settingsCard();
+    detailCard.append(
+      renderComposerChoice("toolActivity", "Tool activity", "Choose the initial view of tool calls.", [["summary","Summary"],["expanded","Expanded"]]),
+      renderSettingRow({key:"showMessageTimestamps", label:"Show timestamps", description:"Display the time beside each message."}));
+    details.append(detailCard);
+    const footer = div("flex flex-wrap items-center justify-between gap-4");
+    const status = div("text-xs leading-4 text-secondary");
+    status.setAttribute("role", "status"); state.status = status;
+    const reset = renderActionButton("Reset this section", true);
+    reset.addEventListener("click", () => persistSetting("resetConversation", true));
+    state.resetButton = reset;
+    footer.append(status, reset);
+    stack.append(preview, layout, details, footer);
+    page.append(header, stack);
+    refreshSettingControls();
+    refreshConversationPreview(frame);
+  }
+
+  function refreshConversationPreview(frame = state.panel?.querySelector('[data-codex-workflow-conversation-preview]'), width = state.settings.conversationWidth) {
+    if (!frame) return;
+    const prefs = state.settings;
+    const signature = JSON.stringify(conversationSettingKeys.map(key=>key === "conversationWidth" ? width : prefs[key]));
+    if (frame.dataset.previewState === signature) return;
+    frame.dataset.previewState = signature;
+    const column = div("mx-auto flex w-full min-w-0 flex-col");
+    // A proportional example makes the width control observable even in a narrow settings pane.
+    column.style.width = `${Math.min(100, (width ?? (prefs.composerWidth === "wide" ? 1440 : 768)) / 1440 * 100)}%`;
+    column.style.minWidth = "min(100%, 20rem)";
+    column.style.gap = prefs.messageSpacing === "compact" ? "calc(var(--spacing) * 2)" : prefs.messageSpacing === "relaxed" ? "calc(var(--spacing) * 6)" : "calc(var(--spacing) * 4)";
+    const user = div("flex min-w-0 flex-col items-end gap-1");
+    const bubble = div(prefs.userMessageStyle === "bubble"
+      ? "bg-user-message text-user-message min-w-0 overflow-hidden break-words px-3 py-2.5 rounded-2xl text-size-chat"
+      : "max-w-(--user-chat-width) min-w-0 break-words text-default text-size-chat");
+    bubble.textContent = "Make the sidebar more compact.";
+    user.append(bubble);
+    const assistant = div("flex min-w-0 flex-col gap-1");
+    const message = div("text-size-chat text-default");
+    message.textContent = "Updated the spacing and kept the labels readable.";
+    assistant.append(message);
+    const activity = div("flex flex-col gap-2");
+    const toggle = renderActionButton("3 tools used");
+    toggle.className = "no-drag cursor-interaction flex max-w-full items-center gap-1 self-start rounded-md text-size-chat text-secondary enabled:hover:bg-primary-ghost-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+    const chevron = navigationGlyph("back");
+    chevron.style.transform = "rotate(180deg)";
+    toggle.prepend(chevron);
+    const body = div("flex flex-col gap-1 text-sm text-secondary ps-6");
+    body.id = "codex-workflow-conversation-preview-tools";
+    for (const text of ["Read sidebar layout", "Adjusted message spacing", "Checked the result"]) {
+      const line = div(""); line.textContent = text; body.append(line);
+    }
+    const expand = expanded => {
+      toggle.setAttribute("aria-expanded", String(expanded));
+      body.hidden = !expanded;
+      body.style.display = expanded ? "" : "none";
+      chevron.style.transform = expanded ? "rotate(270deg)" : "rotate(180deg)";
+      const reduced = document.documentElement.dataset.reducedMotion === "true" ||
+        (document.documentElement.dataset.reducedMotion == null && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+      if (expanded && !reduced && body.animate) {
+        body.animate([{opacity:0, transform:"translateY(-8px)"},{opacity:1, transform:"translateY(0)"}], {duration:220,easing:"cubic-bezier(.33,1,.68,1)"});
+      }
+    };
+    toggle.setAttribute("aria-controls", body.id);
+    toggle.addEventListener("click", () => expand(toggle.getAttribute("aria-expanded") !== "true"));
+    expand(prefs.toolActivity === "expanded");
+    activity.append(toggle, body);
+    assistant.append(activity);
+    if (prefs.showMessageTimestamps) for (const [owner, time] of [[user,"10:24"],[assistant,"10:25"]]) {
+      const stamp = document.createElement("time");
+      stamp.className = "text-xs text-tertiary";
+      stamp.textContent = time; stamp.dateTime = time;
+      owner.append(stamp);
+    }
+    column.append(user, assistant);
+    frame.replaceChildren(column);
+  }
+
+  function restoreConversationActivity() {
+    for (const [button, saved] of state.conversationActivity) {
+      button.removeEventListener("click", saved.listener);
+      if (button.isConnected && !saved.manual && button.getAttribute("aria-expanded") === saved.applied && saved.original !== saved.applied) button.click();
+    }
+    state.conversationActivity.clear();
+  }
+
+  function syncConversationActivity() {
+    const root = state.conversationRoot;
+    if (!root || !state.settings.focusedInterface) return;
+    for (const [button, saved] of state.conversationActivity) if (!root.contains(button)) {
+      button.removeEventListener("click", saved.listener);
+      state.conversationActivity.delete(button);
+    }
+    for (const turn of root.querySelectorAll('[data-content-search-turn-key]')) {
+      // Cca/MD: top-level completed-turn activity only, never tool cards, menus or approval UI.
+      const buttons = [...turn.querySelectorAll(activitySelector)].filter(button =>
+        button.closest('[data-content-search-turn-key]') === turn && !button.closest('[data-content-search-unit-key], [role="dialog"], [role="menu"]') &&
+        button.querySelector('svg.icon-2xs'));
+      if (buttons.length !== 1) continue;
+      const button = buttons[0];
+      let saved = state.conversationActivity.get(button);
+      if (saved?.mode === state.settings.toolActivity) continue;
+      if (!saved) {
+        saved = {original:button.getAttribute("aria-expanded"), manual:false, applying:false};
+        saved.listener = () => { if (!saved.applying) saved.manual = true; };
+        button.addEventListener("click", saved.listener);
+        state.conversationActivity.set(button, saved);
+      }
+      saved.mode = state.settings.toolActivity; saved.manual = false;
+      saved.applied = String(saved.mode === "expanded");
+      if (button.getAttribute("aria-expanded") !== saved.applied) {
+        saved.applying = true;
+        try { button.click(); } finally { saved.applying = false; }
+      }
+    }
+  }
+
+  function syncConversation() {
+    const roots = [...document.querySelectorAll(conversationSelector)].filter(root => !root.closest('[role="dialog"], [data-codex-workflow-panel]'));
+    const root = roots.length === 1 ? roots[0] : null;
+    if (!root) for (const candidate of roots) candidate.removeAttribute("data-codex-workflow-conversation");
+    if (state.conversationRoot !== root) {
+      state.conversationObserver?.disconnect();
+      disconnectObservers(state.conversationMountObservers);
+      restoreConversationActivity();
+      state.conversationRoot?.removeAttribute("data-codex-workflow-conversation");
+      state.conversationRoot = root;
+      state.conversationMountObservers = root ? observeMountChain("conversation", root) : [];
+      if (root) {
+        state.conversationObserver = new MutationObserver(records => {
+          // Ignore streamed text and unrelated mutations; only newly mounted turn/disclosure structure matters.
+          if (!records.some(record => [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element &&
+            (node.matches(`[data-content-search-turn-key], ${activitySelector}`) || node.querySelector(`[data-content-search-turn-key], ${activitySelector}`))))) return;
+          if (state.conversationFrame != null) return;
+          state.conversationFrame = requestAnimationFrame(() => { state.conversationFrame = null; syncConversationActivity(); });
+        });
+        state.conversationObserver.observe(root, {childList:true, subtree:true});
+      }
+    }
+    const enabled = state.settings.focusedInterface;
+    if (root && enabled) root.setAttribute("data-codex-workflow-conversation", "true");
+    else root?.removeAttribute("data-codex-workflow-conversation");
+    if (!enabled) restoreConversationActivity();
+    const scope = '[data-codex-workflow-conversation="true"]';
+    const css = [];
+    if (enabled) {
+      const prefs = state.settings;
+      if (prefs.conversationWidth != null) css.push(`${scope} { max-width: min(${prefs.conversationWidth}px, calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))); }`);
+      if (prefs.messageSpacing !== "default") css.push(`${scope} { --conversation-item-gap: calc(var(--spacing) * ${prefs.messageSpacing === "compact" ? 2 : 6}); }`);
+      if (prefs.userMessageStyle === "plain") css.push(`${scope} [data-local-conversation-user-anchor] [data-user-message-bubble] { --color-text-user-message: var(--color-text); background: transparent; color: var(--color-text); border-radius: 0; padding: 0; }`);
+      if (prefs.showMessageTimestamps) css.push(`
+        ${scope} [data-assistant-message-sent-time] { opacity: 1; }
+        ${scope} [data-local-conversation-user-anchor] .group > .flex-row-reverse > div:has(> .turn-action-controls),
+        ${scope} [data-local-conversation-user-anchor] .group > .flex-row-reverse > div:has(> .turn-action-controls) > span { opacity: 1; }
+        ${scope} [data-local-conversation-user-anchor] .group > .flex-row-reverse > div:has(> .turn-action-controls) { transition: column-gap var(--transition-duration-basic) ease-out; }
+        ${scope} [data-local-conversation-user-anchor] .turn-action-controls { interpolate-size: allow-keywords; inline-size: max-content; justify-content: flex-end; transition: inline-size var(--transition-duration-basic) ease-out, opacity var(--transition-duration-basic) ease-out; }
+        ${scope} [data-local-conversation-user-anchor] .turn-action-controls button { flex-shrink: 0; }
+        ${scope} [data-local-conversation-user-anchor] .group:not(:hover):not(:focus-within) > .flex-row-reverse > div:has(> .turn-action-controls) { column-gap: 0; }
+        ${scope} [data-local-conversation-user-anchor] .group:not(:hover):not(:focus-within) .turn-action-controls { inline-size: 0; opacity: 0; pointer-events: none; }
+        :root[data-reduced-motion="true"] ${scope} [data-local-conversation-user-anchor] .turn-action-controls,
+        :root[data-reduced-motion="true"] ${scope} [data-local-conversation-user-anchor] .group > .flex-row-reverse > div:has(> .turn-action-controls) { transition: none; }
+        @media (prefers-reduced-motion: reduce) {
+          :root:not([data-reduced-motion="false"]) ${scope} [data-local-conversation-user-anchor] .turn-action-controls,
+          :root:not([data-reduced-motion="false"]) ${scope} [data-local-conversation-user-anchor] .group > .flex-row-reverse > div:has(> .turn-action-controls) { transition: none; }
+        }
+      `);
+    }
+    if (css.length) {
+      if (!state.conversationStyle) {
+        state.conversationStyle = document.createElement("style");
+        state.conversationStyle.dataset.codexWorkflowConversationStyle = "true";
+        document.head.append(state.conversationStyle);
+      }
+      const text = css.join("\n");
+      if (state.conversationStyle.textContent !== text) state.conversationStyle.textContent = text;
+    } else { state.conversationStyle?.remove(); state.conversationStyle = null; }
+    syncConversationActivity();
+    refreshConversationPreview();
+  }
+
+  function renderComposerChoice(key, labelText, description, choices, segmented = false) {
+    const row = renderSettingRow({key, label:labelText, description});
+    // The native row primitive supplies copy/ARIA; replace its switch with this control.
+    const slot = row.lastElementChild;
+    slot.replaceChildren();
+    if (segmented) {
+      const group = div("flex min-w-0 items-center gap-1 rounded-lg border border-default p-1");
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-labelledby", `codex-workflow-${key}-label`);
+      group.setAttribute("aria-describedby", `codex-workflow-${key}-description`);
+      const buttons = choices.map(([value, label]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.addEventListener("click", () => persistSetting(key, value));
+        group.append(button);
+        return {button, value};
+      });
+      state.settingControls.set(key, {
+        apply: value => buttons.forEach(item => {
+          const selected = item.value === value;
+          item.button.className = `${segmentClass} ${selected ? "bg-segmented-selected hover:bg-segmented-selected-hover text-default" : "hover:bg-primary-ghost-hover text-tertiary"}`;
+          item.button.setAttribute("aria-pressed", String(selected));
+        }),
+        applyDisabled: disabled => buttons.forEach(({button}) => {button.disabled = disabled;}),
+      });
+      slot.append(group);
+    } else {
+      const {button, label} = nativeMenuButton();
+      button.setAttribute("aria-labelledby", `codex-workflow-${key}-label`);
+      button.setAttribute("aria-describedby", `codex-workflow-${key}-description`);
+      const open = event => {
+        event.preventDefault();
+        if (button.disabled) return;
+        openWorkflowMenu(button, {id:key, label:labelText, choices:choices.map(([value,label])=>({value,label})), selected:state.settings[key], select:value=>persistSetting(key,value)});
+      };
+      button.addEventListener("click", open);
+      button.addEventListener("keydown", event => {if (["ArrowDown", "ArrowUp"].includes(event.key)) open(event);});
+      state.settingControls.set(key, {button, apply:value=>{label.textContent=choices.find(item=>item[0]===value)[1];}, applyDisabled:disabled=>{button.disabled=disabled;}});
+      slot.append(button);
+    }
+    return row;
+  }
+
+  function composerLabel(text, kind) {
+    if (kind === "model" && state.settings.composerModelLabel === "short") return text.replace(/^GPT[- ]\d+(?:\.\d+)?\s+(?=\S)/iu, "");
+    if (kind === "effort" && state.settings.composerReasoningLabel === "compact") return ({Minimal:"Min", Medium:"Med", "Extra high":"XHigh", "Very high":"XHigh"})[text] || text;
+    return text;
+  }
+
+  function restoreComposerLabels() {
+    for (const [node, saved] of state.composerLabels) if (node.data === saved.applied) node.data = saved.original;
+    state.composerLabels.clear();
+  }
+
+  function syncComposerLabels() {
+    const desired = new Set();
+    for (const [selector, kind] of [[composerModelSelector, "model"], [composerEffortSelector, "effort"]]) {
+      const matches = [...(state.composerRoot?.querySelectorAll(selector) || [])];
+      if (matches.length !== 1) continue;
+      const leaf = matches[0];
+      if (leaf.childNodes.length !== 1 || leaf.firstChild.nodeType !== Node.TEXT_NODE) continue;
+      const node = leaf.firstChild;
+      desired.add(node);
+      const old = state.composerLabels.get(node);
+      const original = old && node.data === old.applied ? old.original : node.data;
+      const applied = composerLabel(original, kind);
+      state.composerLabels.set(node, {original, applied});
+      if (node.data !== applied) node.data = applied;
+    }
+    for (const [node, saved] of state.composerLabels) if (!desired.has(node)) {
+      if (node.data === saved.applied) node.data = saved.original;
+      state.composerLabels.delete(node);
+    }
+  }
+
+  function syncComposerWidth() {
+    const root = state.composerRoot;
+    // One inherited token keeps the native message column and composer aligned.
+    const owner = root?.closest('.thread-scroll-container[data-app-action-timeline-scroll]') ||
+      root?.closest('[class~="max-w-(--thread-content-max-width)"]');
+    const target = state.settings.composerWidth === "wide" ? owner : null;
+    const saved = state.composerWidthOwner;
+    if (saved && saved.node !== target) {
+      if (saved.node.style.getPropertyValue("--thread-content-max-width") === wideComposerWidth) {
+        if (saved.value) saved.node.style.setProperty("--thread-content-max-width", saved.value, saved.priority);
+        else saved.node.style.removeProperty("--thread-content-max-width");
+        if (!saved.hadStyle && !saved.node.getAttribute("style")) saved.node.removeAttribute("style");
+      }
+      delete saved.node.dataset.codexWorkflowComposerWidth;
+      state.composerWidthOwner = null;
+    }
+    if (!target) {
+      state.composerWidthStyle?.remove();
+      state.composerWidthStyle = null;
+      return;
+    }
+    if (!state.composerWidthStyle) {
+      const style = document.createElement("style");
+      style.dataset.codexWorkflowComposerWidthStyle = "true";
+      // Resolve the inherited shift on each native column, after Motion sets it on their parents.
+      style.textContent = `[data-codex-workflow-composer-width="wide"] [class~="max-w-(--thread-content-max-width)"] { --thread-content-max-width: ${wideComposerWidth}; }`;
+      document.head.append(style);
+      state.composerWidthStyle = style;
+    }
+    if (!state.composerWidthOwner) state.composerWidthOwner = {node:target, value:target.style.getPropertyValue("--thread-content-max-width"), priority:target.style.getPropertyPriority("--thread-content-max-width"), hadStyle:target.hasAttribute("style")};
+    target.dataset.codexWorkflowComposerWidth = "wide";
+    if (target.style.getPropertyValue("--thread-content-max-width") !== wideComposerWidth) target.style.setProperty("--thread-content-max-width", wideComposerWidth);
+  }
+
+  function cloneComposer(root) {
+    const clone = root.cloneNode(true);
+    restoreComposerMicrophones(clone);
+    const originalLeaves = root.querySelectorAll(`${composerModelSelector}, ${composerEffortSelector}`);
+    clone.querySelectorAll(`${composerModelSelector}, ${composerEffortSelector}`).forEach((leaf, i) => {
+      const saved = state.composerLabels.get(originalLeaves[i]?.firstChild);
+      if (saved) leaf.textContent = saved.original;
+    });
+    clone.querySelectorAll('[data-composer-attachments]').forEach(node => node.replaceChildren());
+    clone.querySelectorAll('[contenteditable]').forEach(node => {
+      node.replaceChildren();
+      const p = document.createElement("p");
+      p.className = "placeholder";
+      p.dataset.placeholder = "Ask Codex anything…";
+      p.append(document.createElement("br"));
+      node.append(p);
+      node.setAttribute("contenteditable", "false");
+      node.classList.remove("ProseMirror-focused");
+    });
+    clone.querySelectorAll('[data-codex-workflow-usage]').forEach(node=>node.remove());
+    for (const node of [clone, ...clone.querySelectorAll('*')]) {
+      for (const attr of [...node.attributes]) if (["id", "href", "for", "name", "value", "autofocus", "aria-controls", "aria-owns", "aria-labelledby", "aria-describedby", "data-codex-composer", "data-codex-thread-reference-drop-target", "data-virtualkeyboard"].includes(attr.name) || attr.name.startsWith("on")) node.removeAttribute(attr.name);
+      if (node.matches('button, input, textarea, [tabindex]')) node.tabIndex = -1;
+    }
+    clone.inert = true;
+    clone.setAttribute("aria-hidden", "true");
+    return clone;
+  }
+
+  function captureComposer(root) {
+    // React mounts/unmounts editor and picker separately. Never cache a partial shell.
+    if (root?.querySelector(composerModelSelector) && root.querySelector('[contenteditable="true"]')) {
+      state.composerTemplate = cloneComposer(root);
+    }
+  }
+
+  function refreshComposerPreview(frame = state.panel?.querySelector('[data-codex-workflow-preview]')) {
+    if (!frame) return;
+    if (!frame.firstElementChild) {
+      let template = state.composerTemplate;
+      if (!template) {
+        const holder = document.createElement("template");
+        holder.innerHTML = nativeComposerExample;
+        template = cloneComposer(holder.content.firstElementChild);
+      }
+      frame.append(template.cloneNode(true));
+    }
+    const root = frame.firstElementChild;
+    root.inert = true;
+    root.classList.add("w-full", "mx-auto");
+    // Same native cap as the real column; narrow settings naturally show equal widths.
+    root.style.maxWidth = state.settings.composerWidth === "wide" ? "100%" : "var(--thread-content-max-width)";
+    root.querySelectorAll('button[aria-label="Dictate"]').forEach(node => {node.style.display = state.settings.hideComposerMicrophone ? "none" : "";});
+    for (const [selector,kind] of [[composerModelSelector,"model"],[composerEffortSelector,"effort"]]) {
+      root.querySelectorAll(selector).forEach(node => {
+        node.dataset.workflowPreviewOriginal ??= node.textContent;
+        const next = composerLabel(node.dataset.workflowPreviewOriginal, kind);
+        if (node.textContent !== next) node.textContent = next;
+      });
+    }
+    const label = `Composer preview. ${root.querySelector(composerModelSelector)?.textContent || ""}. ${root.querySelector(composerEffortSelector)?.textContent || ""}. Microphone ${state.settings.hideComposerMicrophone ? "hidden" : "shown"}. ${state.settings.composerWidth === "wide" ? "Wide" : "Default"} width.`;
+    if (frame.getAttribute("aria-label") !== label) frame.setAttribute("aria-label", label);
   }
 
   function disconnectObservers(observers) { for (const observer of observers) observer.disconnect(); }
@@ -814,16 +1306,22 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function syncAuxiliary() {
-    const roots = [...document.querySelectorAll(composerRootSelector)];
+    const roots = [...document.querySelectorAll(composerRootSelector)].filter(root => !root.closest('[data-codex-workflow-preview]'));
     const root = roots.length === 1 ? roots[0] : null;
     if (state.composerRoot !== root) {
       state.composerObserver?.disconnect();
       disconnectObservers(state.composerMountObservers);
+      captureComposer(state.composerRoot);
       restoreComposerMicrophones(state.composerRoot);
+      restoreComposerLabels();
       state.composerRoot = root;
       state.composerMountObservers = [];
       if (root) {
-        state.composerObserver = new MutationObserver(() => scheduleWork());
+        captureComposer(root);
+        state.composerObserver = new MutationObserver(() => {
+          captureComposer(root);
+          scheduleWork();
+        });
         state.composerObserver.observe(root, { childList: true, subtree: true, characterData: true,
           attributes: true, attributeFilter: ["aria-label", "aria-controls", "aria-describedby", "data-selected-reasoning-effort"] });
         state.composerMountObservers = observeMountChain("composer", root);
@@ -832,6 +1330,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     syncComposerMicrophone();
     syncUsageRemaining();
     syncWebAstraPro();
+    syncComposerLabels();
+    syncComposerWidth();
+    refreshComposerPreview();
+    syncConversation();
   }
 
   function renderUsageRemainingRow() {
@@ -840,28 +1342,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       label: "Usage remaining",
       description: "Show your remaining allowance. Hover to see the limit; click to open Usage.",
     });
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "no-drag cursor-interaction items-center select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-lg border-default bg-primary-soft-alpha enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover h-token-button-composer py-0 text-base leading-[18px] max-w-full justify-between px-3";
+    const {button, label} = nativeMenuButton();
     button.setAttribute("aria-label", "Usage remaining location");
     button.setAttribute("aria-describedby", "codex-workflow-showUsageRemaining-description");
     button.setAttribute("aria-haspopup", "menu");
     button.setAttribute("aria-expanded", "false");
     button.dataset.state = "closed";
-    const label = document.createElement("span");
-    label.className = "flex min-w-0 flex-1 items-center gap-1.5";
-    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    chevron.setAttribute("viewBox", "0 0 20 21");
-    chevron.setAttribute("class", "icon-2xs shrink-0 text-tertiary");
-    chevron.setAttribute("fill", "none");
-    chevron.setAttribute("aria-hidden", "true");
-    const path = document.createElementNS(chevron.namespaceURI, "path");
-    path.setAttribute("d", "M15.2793 7.71101C15.539 7.45131 15.961 7.45131 16.2207 7.71101C16.4804 7.97071 16.4804 8.39272 16.2207 8.65242L10.4707 14.4024C10.211 14.6621 9.78902 14.6621 9.52932 14.4024L3.77932 8.65242L3.69436 8.54792C3.52385 8.28979 3.55205 7.93828 3.77932 7.71101C4.00659 7.48374 4.3581 7.45554 4.61623 7.62605L4.72073 7.71101L10 12.9903L15.2793 7.71101Z");
-    path.setAttribute("fill", "currentColor");
-    path.setAttribute("stroke", "currentColor");
-    path.setAttribute("stroke-width", "0.6");
-    chevron.append(path);
-    button.append(label, chevron);
     const apply = (value) => { label.textContent = value === "composer" ? "Composer" : "Toolbar"; };
     const applyDisabled = (disabled) => {
       button.disabled = disabled || !state.settings.showUsageRemaining;
@@ -885,32 +1371,67 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return row;
   }
 
+  function nativeMenuButton() {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "no-drag cursor-interaction items-center select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-lg border-default bg-primary-soft-alpha enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover h-token-button-composer py-0 text-base leading-[18px] max-w-full justify-between px-3";
+    button.setAttribute("aria-haspopup", "menu"); button.setAttribute("aria-expanded", "false");
+    button.dataset.state = "closed";
+    const label = document.createElement("span");
+    label.className = "flex min-w-0 flex-1 items-center gap-1.5";
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.setAttribute("viewBox", "0 0 20 21");
+    chevron.setAttribute("class", "icon-2xs shrink-0 text-tertiary");
+    chevron.setAttribute("fill", "none");
+    chevron.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(chevron.namespaceURI, "path");
+    path.setAttribute("d", "M15.2793 7.71101C15.539 7.45131 15.961 7.45131 16.2207 7.71101C16.4804 7.97071 16.4804 8.39272 16.2207 8.65242L10.4707 14.4024C10.211 14.6621 9.78902 14.6621 9.52932 14.4024L3.77932 8.65242L3.69436 8.54792C3.52385 8.28979 3.55205 7.93828 3.77932 7.71101C4.00659 7.48374 4.3581 7.45554 4.61623 7.62605L4.72073 7.71101L10 12.9903L15.2793 7.71101Z");
+    path.setAttribute("fill", "currentColor");
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "0.6");
+    chevron.append(path);
+    button.append(label, chevron);
+    return {button, label};
+  }
+
   function closeUsageLocationMenu(restoreFocus = false) {
     state.usageLocationMenuClose?.(restoreFocus);
   }
 
   function openUsageLocationMenu(trigger) {
+    openWorkflowMenu(trigger, {
+      id: "usage-location", label: "Usage remaining location",
+      choices: ["toolbar", "composer"].map(value => ({value, label: value === "toolbar" ? "Toolbar" : "Composer"})),
+      selected: state.settings.usageRemainingLocation,
+      select: value => persistSetting("usageRemainingLocation", value),
+    });
+  }
+
+  function openWorkflowMenu(trigger, {id, label: menuLabel, choices, selected: selectedValue, select}) {
+    closeUsageLocationMenu();
+    if (!choices.length) return;
     const menu = div("no-drag z-50 m-px flex select-none flex-col overflow-y-auto bg-surface-elevated-secondary/90 text-default ring-border ring-[0.5px] shadow-xl-spread backdrop-blur-sm rounded-2xl p-[var(--menu-gutter,var(--spacing))] w-[240px]");
-    menu.id = "codex-workflow-usage-location-menu";
-    menu.dataset.codexWorkflow = "usage-location-menu";
+    menu.id = `codex-workflow-${id}-menu`;
+    menu.dataset.codexWorkflow = `${id}-menu`;
     menu.dataset.state = "open";
     menu.setAttribute("role", "menu");
-    menu.setAttribute("aria-label", "Usage remaining location");
+    menu.setAttribute("aria-label", menuLabel);
     menu.style.position = "fixed";
     menu.style.maxWidth = "calc(100vw - 16px)";
     menu.style.maxHeight = "calc(100vh - 16px)";
-    const items = ["toolbar", "composer"].map((value) => {
+    const items = choices.map(({value, label: text, icon}) => {
       const item = document.createElement("button");
       item.type = "button";
       item.className = "no-drag w-full text-default outline-hidden rounded-xl p-[var(--menu-item-padding,var(--padding-row-y)_var(--padding-row-x))] text-sm _comboboxRow_1jprg_2 group hover:bg-primary-ghost-hover focus:bg-primary-ghost-hover cursor-interaction";
       item.dataset.value = value;
-      item.setAttribute("role", "menuitemradio");
-      const selected = state.settings.usageRemainingLocation === value;
-      item.setAttribute("aria-checked", String(selected));
+      item.setAttribute("role", selectedValue === undefined ? "menuitem" : "menuitemradio");
+      const selected = selectedValue === value;
+      if (selectedValue !== undefined) item.setAttribute("aria-checked", String(selected));
       item.tabIndex = selected ? 0 : -1;
       const row = div("flex w-full items-center gap-1.5");
       const label = div("min-w-0 flex-1 truncate text-start");
-      label.textContent = value === "toolbar" ? "Toolbar" : "Composer";
+      label.textContent = text;
+      if (icon) row.append(icon);
       row.append(label);
       if (selected) {
         const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -926,8 +1447,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       item.append(row);
       item.addEventListener("click", async () => {
         closeUsageLocationMenu(true);
-        if (trigger.isConnected && !trigger.disabled && !state.settingsWriteInFlight && value !== state.settings.usageRemainingLocation) {
-          await persistSetting("usageRemainingLocation", value);
+        if (trigger.isConnected && !trigger.disabled && !state.settingsWriteInFlight && value !== selectedValue) {
+          await select(value);
           if (trigger.isConnected && !trigger.disabled &&
             (document.activeElement === document.body || document.activeElement === trigger)) trigger.focus({ preventScroll: true });
         }
@@ -974,7 +1495,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     trigger.setAttribute("aria-controls", menu.id);
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("scroll", scroll, true);
-    items.find((item) => item.getAttribute("aria-checked") === "true").focus({ preventScroll: true });
+    (items.find((item) => item.getAttribute("aria-checked") === "true") || items[0]).focus({ preventScroll: true });
   }
 
   function syncComposerMicrophone() {
@@ -1074,10 +1595,15 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     delete element.dataset.codexWorkflowComposerMicrophoneHidden;
   }
 
+  function needsUsageData() {
+    return state.settings.showUsageRemaining || state.settings.focusedInterface &&
+      state.settings.sidebarNavigation.footerShortcut === "usage-shortcut";
+  }
+
   async function syncUsageBridge() {
     if (!webFrame?.executeJavaScript || state.usageBridgeInFlight ||
-      state.usageBridgeEnabled === state.settings.showUsageRemaining) return;
-    const enabled = state.settings.showUsageRemaining;
+      state.usageBridgeEnabled === needsUsageData()) return;
+    const enabled = needsUsageData();
     state.usageBridgeInFlight = true;
     try {
       await webFrame.executeJavaScript(`(${installNativeUsageBridge.toString()})(${enabled})`);
@@ -1087,7 +1613,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       updateUsageText();
     } finally {
       state.usageBridgeInFlight = false;
-      if (enabled !== state.settings.showUsageRemaining) syncUsageBridge();
+      if (enabled !== needsUsageData()) syncUsageBridge();
     }
   }
 
@@ -1145,7 +1671,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (placement !== "toolbar" || !owner) releaseUsageToolbar();
     if (!owner || !template) {
       removeUsageButton();
-      if (!state.settings.showUsageRemaining) state.usageData = null;
+      if (!needsUsageData()) state.usageData = null;
       return;
     }
     if (!state.usageButton || state.usagePlacement !== placement) {
@@ -1174,6 +1700,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     for (const name of ["aspect-square", "!px-0", "group/sidebar-trigger", "browser:size-9", "ms-3"]) classes.delete(name);
     classes.add("shrink-0");
     classes.add("tabular-nums");
+    if (placement === "toolbar") classes.add("px-1");
     if (placement === "composer") {
       classes.delete("text-tertiary");
       classes.add("text-default");
@@ -1195,14 +1722,17 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function updateUsageText() {
-    const button = state.usageButton;
-    if (!button) return;
     const limit = selectUsageWindow(state.usageData);
     const text = limit ? `${limit.remaining}%` : "—";
     const label = limit?.label || "Usage unavailable";
-    if (button.textContent !== text) button.textContent = text;
     const accessible = limit ? `${label}: ${text} remaining. Open Usage settings` : "Usage unavailable. Open Usage settings";
-    if (button.getAttribute("aria-label") !== accessible) button.setAttribute("aria-label", accessible);
+    const footer = state.footerShortcut?.button;
+    for (const button of [state.usageButton, footer?.dataset.shortcut === "usage-shortcut" ? footer : null]) {
+      if (!button) continue;
+      if (button.textContent !== text) button.textContent = text;
+      if (button.getAttribute("aria-label") !== accessible) button.setAttribute("aria-label", accessible);
+      if (button === footer && button.title !== label) button.title = label;
+    }
     if (state.usageTooltip && state.usageTooltip.textContent !== label) state.usageTooltip.textContent = label;
   }
 
@@ -1368,8 +1898,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
     if (state.settingsWriteInFlight) return;
     const previous = state.settings;
+    const activityBefore = [...state.conversationActivity].map(([button, saved]) => [button, saved, {...saved}, button.getAttribute("aria-expanded")]);
     const focusedControl = document.activeElement;
-    const patch = key === "reset" ? {...defaults, sidebarNavigation:{...defaults.sidebarNavigation}} : {[key]:next};
+    const patch = key === "reset" ? {...defaults, sidebarNavigation:{...defaults.sidebarNavigation}} :
+      key === "resetComposer" ? Object.fromEntries(composerSettingKeys.map(name => [name, defaults[name]])) :
+      key === "resetConversation" ? Object.fromEntries(conversationSettingKeys.map(name => [name, defaults[name]])) : {[key]:next};
     state.settings = { ...previous, ...patch };
     state.settingsWriteInFlight = true;
     if (state.status) state.status.textContent = "";
@@ -1377,9 +1910,22 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     syncNavigation();
     syncAuxiliary();
     try {
+      if (key === "sidebarNavigation" && state.page === "sidebar") refreshNavigationRows();
       state.settings = normaliseSettings(await ipcRenderer.invoke("codex-workflow:settings:set", patch));
     } catch (error) {
       state.settings = previous;
+      for (const [button, original, before, expanded] of activityBefore) {
+        if (!state.conversationRoot?.contains(button)) continue;
+        let saved = state.conversationActivity.get(button);
+        if (!saved) {
+          saved = original;
+          state.conversationActivity.set(button, saved);
+          button.addEventListener("click", saved.listener);
+        }
+        saved.applying = true;
+        try { if (button.getAttribute("aria-expanded") !== expanded) button.click(); }
+        finally { Object.assign(saved, before); }
+      }
       if (state.status) state.status.textContent = "Couldn’t save changes. Please try again.";
       log("error", `settings write failed: ${error?.message || error}`);
     } finally {
@@ -1402,7 +1948,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
     if (state.resetButton) state.resetButton.disabled = state.settingsWriteInFlight;
     state.filterSwitch?.applyDisabled(state.settingsWriteInFlight);
-    for (const control of state.navigationControls) control.disabled = state.settingsWriteInFlight || !state.settings.focusedInterface;
+    for (const control of state.navigationControls) {
+      const full = control.hasAttribute("data-workflow-add-shortcut") && shortcutIds.every(id => state.settings.sidebarNavigation.order.includes(id));
+      control.disabled = state.settingsWriteInFlight || !state.settings.focusedInterface || full;
+      if (control.hasAttribute("data-workflow-add-shortcut")) control.title = full ? "All shortcuts added" : "Add shortcut";
+    }
   }
 
   function normaliseSettings(value) {
@@ -1416,9 +1966,13 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         settingsHidden: value.hiddenSettingsPages,
         accountHidden: [value.hidePetMenuItem === true && "pet", value.hideInviteFriendMenuItem === true && "invite"].filter(Boolean),
       } : {};
-    const sidebarItems = defaults.sidebarNavigation.order;
+    const builtins = defaults.sidebarNavigation.order.filter(id => id !== "settings-shortcut");
+    const sidebarItems = [...defaults.sidebarNavigation.order, "usage-shortcut", "whats-new-shortcut", "workflow-shortcut", "profile-shortcut"];
+    const savedOrder = Array.isArray(sidebarNavigation.order) ? sidebarNavigation.order.slice(0, 100) : defaults.sidebarNavigation.order;
+    const order = [...new Set([...savedOrder, ...(value?.schemaVersion >= 4 ? builtins : defaults.sidebarNavigation.order)]
+      .map(id => id === "general-shortcut" ? "settings-shortcut" : id).filter(id => sidebarItems.includes(id)))];
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       focusedInterface: typeof value?.focusedInterface === "boolean"
         ? value.focusedInterface
         : legacyFocusedInterface,
@@ -1438,16 +1992,26 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         ? value.hideComposerMicrophone
         : defaults.hideComposerMicrophone,
       showUsageRemaining: typeof value?.showUsageRemaining === "boolean" ? value.showUsageRemaining : defaults.showUsageRemaining,
+      composerModelLabel: value?.composerModelLabel === "short" ? "short" : "full",
+      composerReasoningLabel: value?.composerReasoningLabel === "compact" ? "compact" : "full",
+      composerWidth: value?.composerWidth === "wide" ? "wide" : "default",
+      conversationWidth: typeof value?.conversationWidth === "number" && Number.isFinite(value.conversationWidth)
+        ? Math.min(1440, Math.max(480, Math.round(value.conversationWidth / 8) * 8)) : null,
+      messageSpacing: ["compact", "relaxed"].includes(value?.messageSpacing) ? value.messageSpacing : "default",
+      userMessageStyle: value?.userMessageStyle === "plain" ? "plain" : "bubble",
+      toolActivity: value?.toolActivity === "expanded" ? "expanded" : "summary",
+      showMessageTimestamps: value?.showMessageTimestamps === true,
       usageRemainingLocation: ["toolbar", "composer"].includes(value?.usageRemainingLocation) ? value.usageRemainingLocation : defaults.usageRemainingLocation,
       hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
         ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
           typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
         : [],
       sidebarNavigation: {
-        order: [...new Set([...(Array.isArray(sidebarNavigation?.order) ? sidebarNavigation.order : []),
-          ...sidebarItems].filter((id) => sidebarItems.includes(id)))],
+        order,
+        footerShortcut: sidebarNavigation.footerShortcut === "general-shortcut" ? "settings-shortcut" :
+          shortcutIds.includes(sidebarNavigation.footerShortcut) ? sidebarNavigation.footerShortcut : defaults.sidebarNavigation.footerShortcut,
         hidden: Array.isArray(sidebarNavigation?.hidden)
-          ? [...new Set(sidebarNavigation.hidden.slice(0, 100).filter((item) => sidebarItems.includes(item)))]
+          ? [...new Set(sidebarNavigation.hidden.slice(0, 100).map(id => id === "general-shortcut" ? "settings-shortcut" : id).filter((item) => order.includes(item)))]
           : [...defaults.sidebarNavigation.hidden],
         width: typeof sidebarNavigation?.width === "number" && Number.isFinite(sidebarNavigation.width)
           ? Math.min(520, Math.max(240, Math.round(sidebarNavigation.width)))
@@ -1468,13 +2032,16 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   const appNavigationLabels = { "new-chat": "New chat", "pull-requests": "Pull requests",
-    scheduled: "Scheduled", plugins: "Plugins", explore: "Explore", "settings-shortcut": "Settings shortcut" };
+    scheduled: "Scheduled", plugins: "Plugins", explore: "Explore", "settings-shortcut": "Settings",
+    "usage-shortcut": "Usage", "whats-new-shortcut": "What's New", "workflow-shortcut": "Workflow", "profile-shortcut": "Profile" };
+  const shortcutIds = ["settings-shortcut", "usage-shortcut", "whats-new-shortcut", "workflow-shortcut", "profile-shortcut"];
   const accountNavigationLabels = {usage: "Usage", pet: "Show pet", invite: "Invite a friend", settings: "Settings", logout: "Log out"};
   const iconButtonClass = "no-drag flex size-6 shrink-0 items-center justify-center rounded-full cursor-interaction hover:bg-primary-ghost-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-40";
   // Native Tabs page variant: tabs-bd1cb7e26bf5.js (staging), tabs-a1458634b2c1.js (installed).
   const segmentClass = "no-drag cursor-interaction items-center text-sm select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 flex min-w-0 gap-1.5 rounded-md px-2 py-1 font-medium shrink-0 whitespace-nowrap";
 
   function redrawWorkflowPanel() {
+    closeUsageLocationMenu();
     state.drag?.cancel();
     const previous = state.panel;
     state.panel = renderWorkflowPanel();
@@ -1489,6 +2056,184 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   function navigationChangeCount() {
     return Object.keys(defaults.sidebarNavigation).filter(key =>
       JSON.stringify(state.settings.sidebarNavigation[key]) !== JSON.stringify(defaults.sidebarNavigation[key])).length;
+  }
+
+  function renderAddShortcutButton() {
+    const button = renderActionButton("Add shortcut");
+    button.append(navigationGlyph("plus"));
+    button.dataset.workflowAddShortcut = "true";
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-expanded", "false");
+    const open = event => {
+      event.preventDefault();
+      if (button.disabled || state.settingsWriteInFlight) return;
+      if (button.getAttribute("aria-expanded") === "true") return closeUsageLocationMenu(true);
+      openWorkflowMenu(button, {
+        id: "add-shortcut", label: "Add shortcut",
+        choices: shortcutIds.filter(id => !state.settings.sidebarNavigation.order.includes(id))
+          .map(value => ({value, label: appNavigationLabels[value], icon: shortcutGlyph(value)})),
+        select: async id => {
+          await navigationUpdate({order: [...state.settings.sidebarNavigation.order, id]});
+          if (button.disabled) state.panel?.querySelector(`[data-workflow-navigation-item="${id}"] button`)?.focus({preventScroll:true});
+        },
+      });
+    };
+    button.addEventListener("click", open);
+    button.addEventListener("keydown", event => { if (["ArrowDown", "ArrowUp"].includes(event.key)) open(event); });
+    state.navigationControls.push(button);
+    return button;
+  }
+
+  function shortcutGlyph(id) {
+    if (id === "settings-shortcut") return nativeSettingsGlyph();
+    if (id === "workflow-shortcut") {
+      const root = document.createElement("span");
+      root.append(navigationGlyph("eye"));
+      replaceNavIcon(root);
+      return root.firstElementChild;
+    }
+    if (id === "profile-shortcut") {
+      const svg = navigationGlyph("eye");
+      svg.setAttribute("viewBox", "0 0 20 20");
+      svg.removeAttribute("stroke");
+      // Profile settings glyph, audited Codex 26.903.71938 / 8576.
+      const path = document.createElementNS(svg.namespaceURI, "path");
+      path.setAttribute("fill", "currentColor");
+      path.setAttribute("d", "M16.585 10C16.585 6.3632 13.6368 3.41504 10 3.41504C6.3632 3.41504 3.41504 6.3632 3.41504 10C3.41504 11.9528 4.26592 13.7062 5.61621 14.9121C6.6544 13.6452 8.23235 12.835 10 12.835C11.7674 12.835 13.3447 13.6454 14.3828 14.9121C15.7334 13.7062 16.585 11.9531 16.585 10ZM10 14.165C8.67626 14.165 7.49115 14.7585 6.69531 15.6953C7.66679 16.2602 8.79525 16.585 10 16.585C11.2041 16.585 12.3316 16.2597 13.3027 15.6953C12.5069 14.759 11.3233 14.1651 10 14.165ZM11.835 8.5C11.835 7.48656 11.0134 6.66504 10 6.66504C8.98656 6.66504 8.16504 7.48656 8.16504 8.5C8.16504 9.51344 8.98656 10.335 10 10.335C11.0134 10.335 11.835 9.51344 11.835 8.5ZM17.915 10C17.915 14.3713 14.3713 17.915 10 17.915C5.62867 17.915 2.08496 14.3713 2.08496 10C2.08496 5.62867 5.62867 2.08496 10 2.08496C14.3713 2.08496 17.915 5.62867 17.915 10ZM13.165 8.5C13.165 10.248 11.748 11.665 10 11.665C8.25202 11.665 6.83496 10.248 6.83496 8.5C6.83496 6.75202 8.25202 5.33496 10 5.33496C11.748 5.33496 13.165 6.75202 13.165 8.5Z");
+      svg.replaceChildren(path);
+      return svg;
+    }
+    return navigationGlyph(id === "usage-shortcut" ? "gauge" : "help");
+  }
+
+  function activateSidebarShortcut(id, anchor) {
+    if (id === "whats-new-shortcut") {
+      const sidebar = state.navigationRoot?.closest(".app-shell-left-panel");
+      const buttons = [...(sidebar?.querySelectorAll('button[aria-label="Open help menu"]') || [])];
+      anchor ||= sidebar?.querySelector('[data-workflow-shortcut][data-workflow-native-nav="whats-new-shortcut"]');
+      if (buttons.length === 1 && anchor) openWhatsNewPopup(buttons[0], anchor);
+      return;
+    }
+    restoreNativeSettingsView();
+    state.pendingWorkflowShortcut = false;
+    if (id === "workflow-shortcut") {
+      state.page = "home";
+      if (state.customNav?.isConnected) { state.customNav.click(); return; }
+      state.pendingWorkflowShortcut = true;
+    }
+    if (id === "settings-shortcut") {
+      beginDiscovery();
+      ipcRenderer.invoke("codex-workflow:settings:activate", {target:"keyboard-shortcut"})
+        .catch(error => log("error", error.message));
+      return;
+    }
+    const path = id === "usage-shortcut" ? "/settings/usage" : id === "profile-shortcut" ? "/settings/profile" :
+      id === "workflow-shortcut" ? "/settings/general-settings" : null;
+    if (path) window.dispatchEvent(new MessageEvent("message", {data: {type:"navigate-to-route", path}}));
+    beginDiscovery();
+  }
+
+  function openWhatsNewPopup(trigger, anchor) {
+    if (state.whatsNewPopup?.anchor === anchor) { state.whatsNewPopup.close(); return; }
+    state.whatsNewPopup?.close();
+    let popup, saved, applied = {}, x = 0, y = 0, timer;
+    const pointerEvents = anchor.style.pointerEvents;
+    const close = () => {
+      popup?.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape", code:"Escape", bubbles:true, cancelable:true}));
+      release();
+      if (anchor.isConnected) anchor.focus({preventScroll:true});
+      requestAnimationFrame(() => { if (!state.whatsNewPopup && anchor.isConnected) anchor.focus({preventScroll:true}); });
+    };
+    // Keep the owning trigger clickable through Radix's modal outside-pointer guard.
+    const retainToggle = event => {
+      if (anchor.contains(event.target)) { event.preventDefault(); event.stopPropagation(); }
+    };
+    const properties = ["translate", "width", "max-width", "max-height", "transform-origin"];
+    const restore = () => {
+      if (!popup) return;
+      for (const key of properties) {
+        if (popup.style.getPropertyValue(key) !== applied[key]) continue;
+        const [value, priority] = saved[key];
+        if (value) popup.style.setProperty(key, value, priority);
+        else popup.style.removeProperty(key);
+      }
+      popup.removeAttribute("data-workflow-news-popup");
+    };
+    const release = () => {
+      clearTimeout(timer); discovery.disconnect(); mounted.disconnect(); resize?.disconnect();
+      window.removeEventListener("resize", align);
+      document?.removeEventListener("scroll", align, true);
+      document?.removeEventListener("pointerdown", retainToggle, true);
+      anchor.style.pointerEvents = pointerEvents;
+      anchor.setAttribute("aria-expanded", "false");
+      anchor.dataset.state = "closed";
+      restore();
+      if (state.whatsNewPopup?.release === release) state.whatsNewPopup = null;
+      if (document?.activeElement === trigger && anchor.isConnected) anchor.focus({preventScroll:true});
+    };
+    const write = (key, value) => {
+      applied[key] = value;
+      if (popup.style.getPropertyValue(key) !== value) popup.style.setProperty(key, value);
+    };
+    const align = () => {
+      if (!popup?.isConnected || !anchor.isConnected) { release(); return; }
+      const rect = anchor.getBoundingClientRect();
+      if (!rect.width || !rect.height) { release(); return; }
+      const footer = anchor.hasAttribute("data-workflow-footer-shortcut");
+      const horizontal = footer ? state.navigationRoot?.querySelector("button.sidebar-item")?.getBoundingClientRect() || rect : rect;
+      const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--spacing")) || 4;
+      const edge = gap * 2;
+      write("width", `${horizontal.width}px`);
+      write("max-width", `${innerWidth - edge * 2}px`);
+      const below = innerHeight - rect.bottom - gap - edge;
+      const above = rect.top - gap - edge;
+      const down = footer ? above < below : popup.scrollHeight <= below || below >= above;
+      write("max-height", `${Math.max(0, down ? below : above)}px`);
+      const bounds = popup.getBoundingClientRect();
+      const left = Math.max(edge, Math.min(horizontal.left, innerWidth - bounds.width - edge));
+      const top = down ? rect.bottom + gap : rect.top - bounds.height - gap;
+      x += left - bounds.left; y += Math.max(edge, top) - bounds.top;
+      write("translate", `${x}px ${y}px`);
+      write("transform-origin", down ? "top left" : "bottom left");
+    };
+    const mounted = new MutationObserver(() => {
+      if (!popup?.isConnected || !anchor.isConnected) release();
+    });
+    const resize = typeof ResizeObserver === "function" ? new ResizeObserver(align) : null;
+    const discover = () => {
+      const menus = [...document.querySelectorAll('[role="menu"]')].filter(menu =>
+        trigger.id && menu.getAttribute("aria-labelledby") === trigger.id && !menu.closest('[cmdk-root]'));
+      if (menus.length !== 1) return;
+      popup = menus[0];
+      saved = Object.fromEntries(properties.map(key => [key, [popup.style.getPropertyValue(key), popup.style.getPropertyPriority(key)]]));
+      popup.dataset.workflowNewsPopup = "true";
+      discovery.disconnect(); clearTimeout(timer);
+      for (let parent = popup.parentElement; parent; parent = parent.parentElement) {
+        mounted.observe(parent, {childList:true});
+        if (parent === document.body) break;
+      }
+      resize?.observe(popup); resize?.observe(anchor);
+      window.addEventListener("resize", align);
+      document.addEventListener("scroll", align, true);
+      align();
+      requestAnimationFrame(() => { if (state.whatsNewPopup?.release === release) align(); });
+    };
+    const discovery = new MutationObserver(discover);
+    state.whatsNewPopup = {anchor, release, close};
+    anchor.style.pointerEvents = "auto";
+    anchor.setAttribute("aria-expanded", "true");
+    anchor.dataset.state = "open";
+    document.addEventListener("pointerdown", retainToggle, true);
+    discovery.observe(document.body, {childList:true, subtree:true});
+    timer = setTimeout(release, 1500);
+    // Native Radix trigger opens on ArrowDown, not a synthetic click.
+    if (trigger.getAttribute("aria-expanded") !== "true") {
+      trigger.focus({preventScroll:true});
+      trigger.dispatchEvent(new KeyboardEvent("keydown", {
+        key:"ArrowDown", code:"ArrowDown", bubbles:true, cancelable:true, composed:true,
+      }));
+    }
+    discover();
   }
 
   function navigationKeys() {
@@ -1519,7 +2264,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     for (const [key, value] of Object.entries({viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
       "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", class: "icon-sm", "aria-hidden": "true"})) svg.setAttribute(key, value);
-    const shapes = kind === "back" ? [["path", {d:"m15 18-6-6 6-6"}]] :
+    const shapes = kind === "plus" ? [["path",{d:"M5 12h14"}], ["path",{d:"M12 5v14"}]] :
+      kind === "gauge" ? [["path",{d:"m12 14 4-4"}], ["path",{d:"M3.34 19a10 10 0 1 1 17.32 0"}]] :
+      kind === "help" ? [["circle",{cx:12,cy:12,r:10}], ["path",{d:"M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"}], ["path",{d:"M12 17h.01"}]] :
+      kind === "trash" ? [["path",{d:"M3 6h18"}], ["path",{d:"M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"}], ["path",{d:"M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"}], ["line",{x1:10,x2:10,y1:11,y2:17}], ["line",{x1:14,x2:14,y1:11,y2:17}]] :
+      kind === "back" ? [["path", {d:"m15 18-6-6 6-6"}]] :
       kind === "grip" ? [9, 15].flatMap(cx => [5, 12, 19].map(cy => ["circle", {cx, cy, r: 1}])) :
       kind === "lock" ? [["circle", {cx:12,cy:16,r:1}], ["rect",{x:3,y:10,width:18,height:12,rx:2}], ["path",{d:"M7 10V7a5 5 0 0 1 10 0v3"}]] :
       kind === "hidden" ? ["M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49", "M14.084 14.158a3 3 0 0 1-4.242-4.242", "M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143", "m2 2 20 20"].map(d => ["path",{d}]) :
@@ -1570,7 +2319,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       const button = document.createElement("button");
       button.type = "button";
       const selected = state.navigationTab === id;
-      button.className = `${segmentClass} ${selected ? "bg-surface-secondary text-default" : "text-secondary hover:bg-surface-secondary"}`;
+      button.className = `${segmentClass} ${selected ? "text-default bg-segmented-selected enabled:hover:bg-segmented-selected-hover data-[state=open]:bg-segmented-selected-hover border-transparent" : "text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent"}`;
       button.setAttribute("aria-pressed", String(selected));
       button.textContent = label;
       button.addEventListener("click", () => { state.navigationTab = id; redrawWorkflowPanel(); });
@@ -1578,11 +2327,38 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
     header.append(tabs);
     const section = sectionHeading("Navigation items");
+    if (state.navigationTab === "app") section.firstElementChild.append(renderAddShortcutButton());
     const card = settingsCard();
     card.dataset.codexWorkflowNavigationRows = "true";
     section.append(card);
     page.append(header, section);
     populateNavigationRows(card);
+    if (state.navigationTab === "account") {
+      const shortcutCard = settingsCard(); shortcutCard.classList.add("mt-8");
+      const row = div("flex items-center justify-between px-4 gap-6 py-3");
+      const copy = div("flex min-w-0 flex-1 flex-col gap-0.5");
+      const title = div("min-w-0 text-sm text-default font-medium"); title.textContent = "Footer shortcut";
+      const detail = div("min-w-0 text-xs leading-4 text-balance text-secondary");
+      detail.id = "codex-workflow-footer-shortcut-description";
+      detail.textContent = "Choose the shortcut beside your account.";
+      copy.append(title, detail);
+      const {button, label} = nativeMenuButton();
+      button.setAttribute("aria-label", "Footer shortcut"); button.setAttribute("aria-describedby", detail.id);
+      const apply = prefs => label.replaceChildren(shortcutGlyph(prefs.footerShortcut), document.createTextNode(appNavigationLabels[prefs.footerShortcut]));
+      const applyDisabled = busy => { button.disabled = busy || !state.settings.focusedInterface; if (button.disabled) closeUsageLocationMenu(); };
+      state.settingControls.set("sidebarNavigation", {button, apply, applyDisabled});
+      const open = event => {
+        event.preventDefault();
+        if (button.disabled) return;
+        if (state.usageLocationMenuClose) { closeUsageLocationMenu(true); return; }
+        openWorkflowMenu(button, {id:"footer-shortcut", label:"Footer shortcut", selected:state.settings.sidebarNavigation.footerShortcut,
+          choices:shortcutIds.map(value => ({value, label:appNavigationLabels[value], icon:shortcutGlyph(value)})),
+          select:value => navigationUpdate({footerShortcut:value})});
+      };
+      button.addEventListener("click", open);
+      button.addEventListener("keydown", event => { if (["ArrowUp", "ArrowDown"].includes(event.key)) open(event); });
+      row.append(copy, button); shortcutCard.append(row); page.append(shortcutCard);
+    }
     if (state.navigationTab === "app") {
       const layout = sectionHeading("Layout");
       layout.classList.add("mt-8");
@@ -1644,7 +2420,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const reset = renderActionButton("Reset this section", true);
     reset.addEventListener("click", () => navigationUpdate({...defaults.sidebarNavigation}));
     state.navigationControls.push(reset);
-    footer.append(state.status, reset); page.append(footer);
+    const footerCopy = div("flex min-w-0 flex-col gap-1");
+    footerCopy.append(renderVersionLabel(), state.status);
+    footer.append(footerCopy, reset); page.append(footer);
     refreshSettingControls();
   }
 
@@ -1685,7 +2463,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       });
       if (!item.locked) state.navigationControls.push(handle);
       left.append(handle);
-      const icon = state.icons.get(`${state.navigationTab}:${item.id}`);
+      const icon = state.navigationTab === "app" && shortcutIds.includes(item.id)
+        ? shortcutGlyph(item.id) : state.icons.get(`${state.navigationTab}:${item.id}`);
       if (icon) { const clone = icon.cloneNode(true); scrubSidebarClone(clone); left.append(clone); }
       const label = div("min-w-0 text-sm text-default font-medium"); label.textContent = item.label; left.append(label);
       const controls = div("flex shrink-0 items-center gap-2 text-xs text-secondary");
@@ -1705,6 +2484,21 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         state.navigationControls.push(eye);
         if (hidden) { const copy = div("text-xs text-secondary"); copy.textContent = "Hidden"; controls.append(copy); }
         controls.append(eye);
+      }
+      if (state.navigationTab === "app") {
+        if (shortcutIds.includes(item.id)) {
+          const remove = document.createElement("button");
+          remove.type = "button"; remove.className = iconButtonClass;
+          remove.setAttribute("aria-label", `Remove ${item.label} shortcut`);
+          remove.title = `Remove ${item.label} shortcut`;
+          remove.append(navigationGlyph("trash"));
+          remove.addEventListener("click", async () => {
+            const prefs = state.settings.sidebarNavigation;
+            await navigationUpdate({order:prefs.order.filter(id => id !== item.id), hidden:prefs.hidden.filter(id => id !== item.id)});
+            if (!remove.isConnected) state.panel?.querySelector('[data-workflow-add-shortcut]')?.focus({preventScroll:true});
+          });
+          state.navigationControls.push(remove); controls.insertBefore(remove, controls.lastElementChild);
+        }
       }
       row.append(left, controls); rows.push(row);
     }
@@ -1883,6 +2677,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (!document?.documentElement) return;
     const prefs = state.settings.sidebarNavigation;
     const enabled = state.settings.focusedInterface;
+    if (state.whatsNewPopup && (!enabled || !state.whatsNewPopup.anchor.isConnected ||
+      (!state.whatsNewPopup.anchor.hasAttribute("data-workflow-footer-shortcut") &&
+      (!prefs.order.includes("whats-new-shortcut") || prefs.hidden.includes("whats-new-shortcut"))))) state.whatsNewPopup.close();
     const scope = 'aside.app-shell-left-panel #app-shell-sidebar';
     const rules = enabled ? [`${scope} [data-workflow-nav-flatten]{display:contents!important;}`] : [];
     if (enabled) {
@@ -1891,11 +2688,14 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       prefs.order.forEach((id, index) => rules.push(`${scope} [data-workflow-native-nav="${id}"]{order:${index + 1}!important;}`));
       prefs.hidden.forEach(id => rules.push(`${scope} [data-workflow-native-nav="${id}"]{display:none!important;}`));
       if (!prefs.showRecentChats) rules.push(`${scope} section[data-app-action-sidebar-section-heading="Recents"]{display:none!important;}`);
-      const settingsScope = '.app-shell-left-panel > nav.sidebar-navigation[aria-label="Settings"]:not([role="dialog"] *, [role="menu"] *, [cmdk-root] *)';
+      // Native floating panels wrap Settings during sidebar transitions (build 8576).
+      const settingsScope = ':is(.app-shell-left-panel, [data-testid="app-shell-floating-left-panel"]) nav.sidebar-navigation[aria-label="Settings"]:not([role="dialog"] *, [role="menu"] *, [cmdk-root] *, .vertical-scroll-fade-mask *)';
       prefs.settingsHidden.forEach(id => rules.push(`${settingsScope} button[data-settings-panel-slug="${id}"]:not(:disabled){display:none!important;}`));
       if (prefs.settingsHidden.length) {
         const visible = prefs.settingsHidden.map(id => `:not([data-settings-panel-slug="${id}"])`).join("");
-        rules.push(`${settingsScope} .flex.flex-col.gap-1:has(> .group\\/nav-section-title):has(> .flex.flex-col > button[data-settings-panel-slug]):not(:has(> .flex.flex-col > button${visible})):not(:has(.group\\/nav-section-title button)){display:none!important;}`);
+        // A section can mount before its rows. Keep empty headings hidden too,
+        // but preserve disabled rows, extension content and header actions.
+        rules.push(`${settingsScope} .flex.flex-col.gap-1:has(> .group\\/nav-section-title):has(> .flex.flex-col):not(:has(> :not(.group\\/nav-section-title, .flex.flex-col))):not(:has(> .flex.flex-col > :not(button[data-settings-panel-slug]:not(:disabled)))):not(:has(> .flex.flex-col > button${visible})):not(:has(.group\\/nav-section-title button)){display:none!important;}`);
       }
       // The native Account entry is a span-wrapped button without a panel slug.
       // Preserve it after the sortable entries instead of letting order:0 lift it.
@@ -1947,18 +2747,25 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
           let parent = node.parentElement;
           while (parent && parent !== group) { markNavigation(parent,"data-workflow-nav-flatten","true"); parent = parent.parentElement; }
         }
-        let shortcut = group.querySelector("[data-workflow-shortcut]");
-        if (enabled && !shortcut) {
+        for (const id of shortcutIds) {
+          let shortcut = group.querySelector(`[data-workflow-shortcut][data-workflow-native-nav="${id}"]`);
+          if (!enabled || !prefs.order.includes(id)) {
+            if (shortcut?.contains(document.activeElement)) rows.get("new-chat")?.focus();
+            shortcut?.remove();
+            continue;
+          }
+          if (shortcut) continue;
           shortcut = rows.get("pull-requests").cloneNode(true); scrubSidebarClone(shortcut);
-          shortcut.dataset.workflowShortcut = "true"; shortcut.dataset.workflowNativeNav = "settings-shortcut";
-          replaceLabelText(shortcut,"Settings"); shortcut.setAttribute("aria-label","Settings");
-          const gear = nativeSettingsGlyph();
-          shortcut.querySelector("svg")?.replaceWith(gear);
-          state.icons.set("app:settings-shortcut",gear.cloneNode(true));
-          shortcut.addEventListener("click", () => { beginDiscovery(); ipcRenderer.invoke("codex-workflow:settings:activate",{target:"keyboard-shortcut"}).catch(error => log("error",error.message)); });
+          shortcut.removeAttribute("aria-current"); shortcut.removeAttribute("aria-selected");
+          shortcut.dataset.workflowShortcut = "true"; shortcut.dataset.workflowNativeNav = id;
+          replaceLabelText(shortcut,appNavigationLabels[id]); shortcut.setAttribute("aria-label",appNavigationLabels[id]);
+          shortcut.querySelector("svg")?.replaceWith(shortcutGlyph(id));
+          if (id === "whats-new-shortcut") {
+            shortcut.setAttribute("aria-haspopup", "menu"); shortcut.setAttribute("aria-expanded", "false");
+          }
+          shortcut.addEventListener("click", () => activateSidebarShortcut(id));
           group.append(shortcut);
         }
-        if (!enabled) shortcut?.remove();
       }
       const active = document.activeElement;
       if (root.contains(active) && getComputedStyle(active).display === "none") rows.get("new-chat")?.focus();
@@ -1968,7 +2775,53 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     for (const node of document.querySelectorAll('nav[aria-label="Settings"] button[data-settings-panel-slug]')) {
       rememberIcon("settings",node.dataset.settingsPanelSlug,node);
     }
+    syncFooterShortcut();
     syncAccountNavigation();
+  }
+
+  function syncFooterShortcut() {
+    const trigger = state.navigationRoot?.closest(".app-shell-left-panel")?.querySelector('button[aria-label="Open help menu"]');
+    const current = state.footerShortcut;
+    if (current && (current.trigger !== trigger || !current.button.isConnected || !state.settings.focusedInterface)) {
+      if (state.whatsNewPopup?.anchor === current.button) state.whatsNewPopup.close();
+      current.button.remove(); current.trigger.style.display = current.display;
+      state.footerShortcut = null;
+    }
+    if (!trigger || !state.settings.focusedInterface) return;
+    if (!state.footerShortcut) {
+      const button = trigger.cloneNode(true); scrubSidebarClone(button);
+      button.removeAttribute("id"); button.removeAttribute("aria-controls");
+      button.dataset.workflowFooterShortcut = "true";
+      button.setAttribute("aria-expanded", "false"); button.dataset.state = "closed";
+      state.footerShortcut = {trigger, button, display:trigger.style.display};
+      state.navigationObserver?.observe(trigger.parentElement, {childList:true});
+      trigger.style.display = "none"; trigger.after(button);
+      button.addEventListener("click", () => activateSidebarShortcut(state.settings.sidebarNavigation.footerShortcut, button));
+      button.addEventListener("keydown", event => {
+        if (state.settings.sidebarNavigation.footerShortcut === "whats-new-shortcut" && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+          event.preventDefault(); activateSidebarShortcut("whats-new-shortcut", button);
+        }
+      });
+    }
+    const {button} = state.footerShortcut;
+    const id = state.settings.sidebarNavigation.footerShortcut;
+    if (button.dataset.shortcut === id) {
+      if (id === "usage-shortcut") updateUsageText();
+      return;
+    }
+    if (state.whatsNewPopup?.anchor === button) state.whatsNewPopup.close();
+    button.dataset.shortcut = id;
+    button.setAttribute("aria-label", appNavigationLabels[id]); button.title = appNavigationLabels[id];
+    if (id === "whats-new-shortcut") button.setAttribute("aria-haspopup", "menu");
+    else button.removeAttribute("aria-haspopup");
+    button.className = trigger.className;
+    button.replaceChildren(shortcutGlyph(id));
+    if (id === "usage-shortcut") {
+      // Native footer is size-8; retain its height/focus states, allow 100% width.
+      button.classList.remove("size-8", "aspect-square", "!px-0");
+      button.classList.add("h-8", "px-1", "tabular-nums", "text-sm", "leading-[18px]");
+      updateUsageText();
+    }
   }
 
   function syncAccountNavigation() {
@@ -2053,6 +2906,10 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
     if (!custom) return;
     state.customNav = custom;
+    if (state.pendingWorkflowShortcut) {
+      state.pendingWorkflowShortcut = false;
+      custom.click();
+    }
 
     if (state.activeWorkflow) {
       const nativeActive = Array.from(nav.querySelectorAll('[data-settings-panel-slug][aria-current="page"]'))
@@ -2178,6 +3035,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const target = event.target instanceof Element ? event.target : null;
     const item = target?.closest("[data-settings-panel-slug], [data-list-navigation-item], [data-codex-workflow='nav-item']");
     if (!item || item === state.customNav) return;
+    state.pendingWorkflowShortcut = false;
     if (state.activeWorkflow) restoreNativeSettingsView();
     queueMicrotask(() => scheduleWork("settings"));
   }

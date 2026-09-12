@@ -68,7 +68,7 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
   assert.deepEqual(
     loadSettings({ schemaVersion: 1, efficiencyMode: false }),
     {
-      schemaVersion: 3,
+      schemaVersion: 4,
       sidebarNavigation: loadSettings({}).sidebarNavigation,
       focusedInterface: false,
       hiddenSettingsPages: [],
@@ -77,6 +77,8 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
       hideComposerMicrophone: false,
+      composerModelLabel: "full", composerReasoningLabel: "full", composerWidth: "default",
+      conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble", toolActivity: "summary", showMessageTimestamps: false,
       showUsageRemaining: true,
       usageRemainingLocation: "toolbar",
     },
@@ -119,7 +121,7 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hideComposerMicrophone: "yes",
     }),
     {
-      schemaVersion: 3,
+      schemaVersion: 4,
       sidebarNavigation: loadSettings({}).sidebarNavigation,
       focusedInterface: false,
       hidePullRequests: false,
@@ -128,6 +130,8 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hideInviteFriendMenuItem: true,
       replaceHelpWithSettings: true,
       hideComposerMicrophone: false,
+      composerModelLabel: "full", composerReasoningLabel: "full", composerWidth: "default",
+      conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble", toolActivity: "summary", showMessageTimestamps: false,
       showUsageRemaining: true,
       usageRemainingLocation: "toolbar",
     },
@@ -189,6 +193,34 @@ test("Settings activation sends the native shortcut without moving the pointer",
     ),
     /untrusted renderer/u,
   );
+});
+
+test("shortcut membership migrates and removal survives atomic persistence and restart", () => {
+  const legacy = loadSettings({schemaVersion:3,sidebarNavigation:{order:['explore'],hidden:['settings-shortcut']}});
+  assert.ok(legacy.sidebarNavigation.order.includes('settings-shortcut'));
+  assert.equal(legacy.sidebarNavigation.footerShortcut,'whats-new-shortcut');
+  assert.equal(loadSettings({sidebarNavigation:{footerShortcut:'invalid'}}).sidebarNavigation.footerShortcut,'whats-new-shortcut');
+  const next = loadSettings({schemaVersion:4,sidebarNavigation:{
+    order:['usage-shortcut','usage-shortcut','general-shortcut','settings-shortcut','whats-new-shortcut','workflow-shortcut','profile-shortcut','invalid',null],
+    hidden:['general-shortcut','usage-shortcut','invalid'],
+    footerShortcut:'general-shortcut',
+  }});
+  assert.deepEqual(next.sidebarNavigation.order,['usage-shortcut','settings-shortcut','whats-new-shortcut','workflow-shortcut','profile-shortcut','pull-requests','scheduled','plugins','explore']);
+  assert.deepEqual(next.sidebarNavigation.hidden,['settings-shortcut','usage-shortcut']);
+  assert.equal(next.sidebarNavigation.footerShortcut,'settings-shortcut');
+  for (const footerShortcut of ['workflow-shortcut','profile-shortcut']) {
+    assert.equal(loadSettings({...next,sidebarNavigation:{...next.sidebarNavigation,footerShortcut}}).sidebarNavigation.footerShortcut,footerShortcut);
+  }
+  assert.deepEqual(loadSettings(next),next);
+  const root = fs.mkdtempSync(path.join(tmpdir(),'workflow-shortcuts-'));
+  try {
+    const h = createUpdateHarness(new Map(),root,fs);
+    h.handlers.get('codex-workflow:settings:set')(h.trusted,next);
+    const reopened = createUpdateHarness(new Map(),root,fs);
+    const saved = reopened.handlers.get('codex-workflow:settings:get')(h.trusted);
+    assert.deepEqual(JSON.parse(JSON.stringify(saved)),next);
+    assert.equal(fs.statSync(path.join(root,'settings.json')).mode & 0o777,0o600);
+  } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });
 
 test("numeric sidebar width accepts only bounded integers from the main Codex frame", async () => {
