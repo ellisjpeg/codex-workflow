@@ -919,7 +919,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       value.textContent = width == null ? "Default" : `${input.value} px`;
       input.setAttribute("aria-valuetext", width == null ? "Native default" : `${input.value} pixels`);
       const percentage = (Number(input.value) - 480) / 960 * 100;
-      input.style.background = `linear-gradient(to right, var(--color-accent-blue) ${percentage}%, var(--color-border) ${percentage}%)`;
+      input.style.background = `linear-gradient(to right, var(--color-chart-blue) ${percentage}%, var(--color-border) ${percentage}%)`;
       input.style.color = "var(--color-text)";
     };
     input.addEventListener("input", () => { apply(input.valueAsNumber); refreshConversationPreview(frame, input.valueAsNumber); });
@@ -2271,9 +2271,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       id, label: accountNavigationLabels[id], locked: ["settings", "logout"].includes(id), group: "account",
     }));
     const nodes = [...(state.settingsNav?.querySelectorAll("button[data-settings-panel-slug]") || [])];
-    const groups = [...new Set(nodes.map(node => node.parentElement))];
-    return groups.flatMap((parent, index) => nodes.filter(node => node.parentElement === parent)
-      .map((node, position) => ({id: node.dataset.settingsPanelSlug,
+    const account = findSettingsAccountButton(state.settingsNav);
+    if (account) nodes.push(account);
+    const parentOf = node => node === account ? node.parentElement?.parentElement : node.parentElement;
+    const groups = [...new Set(nodes.map(parentOf))];
+    return groups.flatMap((parent, index) => nodes.filter(node => parentOf(node) === parent)
+      .map((node, position) => ({id: node === account ? "account" : node.dataset.settingsPanelSlug,
         label: node.getAttribute("aria-label") || node.textContent.trim(),
         locked: node.dataset.settingsPanelSlug === "workflow", group: `settings-${index}`, position}))
       .sort((a, b) => (prefs.settingsOrder.indexOf(a.id) < 0 ? 100 + a.position : prefs.settingsOrder.indexOf(a.id)) -
@@ -2699,8 +2702,28 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (icon) state.icons.set(`${area}:${id}`, icon.cloneNode(true));
   }
 
+  function findSettingsAccountButton(nav) {
+    const matches = [...(nav?.querySelectorAll("span.contents > button.sidebar-item:not([data-settings-panel-slug])") || [])]
+      .filter(node => node.getAttribute("aria-label") === "Account");
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function syncSettingsAccountNavigation() {
+    for (const nav of document.querySelectorAll('nav.sidebar-navigation[aria-label="Settings"]')) {
+      const account = findSettingsAccountButton(nav);
+      for (const node of nav.querySelectorAll('[data-workflow-settings-native-nav="account"]')) {
+        if (node !== account && node !== account?.parentElement) node.removeAttribute("data-workflow-settings-native-nav");
+      }
+      if (!account) continue;
+      markNavigation(account, "data-workflow-settings-native-nav", "account");
+      markNavigation(account.parentElement, "data-workflow-settings-native-nav", "account");
+      rememberIcon("settings", "account", account);
+    }
+  }
+
   function syncNavigation() {
     if (!document?.documentElement) return;
+    syncSettingsAccountNavigation();
     const prefs = state.settings.sidebarNavigation;
     const enabled = state.settings.focusedInterface;
     if (state.whatsNewPopup && (!enabled || !state.whatsNewPopup.anchor.isConnected ||
@@ -2716,17 +2739,20 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       if (!prefs.showRecentChats) rules.push(`${scope} section[data-app-action-sidebar-section-heading="Recents"]{display:none!important;}`);
       // Native floating panels wrap Settings during sidebar transitions (build 8576).
       const settingsScope = ':is(.app-shell-left-panel, [data-testid="app-shell-floating-left-panel"]) nav.sidebar-navigation[aria-label="Settings"]:not([role="dialog"] *, [role="menu"] *, [cmdk-root] *, .vertical-scroll-fade-mask *)';
-      prefs.settingsHidden.forEach(id => rules.push(`${settingsScope} button[data-settings-panel-slug="${id}"]:not(:disabled){display:none!important;}`));
+      const settingsItemSelector = id => id === "account"
+        ? '[data-workflow-settings-native-nav="account"]'
+        : `button[data-settings-panel-slug="${id}"]`;
+      prefs.settingsHidden.forEach(id => rules.push(`${settingsScope} ${settingsItemSelector(id)}:not(:disabled){display:none!important;}`));
       if (prefs.settingsHidden.length) {
         const visible = prefs.settingsHidden.map(id => `:not([data-settings-panel-slug="${id}"])`).join("");
+        const visibleAccount = prefs.settingsHidden.includes("account") ? "" : ', [data-workflow-settings-native-nav="account"]';
         // A section can mount before its rows. Keep empty headings hidden too,
         // but preserve disabled rows, extension content and header actions.
-        rules.push(`${settingsScope} .flex.flex-col.gap-1:has(> .group\\/nav-section-title):has(> .flex.flex-col):not(:has(> :not(.group\\/nav-section-title, .flex.flex-col))):not(:has(> .flex.flex-col > :not(button[data-settings-panel-slug]:not(:disabled)))):not(:has(> .flex.flex-col > button${visible})):not(:has(.group\\/nav-section-title button)){display:none!important;}`);
+        rules.push(`${settingsScope} .flex.flex-col.gap-1:has(> .group\\/nav-section-title):has(> .flex.flex-col):not(:has(> :not(.group\\/nav-section-title, .flex.flex-col))):not(:has(> .flex.flex-col > :not(button[data-settings-panel-slug]:not(:disabled), [data-workflow-settings-native-nav="account"]))):not(:has(> .flex.flex-col > :is(button${visible}${visibleAccount}))):not(:has(.group\\/nav-section-title button)){display:none!important;}`);
       }
-      // The native Account entry is a span-wrapped button without a panel slug.
-      // Preserve it after the sortable entries instead of letting order:0 lift it.
+      // Give unlisted native rows a trailing fallback before applying saved order.
       if (prefs.settingsOrder.length) rules.push(`${settingsScope} :where(.flex.flex-col:has(> button[data-settings-panel-slug]) > *, .contents > button.sidebar-item:not([data-settings-panel-slug])){order:101!important;}`);
-      prefs.settingsOrder.forEach((id,index) => rules.push(`${settingsScope} button[data-settings-panel-slug="${id}"]{order:${index + 1}!important;}`));
+      prefs.settingsOrder.forEach((id,index) => rules.push(`${settingsScope} ${settingsItemSelector(id)}{order:${index + 1}!important;}`));
       prefs.accountHidden.forEach(id => rules.push(`[role="menu"][data-workflow-account-menu] [data-workflow-account-item="${id}"]{display:none!important;}`));
       prefs.accountOrder.forEach((id,index) => {
         rules.push(`[role="menu"][data-workflow-account-menu] [data-workflow-account-item="${id}"]{order:${index + 1}!important;}`);
@@ -2735,8 +2761,9 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     }
     if (!state.navigationStyle) { state.navigationStyle = document.createElement("style"); state.navigationStyle.dataset.codexWorkflowNavigationStyle = "true"; document.documentElement.append(state.navigationStyle); }
     const css = rules.join("\n");
-    const activeSettings = document.activeElement?.closest?.("[data-settings-panel-slug]");
-    if (enabled && prefs.settingsHidden.includes(activeSettings?.dataset.settingsPanelSlug)) state.customNav?.focus();
+    const activeSettings = document.activeElement?.closest?.("[data-settings-panel-slug], [data-workflow-settings-native-nav]");
+    const activeSettingsId = activeSettings?.dataset.settingsPanelSlug || activeSettings?.dataset.workflowSettingsNativeNav;
+    if (enabled && prefs.settingsHidden.includes(activeSettingsId)) state.customNav?.focus();
     if (state.navigationStyle.textContent !== css) state.navigationStyle.textContent = css;
     const roots = [...document.querySelectorAll("#app-shell-sidebar")].filter(node => node.closest("aside.app-shell-left-panel"));
     const root = roots.length === 1 ? roots[0] : null;
@@ -3059,7 +3086,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
 
   function onSettingsNavClick(event) {
     const target = event.target instanceof Element ? event.target : null;
-    const item = target?.closest("[data-settings-panel-slug], [data-list-navigation-item], [data-codex-workflow='nav-item']");
+    const item = target?.closest("[data-settings-panel-slug], [data-workflow-settings-native-nav], [data-list-navigation-item], [data-codex-workflow='nav-item']");
     if (!item || item === state.customNav) return;
     state.pendingWorkflowShortcut = false;
     if (state.activeWorkflow) restoreNativeSettingsView();

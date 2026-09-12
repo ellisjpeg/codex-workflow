@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "workflowVersion": "0.5.39",
+  "workflowVersion": "0.5.40",
   "codexVersion": "26.908.40834",
   "codexBuild": "8881",
   "bundleIdentifier": "com.openai.codex",

@@ -1,5 +1,13 @@
 # Conversation settings, 0.5.35
 
+## Width-track correction, 0.5.40
+
+Codex 26.908.40834 / 8881 no longer defines the historical
+`--color-accent-blue` variable. The Conversation width gradient now uses the
+current native `--color-chart-blue` token with the existing border remainder,
+matching Workflow's audited switches while preserving the native Appearance
+slider geometry, focus ring, keyboard behavior and theme response.
+
 ## Approved production installation, 12 September 2026
 
 Jayden approved promotion of the complete staging candidate and publication to

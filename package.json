@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow",
-  "version": "0.5.39",
+  "version": "0.5.40",
   "description": "Customise Codex to suit the way you work, with a native-feeling experience and local control.",
   "private": true,
   "type": "module",

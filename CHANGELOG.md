@@ -2,6 +2,11 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.40 - 2026-09-12
+
+- Restore the Conversation width track with the current native blue token on Codex build 8881.
+- Add the native Account destination to Settings navigation ordering and visibility controls.
+
 ## 0.5.39 - 2026-09-12
 
 - Restore native dropdown padding, toolbar triggers and checkmarks after the Codex 26.908.40834 / 8881 update.

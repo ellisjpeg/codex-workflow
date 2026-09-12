@@ -208,6 +208,9 @@ test("shortcut membership migrates and removal survives atomic persistence and r
   assert.deepEqual(next.sidebarNavigation.order,['usage-shortcut','settings-shortcut','whats-new-shortcut','workflow-shortcut','profile-shortcut','pull-requests','scheduled','plugins','explore']);
   assert.deepEqual(next.sidebarNavigation.hidden,['settings-shortcut','usage-shortcut']);
   assert.equal(next.sidebarNavigation.footerShortcut,'settings-shortcut');
+  const account = loadSettings({schemaVersion:4,sidebarNavigation:{settingsOrder:['account'],settingsHidden:['account']}});
+  assert.deepEqual(account.sidebarNavigation.settingsOrder,['account']);
+  assert.deepEqual(account.sidebarNavigation.settingsHidden,['account']);
   for (const footerShortcut of ['workflow-shortcut','profile-shortcut']) {
     assert.equal(loadSettings({...next,sidebarNavigation:{...next.sidebarNavigation,footerShortcut}}).sidebarNavigation.footerShortcut,footerShortcut);
   }

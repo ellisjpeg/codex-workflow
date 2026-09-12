@@ -1,5 +1,14 @@
 # Sidebar & navigation, 11 September 2026
 
+## Settings Account visibility, 0.5.40
+
+Settings navigation now includes Account in its existing ordering and visibility
+controls. Build 8881 still renders Account as the unique English-labelled native
+sidebar button inside a `span.contents` wrapper, without a panel slug. Workflow
+marks only that exact one-candidate structure, hides and orders both wrapper and
+button, restores them through the existing canonical settings path, and no-ops
+when the target is absent or ambiguous. No schema, IPC or observer was added.
+
 ## Workflow and Profile shortcuts, 0.5.29
 
 Both App sidebar > Add shortcut and Account menu > Footer shortcut offer

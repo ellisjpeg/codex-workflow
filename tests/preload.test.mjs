@@ -77,6 +77,8 @@ test('Conversation preview and five settings use native tokens, preserve content
     assert.match(panel.textContent,/Updated the spacing and kept the labels readable\./);
     assert.doesNotMatch(panel.textContent,/Changes apply|Collapse long code/);
     const range=panel.querySelector('input[type=range]');
+    assert.match(range.style.background,/var\(--color-chart-blue\)/);
+    assert.doesNotMatch(range.style.background,/--color-accent-blue/);
     range.value='880';range.dispatchEvent(new h.window.Event('input'));range.dispatchEvent(new h.window.Event('change'));await flush();
     [...panel.querySelectorAll('button')].find(n=>n.textContent==='Relaxed').click();await flush();
     await h.choose('userMessageStyle','Plain text');
@@ -682,7 +684,7 @@ test("empty settings headings stay hidden before rows arrive and preserve unowne
   } finally { h.dom.window.close(); }
 });
 
-test("settings ordering preserves the native Account wrapper and follows visual keyboard order", async () => {
+test("settings navigation can hide, restore and reorder the native Account wrapper", async () => {
   const h = await createHarness({source:starterSource});
   try {
     h.document.querySelector('aside').remove();
@@ -691,16 +693,32 @@ test("settings ordering preserves the native Account wrapper and follows visual 
     nav.classList.add('sidebar-navigation');
     const group = h.document.createElement('div'); group.className = 'flex flex-col';
     group.append(...nav.children); nav.append(group);
-    const account = h.document.createElement('span'); account.className = 'contents'; account.innerHTML = '<button class="sidebar-item">Account</button>'; group.append(account);
+    const account = h.document.createElement('span'); account.className = 'contents'; account.innerHTML = '<button class="sidebar-item" aria-label="Account"><svg></svg><span>Account</span></button>'; group.append(account);
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
     h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
     [...h.document.querySelectorAll('[aria-label="Navigation area"] button')].find(n=>n.textContent === 'Settings navigation').click();
+    const accountEye = () => h.document.querySelector('[data-workflow-navigation-item="account"] [aria-pressed]');
+    assert.equal(accountEye().getAttribute('aria-label'), 'Hide Account');
+    accountEye().click(); await flush();
+    assert.equal(h.window.getComputedStyle(account).display, 'none');
+    assert.equal(h.window.getComputedStyle(account.firstElementChild).display, 'none');
+    assert.equal(accountEye().getAttribute('aria-label'), 'Show Account');
+    const duplicate = account.cloneNode(true); group.append(duplicate);
+    h.window.dispatchEvent(new h.window.Event('resize')); await flush();
+    assert.equal(account.hasAttribute('data-workflow-settings-native-nav'), false);
+    assert.notEqual(h.window.getComputedStyle(account).display, 'none');
+    assert.notEqual(h.window.getComputedStyle(duplicate).display, 'none');
+    duplicate.remove(); h.window.dispatchEvent(new h.window.Event('resize')); await flush();
+    assert.equal(h.window.getComputedStyle(account).display, 'none');
+    accountEye().click(); await flush();
+    assert.notEqual(h.window.getComputedStyle(account).display, 'none');
+    assert.notEqual(h.window.getComputedStyle(account.firstElementChild).display, 'none');
     h.document.querySelector('[data-workflow-navigation-item="appearance"] button').dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'ArrowUp', bubbles:true})); await flush();
     const appearance = nav.querySelector('[data-settings-panel-slug="appearance"]');
     const general = nav.querySelector('[data-settings-panel-slug="general-settings"]');
     assert.equal(h.window.getComputedStyle(appearance).order, '1');
-    assert.equal(h.window.getComputedStyle(account).order, '101');
-    assert.equal(h.window.getComputedStyle(account.firstElementChild).order, '101');
+    assert.equal(h.window.getComputedStyle(account).order, '6');
+    assert.equal(h.window.getComputedStyle(account.firstElementChild).order, '6');
     for (const node of group.children) node.getBoundingClientRect = () => ({top:Number(h.window.getComputedStyle(node).order) * 32,height:32,left:0});
     appearance.focus();
     appearance.dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'Tab', bubbles:true,cancelable:true}));
