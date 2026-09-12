@@ -308,16 +308,16 @@ function assertTrustedSender(event) {
   if (!isTrustedSender(event)) throw new Error("Codex Workflow rejected an untrusted renderer");
 }
 
-// Build 8576: native Z0n/Q0n read/write sidebar-width through Jx/Yx.
+// Build 8881: native Wsi/Gsi read/write sidebar-width through jh/Mh.
 // Settings unmounts the app sidebar. Updating the same native store makes the
 // next app mount use this width, while manual dragging keeps its normal ownership.
 function nativeSidebarWidthScript(width) {
   return `(async () => {
     if (!document.querySelector('nav[aria-label="Settings"]')) throw Error('Open Settings first');
-    const native = await import('app://-/assets/app-initial-a9514281e192.js');
-    if (typeof native.Y2t !== 'function' || typeof native.$2t !== 'function') throw Error('Unsupported sidebar store');
-    ${width === undefined ? "" : `native.$2t('sidebar-width', ${width});`}
-    const value = native.Y2t('sidebar-width', 275);
+    const native = await import('app://-/assets/app-initial-9b95fa538c62.js');
+    if (typeof native.X4t !== 'function' || typeof native.e3t !== 'function') throw Error('Unsupported sidebar store');
+    ${width === undefined ? "" : `native.e3t('sidebar-width', ${width});`}
+    const value = native.X4t('sidebar-width', 275);
     return Number.isFinite(value) ? Math.max(240, Math.min(520, Math.round(value))) : 275;
   })()`;
 }

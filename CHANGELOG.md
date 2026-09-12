@@ -2,6 +2,14 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.39 - 2026-09-12
+
+- Restore native dropdown padding, toolbar triggers and checkmarks after the Codex 26.908.40834 / 8881 update.
+- Update the native usage and sidebar-width bridges, switch thumb colours, sidebar icon sizing and Composer preview for that build.
+- Preserve animated model labels in the live composer while keeping the preview readable.
+- Correct the search fallback background and make the observer regression test wait for actual animation frames.
+- Verify the combined fixes with 204 checks and isolated staging visual, keyboard, zoom and restart checks.
+
 ## 0.5.35 - 2026-09-12
 
 - Add functional Conversation settings for message width, spacing, user-message style, tool activity and timestamps, with an interactive preview and section reset.

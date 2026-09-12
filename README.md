@@ -18,12 +18,12 @@ Composer controls, native preview, width behaviour and staging verification are 
 Conversation width, spacing, message styles, activity and timestamps are documented in [Conversation settings](docs/CONVERSATION_SETTINGS.md).
 
 - macOS
-- Codex Desktop `26.903.71938` (build `8576`)
+- Codex Desktop `26.908.40834` (build `8881`)
 - Node.js 24 or newer
 
 The installer intentionally refuses unreviewed Codex versions and builds. A desktop update may change internal routes, DOM structure, preload behavior, or ASAR metadata even when the interface looks similar.
 
-Build `8576` is covered by the [release compatibility audit](docs/CODEX_26.903.71938_AUDIT.md).
+Build `8881` is covered by the [compatibility audit](docs/CODEX_26.908.40834_AUDIT.md).
 
 ## Install
 

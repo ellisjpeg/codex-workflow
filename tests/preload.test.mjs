@@ -8,6 +8,42 @@ import { JSDOM } from "jsdom";
 const preloadSource = readFileSync(new URL("../parked/workflow-before-starter/preload.cjs", import.meta.url), "utf8");
 const starterSource = readFileSync(new URL("../runtime/preload.cjs", import.meta.url), "utf8");
 
+test('Workflow dropdowns retain build 8881 native spacing, keyboard navigation and save rollback', async () => {
+  const h = await createHarness({source: starterSource, setSettings: async () => { throw Error('disk full'); }});
+  try {
+    h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+    assert.ok(h.document.querySelector('[data-codex-workflow="search"]').classList.contains('bg-background-secondary-soft-alpha'));
+    h.document.querySelector('[data-codex-workflow-section=composer]').click();
+    const trigger = h.document.querySelector('[aria-labelledby="codex-workflow-composerReasoningLabel-label"]');
+    trigger.click();
+    const menu = h.document.querySelector('[role=menu]');
+    const items = [...menu.querySelectorAll('[role=menuitemradio]')];
+    // Audited General > Send shortcut and Appearance > UI font, 26.908.40834 / 8881.
+    assert.ok(trigger.classList.contains('button-toolbar'));
+    assert.ok(trigger.classList.contains('rounded-button-toolbar'));
+    assert.ok(menu.classList.contains('p-[var(--app-menu-gutter,var(--spacing))]'));
+    for (const item of items) {
+      assert.ok(item.classList.contains('p-[var(--app-menu-item-padding,var(--padding-row-y)_var(--padding-row-x))]'));
+      assert.ok(item.classList.contains('min-h-[var(--app-menu-item-height,0px)]'));
+      assert.ok(item.classList.contains('shrink-0'));
+      assert.doesNotMatch(item.className, /_comboboxRow_/);
+    }
+    assert.equal(h.document.activeElement, items[0]);
+    items[0].dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'ArrowDown',bubbles:true,cancelable:true}));
+    assert.equal(h.document.activeElement, items[1]);
+    items[1].click();
+    await flush();
+    assert.equal(trigger.textContent, 'Full name');
+    assert.equal(trigger.disabled, false);
+    assert.equal(h.document.querySelector('[role=menu]'), null);
+    trigger.click();
+    h.document.activeElement.dispatchEvent(new h.window.KeyboardEvent('keydown', {key:'Escape',bubbles:true,cancelable:true}));
+    assert.equal(h.document.activeElement, trigger);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+    assert.equal(trigger.hasAttribute('aria-controls'), false);
+  } finally { h.dom.window.close(); }
+});
+
 async function conversationHarness(options = {}) {
   const h = await createHarness({source:starterSource,...options});
   const thread = h.document.createElement('div');
@@ -136,7 +172,7 @@ async function composerHarness(options = {}) {
   column.className = 'thread-scroll-container';
   column.setAttribute('data-app-action-timeline-scroll','');
   column.style.setProperty('--thread-content-max-width','48rem','important');
-  column.innerHTML = `<div role="presentation" data-composer-layout="multiline"><div data-composer-attachments>PRIVATE ATTACHMENT</div><div contenteditable="true" id="draft" data-codex-composer="true">PRIVATE DRAFT</div><div data-composer-rows="stacked"><button data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium" id="picker"><span class="_ModelPickerTriggerModelText_90m7w_41">GPT-6 Astra</span><span class="_ModelPickerTriggerEffortLabel_90m7w_53">Medium</span></button><button aria-label="Dictate" aria-describedby="draft">Mic</button><button aria-label="Send">Send</button></div></div>`;
+  column.innerHTML = `<div role="presentation" data-composer-layout="multiline"><div data-composer-attachments>PRIVATE ATTACHMENT</div><div contenteditable="true" id="draft" data-codex-composer="true">PRIVATE DRAFT</div><div data-composer-rows="stacked"><button data-codex-intelligence-trigger="true" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium" id="picker"><span class="_ModelPickerTriggerModelText_bvaoz_42">GPT-6 Astra</span><span class="_ModelPickerTriggerEffortLabel_bvaoz_54"><span class="sr-only">Medium</span><span class="_ModelPickerTriggerEffortViewport_bvaoz_55"><span class="_ModelPickerTriggerEffortLayers_bvaoz_94"><span data-reasoning-effort="medium">Medium</span><span data-reasoning-effort="high">High</span></span></span></span></button><button aria-label="Dictate" aria-describedby="draft">Mic</button><button aria-label="Send">Send</button></div></div>`;
   old.replaceWith(column);
   h.emitMutation(h.document.body,{addedNodes:[column],removedNodes:[old]});
   h.document.querySelector('[data-codex-workflow="nav-item"]').click();
@@ -170,16 +206,21 @@ test('Composer page clones native controls safely, saves labels and resets only 
     assert.equal(preview.querySelector('[aria-label=Dictate]').style.display,'none');
     await h.choose('composerModelLabel','Short name');
     await h.choose('composerReasoningLabel','Compact');
-    assert.equal(h.column.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent,'Astra');
-    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Med');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerModelText_bvaoz_42').textContent,'Astra');
+    assert.equal(h.column.querySelector('[data-reasoning-effort=medium]').textContent,'Med');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_bvaoz_54 > .sr-only').textContent,'Med');
+    assert.equal(h.column.querySelectorAll('[data-reasoning-effort]').length,2);
+    assert.equal(h.column.querySelector('[data-reasoning-effort=high]').textContent,'High');
+    assert.equal(preview.querySelectorAll('[data-reasoning-effort]').length,0);
+    assert.equal(preview.querySelector('._ModelPickerTriggerEffortLabel_bvaoz_54').textContent,'Med');
     assert.match(preview.getAttribute('aria-label'),/Astra\. Med\./);
     [...panel.querySelectorAll('button')].find(n=>n.textContent==='Wide').click(); await flush();
     assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))');
     [...panel.querySelectorAll('button')].find(n=>n.textContent==='Reset this section').click(); await flush();
     assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'48rem');
     assert.equal(h.column.style.getPropertyPriority('--thread-content-max-width'),'important');
-    assert.equal(h.column.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent,'GPT-6 Astra');
-    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Medium');
+    assert.equal(h.column.querySelector('._ModelPickerTriggerModelText_bvaoz_42').textContent,'GPT-6 Astra');
+    assert.equal(h.column.querySelector('[data-reasoning-effort=medium]').textContent,'Medium');
     assert.equal(mic.getAttribute('aria-checked'),'true');
     h.document.querySelector('[data-settings-panel-slug=general-settings]').click();
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
@@ -205,9 +246,9 @@ test('Composer label/width failure rolls back preview and real controls, rejecti
     assert.match(panel.textContent,/Couldn’t save/);
     assert.equal(wide.disabled,false);
     const choice=h.choose('composerReasoningLabel','Compact'); await flush();
-    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Med');
+    assert.equal(h.column.querySelector('[data-reasoning-effort=medium]').textContent,'Med');
     reject(Error('disk full')); await choice; await flush();
-    assert.equal(h.column.querySelector('._ModelPickerTriggerEffortLabel_90m7w_53').textContent,'Medium');
+    assert.equal(h.column.querySelector('[data-reasoning-effort=medium]').textContent,'Medium');
   } finally {h.dom.window.close();}
 });
 
@@ -215,7 +256,7 @@ test('Composer presentation survives native text updates, ambiguity, remounts an
   const h=await composerHarness({initialSettings:{composerModelLabel:'short',composerReasoningLabel:'compact',composerWidth:'wide'}});
   try {
     const root=h.column.firstElementChild;
-    const model=root.querySelector('._ModelPickerTriggerModelText_90m7w_41');
+    const model=root.querySelector('._ModelPickerTriggerModelText_bvaoz_42');
     model.firstChild.data='GPT-5.6 Sol';
     h.emitMutation(model); await flush();
     assert.equal(model.textContent,'Sol');
@@ -225,9 +266,9 @@ test('Composer presentation survives native text updates, ambiguity, remounts an
     duplicate.remove(); h.emitMutation(root,{removedNodes:[duplicate]}); await flush();
     assert.equal(model.textContent,'Sol');
     const replacement=root.cloneNode(true);
-    replacement.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent='GPT-6 Astra';
+    replacement.querySelector('._ModelPickerTriggerModelText_bvaoz_42').textContent='GPT-6 Astra';
     root.replaceWith(replacement); h.emitMutation(h.column,{addedNodes:[replacement],removedNodes:[root]}); await flush();
-    assert.equal(replacement.querySelector('._ModelPickerTriggerModelText_90m7w_41').textContent,'Astra');
+    assert.equal(replacement.querySelector('._ModelPickerTriggerModelText_bvaoz_42').textContent,'Astra');
     assert.equal(h.column.style.getPropertyValue('--thread-content-max-width'),'calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))');
     h.document.querySelector('[data-settings-panel-slug=general-settings]').click();
     assert.equal(h.document.querySelectorAll('[data-codex-workflow-preview]').length,0);
@@ -264,6 +305,10 @@ test("all active Workflow switches use the native blue track, including refreshe
   try {
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
     const check = button => {
+      const thumb = button.firstElementChild.firstElementChild;
+      // Codex 26.908.40834 / 8881: General switches use the semantic thumb token.
+      assert.equal(thumb.classList.contains('bg-control-thumb-on-accent'), true);
+      assert.equal(thumb.classList.contains('border-control-thumb-on-accent'), true);
       assert.equal(button.firstElementChild.classList.contains('bg-chart-blue'), true);
       assert.equal(button.firstElementChild.classList.contains('bg-chart-red'), false);
       assert.equal(button.firstElementChild.getAttribute('aria-hidden'), 'true');
@@ -276,6 +321,7 @@ test("all active Workflow switches use the native blue track, including refreshe
     const recent = h.document.querySelector('[data-codex-workflow-recent-switch]');
     check(recent); recent.click(); await flush();
     assert.equal(recent.firstElementChild.classList.contains('bg-text/10'), true);
+    assert.equal(recent.firstElementChild.firstElementChild.classList.contains('bg-control-thumb-on-accent'), true);
     recent.click(); await flush(); check(recent);
   } finally { h.dom.window.close(); }
 });
@@ -434,6 +480,10 @@ test("navigation hides and reorders native rows before paint, preserves New chat
       <button class="sidebar-item"><span class="text-fade-truncate">Explore</span></button></div></div>
       <section data-app-action-sidebar-section-heading="Recents"><h2>Recents</h2><button>Fixture chat</button></section>
       </div></nav></div>`;
+    const nativeIcon = h.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    nativeIcon.setAttribute('class', 'absolute inset-0 size-full');
+    nativeIcon.setAttribute('viewBox', '0 0 24 24');
+    aside.querySelector('.sidebar-item').prepend(nativeIcon);
     h.window.dispatchEvent(new h.window.Event("resize")); await flush();
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
     h.document.querySelector('[data-codex-workflow-section="sidebar"]').click();
@@ -457,6 +507,10 @@ test("navigation hides and reorders native rows before paint, preserves New chat
     assert.doesNotMatch(page().textContent, /Show task previews|Changes apply to/);
     assert.equal(page().querySelector('[data-workflow-navigation-item="new-chat"] button').disabled, true);
     assert.equal(page().querySelector('[data-workflow-navigation-item="new-chat"] [aria-pressed]'), null);
+    const rowIcon = page().querySelector('[data-workflow-navigation-item="new-chat"] > div > svg');
+    assert.equal(rowIcon.getAttribute('class'), 'icon-sm shrink-0');
+    assert.equal(rowIcon.getAttribute('viewBox'), '0 0 24 24');
+    assert.equal(nativeIcon.getAttribute('class'), 'absolute inset-0 size-full');
     page().querySelector('[aria-label="Hide Pull requests"]').click(); await flush();
     const pull = () => aside.querySelector('[data-workflow-native-nav="pull-requests"]');
     assert.equal(h.window.getComputedStyle(pull()).display, "none");

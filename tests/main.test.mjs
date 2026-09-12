@@ -232,9 +232,9 @@ test("numeric sidebar width accepts only bounded integers from the main Codex fr
   const event = {sender,senderFrame:frame};
   const resize = h.handlers.get("codex-workflow:sidebar-width");
   assert.equal(await resize(event,{action:"get"}),321);
-  assert.doesNotMatch(scripts.at(-1),/native\.\$2t\('sidebar-width'/);
+  assert.doesNotMatch(scripts.at(-1),/native\.e3t\('sidebar-width'/);
   assert.equal(await resize(event,{action:"set",width:321}),321);
-  assert.match(scripts.at(-1),/native\.\$2t\('sidebar-width', 321\)/);
+  assert.match(scripts.at(-1),/native\.e3t\('sidebar-width', 321\)/);
   for (const width of [239,521,NaN,Infinity,"321",321.5]) {
     await assert.rejects(resize(event,{action:"set",width}),/Invalid sidebar width/);
   }

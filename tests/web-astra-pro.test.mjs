@@ -142,7 +142,11 @@ test("preload bridge follows native composer and portal remounts without a mutat
       webFrame: { executeJavaScript: async (code) => { calls++; return window.eval(code); } },
     };
   };
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+  // Discovery, bridge writes and their observer follow-up run on animation frames.
+  // Six actual frames preserve the old settling window even when the suite is busy.
+  const settle = async () => {
+    for (let frame = 0; frame < 6; frame++) await new Promise(resolve => window.requestAnimationFrame(resolve));
+  };
   try {
     window.eval(source);
     await settle();

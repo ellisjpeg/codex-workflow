@@ -5,7 +5,8 @@ import { JSDOM } from "jsdom";
 
 const source = readFileSync(new URL("../runtime/preload.cjs", import.meta.url), "utf8");
 const bridge = source.slice(source.indexOf("async function installNativeUsageBridge("), source.indexOf("\nfunction isTopFrame("));
-assert.equal(bridge.split("await import(assets[0].href)").length, 2);
+const nativeImport = "await import(new URL('./app-initial-9b95fa538c62.js', assets[0].src).href)";
+assert.equal(bridge.split(nativeImport).length, 2);
 
 const raw = (used = 25, account = "fixture-account") => ({
   account_id: account,
@@ -26,7 +27,7 @@ function deferred() {
 }
 
 function harness(initial = raw(), url = "app://codex/index.html") {
-  const dom = new JSDOM('<link rel="modulepreload" href="./assets/app-initial-a9514281e192.js">', {
+  const dom = new JSDOM('<script type="module" src="./assets/index-b0a81f126468.js"></script>', {
     url, runScripts: "outside-only",
   });
   const { window } = dom;
@@ -69,8 +70,8 @@ function harness(initial = raw(), url = "app://codex/index.html") {
   const scope = { queryClient: client, query: { getOptions: () => ({ queryKey: ["rate-limit-status"], staleTime: 30000 }) } };
   let mounted = scope;
   const native = {
-    $f: () => mounted,
-    sAt: {},
+    tg: () => mounted,
+    rz: {},
     xmn: { subscribe(type, fn) {
       const set = handlers.get(type) ?? new Set();
       handlers.set(type, set);
@@ -82,13 +83,18 @@ function harness(initial = raw(), url = "app://codex/index.html") {
   // executes in a separate DOM realm with native API fixtures.
   window.__importNative = async (url) => {
     imports += 1;
-    assert.equal(url, new URL("./assets/app-initial-a9514281e192.js", window.location.href).href);
+    assert.equal(url, new URL("./assets/app-initial-9b95fa538c62.js", window.location.href).href);
     const gate = importGate;
     importGate = null;
     if (gate) await gate.promise;
     return native;
   };
-  window.eval(bridge.replace("await import(assets[0].href)", "await __importNative(assets[0].href)"));
+  window.__importBus = async (url) => {
+    assert.equal(url, new URL("./assets/message-bus-828b3d0e2c34.js", window.location.href).href);
+    return { r: native.xmn };
+  };
+  window.eval(bridge.replace(nativeImport, "await __importNative(new URL('./app-initial-9b95fa538c62.js', assets[0].src).href)")
+    .replace("await import(new URL(", "await __importBus(new URL("));
   window.addEventListener("codex-workflow:usage", (event) => {
     assert.equal(typeof event.detail, "string");
     assert.ok(!event.detail.includes("fixture-account") && !event.detail.includes("must-not-leave"));
@@ -249,7 +255,7 @@ test("monthly reset delay handoff does not refresh early and unload disposes the
 
 test("missing audited asset stays unavailable without retry until explicitly disabled", async () => {
   const h = harness();
-  const link = h.window.document.querySelector("link");
+  const link = h.window.document.querySelector('script[type="module"]');
   link.remove();
   await h.install(true);
   assert.equal(h.output.at(-1).unavailable, true);
