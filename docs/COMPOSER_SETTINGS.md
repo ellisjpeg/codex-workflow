@@ -45,8 +45,9 @@ Audited installed Codex 26.903.71938 / 8576:
   unambiguous composer owner; the label snapshots preserve React text updates.
 - The preview copies the live native DOM after both editor and picker mount.
   Drafts, attachments, native IDs/references, drop targets and editable state
-  are removed. The clone is inert and has an accessible summary. A sanitized
-  exact-build native fallback supports entering Settings before composer mount.
+  are removed. The clone is inert and has an accessible summary. Alpha 1 replaces
+  the historical captured fallback with a complete Workflow-authored sample and
+  locally obtained native glyphs; see [native assets](NATIVE_ASSET_PROVENANCE.md).
   Partial React unmounts must never replace a complete cached example.
 - Native `--thread-content-max-width` aligns message and composer columns.
   `thread-scroll-layout-97a811fea267.js` applies a Motion translation and exposes

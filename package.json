@@ -1,6 +1,6 @@
 {
   "name": "codex-workflow",
-  "version": "0.5.40",
+  "version": "0.5.42",
   "description": "Customise Codex to suit the way you work, with a native-feeling experience and local control.",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
   },
   "homepage": "https://github.com/ellisjpeg/codex-workflow#readme",
   "engines": {
-    "node": ">=24.0.0"
+    "node": "^24.15.0 || >=26.0.0"
   },
   "keywords": [
     "codex",
@@ -31,7 +31,7 @@
     "setup": "node scripts/setup.mjs",
     "staging": "node scripts/staging.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check runtime/main.cjs && node --check runtime/preload.cjs && node --check runtime/updater.cjs && node --check loader.cjs && node --check scripts/lib.mjs && node --check scripts/install.mjs && node --check scripts/install-runtime.mjs && node --check scripts/setup.mjs && node --check scripts/staging-updater-disabled.cjs && node --check scripts/staging.mjs && node --check scripts/status.mjs && node --check scripts/uninstall.mjs && npm test",
+    "check": "node --check runtime/main.cjs && node --check runtime/preload.cjs && node --check runtime/updater.cjs && node --check loader.cjs && node --check scripts/lib.mjs && node --check scripts/install.mjs && node --check scripts/install-runtime.mjs && node --check scripts/setup.mjs && node --check scripts/staging-updater-disabled.cjs && node --check scripts/staging.mjs && node --check scripts/stage-release.mjs && node --check scripts/release-draft.mjs && node --check scripts/status.mjs && node --check scripts/uninstall.mjs && npm test",
     "uninstall:patch": "node scripts/uninstall.mjs"
   },
   "dependencies": {

@@ -11,6 +11,7 @@ import {
   recoverPendingTransaction,
   resolveSourceBackup,
   restoreAppleSignature,
+  resignPatchedApp,
   setTransactionPhase,
   uninstallUpdaterAgent,
   writePatchState,
@@ -35,6 +36,9 @@ try {
   atomicReplace(backup.backupPlist, infoPlistPath);
   transaction = setTransactionPhase(transaction, "plist-restored");
   restoreAppleSignature(backup.backupDir);
+  // Restore native contents with a valid local signature. The installer changed
+  // embedded executable signatures; an old resource seal alone cannot undo that.
+  resignPatchedApp();
   const restored = preflightLiveUncached({ allowVersion: true });
   if (restored.fingerprint.asarSha256 !== source.asarSha256) {
     throw new Error("Restored ASAR hash does not match the verified source backup");

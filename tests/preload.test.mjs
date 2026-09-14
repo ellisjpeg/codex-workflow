@@ -1,3 +1,4 @@
+import {nativeAssetsFixture, isNativeAssetsRead} from "./native-assets-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Script } from "node:vm";
@@ -7,6 +8,33 @@ import { JSDOM } from "jsdom";
 // Keep the archived feature regressions runnable while the starter owns runtime/.
 const preloadSource = readFileSync(new URL("../parked/workflow-before-starter/preload.cjs", import.meta.url), "utf8");
 const starterSource = readFileSync(new URL("../runtime/preload.cjs", import.meta.url), "utf8");
+
+for (const [page, switches] of [["composer", 1], ["conversation", 1], ["usage", 3]]) {
+  test(`${page} settings construct only the switches they display`, async () => {
+    const h = await createHarness({ source: starterSource });
+    try {
+      h.document.querySelector('[data-codex-workflow="nav-item"]').click();
+      const created = new Set();
+      const setAttribute = h.window.Element.prototype.setAttribute;
+      h.window.Element.prototype.setAttribute = function (name, value) {
+        if (name === "role" && value === "switch") created.add(this);
+        return setAttribute.call(this, name, value);
+      };
+      h.document.querySelector(`[data-codex-workflow-section="${page}"]`).click();
+      const panel = h.document.querySelector("[data-codex-workflow-panel]");
+      assert.equal(panel.querySelectorAll('[role="switch"]').length, switches);
+      assert.equal(created.size, switches, "dropdowns and sliders must not construct discarded switches");
+      for (const control of created) assert.ok(panel.contains(control));
+      for (const control of panel.querySelectorAll("[aria-labelledby], [aria-describedby]")) {
+        for (const attribute of ["aria-labelledby", "aria-describedby"]) {
+          for (const id of (control.getAttribute(attribute) || "").split(" ").filter(Boolean)) {
+            assert.equal(h.document.querySelectorAll(`[id="${id}"]`).length, 1);
+          }
+        }
+      }
+    } finally { h.dom.window.close(); }
+  });
+}
 
 test('Workflow dropdowns retain build 8881 native spacing, keyboard navigation and save rollback', async () => {
   const h = await createHarness({source: starterSource, setSettings: async () => { throw Error('disk full'); }});
@@ -335,17 +363,15 @@ test("Workflow homepage exposes integrated sections and preserves unrelated navi
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
     const panel = h.document.querySelector("[data-codex-workflow-panel]");
     assert.ok(panel);
-    assert.equal(panel.querySelectorAll("[data-codex-workflow-section]").length, 5);
+    assert.equal(panel.querySelectorAll("[data-codex-workflow-section]").length, 4);
     assert.equal(panel.querySelectorAll("[role=switch]").length, 2);
     assert.doesNotMatch(panel.textContent, /Active setup|Make Codex yours|Save as|Customise interface|Import setup|Export setup|Focused Interface|Hide microphone/iu);
+    assert.doesNotMatch(panel.textContent, /Appearance & spacing/u);
     for (const row of panel.querySelectorAll("[data-codex-workflow-section]")) {
       assert.equal(row.disabled, false);
-      const available = ["sidebar", "composer", "conversation", "usage"].includes(row.dataset.codexWorkflowSection);
-      assert.equal(row.getAttribute("aria-disabled"), available ? null : "true");
+      assert.equal(row.getAttribute("aria-disabled"), null);
       row.focus();
       assert.equal(h.document.activeElement, row);
-      if (!available) row.click();
-      assert.equal(h.document.querySelector("[data-codex-workflow-panel]"), panel);
       assert.equal(row.classList.contains("enabled:hover:bg-text/5"), true);
     }
     assert.equal(h.document.querySelector("#pull-requests").style.display, "block");
@@ -389,7 +415,7 @@ test("starter search, changed-only view and reset respond without fictitious cha
     assert.equal(panel.querySelector('[data-codex-workflow="sections"]').children.length, 1);
     panel.querySelector('[data-codex-workflow="search-clear"]').click();
     assert.equal(search.value, "");
-    assert.equal(panel.querySelector('[data-codex-workflow="sections"]').children.length, 5);
+    assert.equal(panel.querySelector('[data-codex-workflow="sections"]').children.length, 4);
     search.value = "not a section";
     search.dispatchEvent(new h.window.Event("input", { bubbles: true }));
     assert.equal(panel.querySelector('[data-codex-workflow="empty"]').textContent, "No matching customisations.");
@@ -798,7 +824,7 @@ test("account customization survives portal replacement and skips hidden rows in
   } finally { h.dom.window.close(); }
 });
 
-test("schema 4 renderer keeps removed Settings out of the list after restart", async () => {
+test("schema 5 renderer keeps removed Settings out of the list after restart", async () => {
   const h = await createHarness({source:starterSource,initialSettings:{schemaVersion:4,sidebarNavigation:{order:['usage-shortcut','invalid','usage-shortcut'],hidden:['settings-shortcut']}}});
   try {
     h.document.querySelector('[data-codex-workflow="nav-item"]').click();
@@ -1090,7 +1116,7 @@ async function createHarness({ initialSettings, installUpdateResult, setSettings
   const context = dom.getInternalVMContext();
   const NativeMutationObserver = window.MutationObserver;
   context.require = (name) => {
-    if (name === "electron") return { ipcRenderer };
+    if (name === "electron") return { ipcRenderer, webFrame: {executeJavaScript: async code => isNativeAssetsRead(code) ? nativeAssetsFixture : undefined} };
     throw new Error(`Unexpected preload require: ${name}`);
   };
   context.MutationObserver = class {

@@ -1,3 +1,4 @@
+import {nativeAssetsFixture, isNativeAssetsRead} from "./native-assets-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Script, createContext } from "node:vm";
@@ -7,8 +8,8 @@ import { JSDOM } from "jsdom";
 const preloadSource = readFileSync(process.env.WORKFLOW_PRELOAD_PATH || new URL("../runtime/preload.cjs", import.meta.url), "utf8");
 const counterSelector = "[data-codex-workflow-usage]";
 const toggleSelector = '[role="switch"][aria-labelledby="codex-workflow-showUsageRemaining-label"]';
-const locationSelector = 'button[aria-label="Usage remaining location"]';
-const menuSelector = '#codex-workflow-usage-location-menu[role="menu"]';
+const locationSelector = 'button[aria-labelledby="codex-workflow-usageRemainingLocation-label"]';
+const menuSelector = '#codex-workflow-usageRemainingLocation-menu[role="menu"]';
 const future = () => Math.floor(Date.now() / 1000) + 3600;
 const allowance = (minutes, usedPercent, resetsAt = future()) => ({ windowDurationMins: minutes, usedPercent, resetsAt });
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -19,7 +20,9 @@ async function flush() {
   await Promise.resolve();
 }
 
-async function createHarness(t, { placement = "toolbar", setSettings, toolbarCount = 1, footerUsage = false, showUsageRemaining = true } = {}) {
+async function createHarness(t, { placement = "toolbar", setSettings, toolbarCount = 1, footerUsage = false,
+  showUsageRemaining = true, usageDisplay = "remaining", usageWindow = "automatic", showContextUsage = false,
+  lowUsageAlert = false, usageAlertThreshold = 10 } = {}) {
   const toolbar = `<header data-app-shell-header-layout="true" class="flex h-toolbar draggable">
     <div data-app-shell-header-toolbar="true" class="flex min-w-0 flex-1 items-center justify-between">
       <div class="flex min-w-0 items-center"><button aria-label="Back" class="no-drag flex items-center">Back</button></div>
@@ -59,14 +62,16 @@ async function createHarness(t, { placement = "toolbar", setSettings, toolbarCou
       return original(type, callback, options);
     };
   }
-  let settings = { schemaVersion: 4, focusedInterface: footerUsage, showUsageRemaining, usageRemainingLocation: placement,
+  let settings = { schemaVersion: 5, focusedInterface: footerUsage, showUsageRemaining, usageRemainingLocation: placement,
+    usageDisplay, usageWindow, showContextUsage, lowUsageAlert, usageAlertThreshold,
     sidebarNavigation: {footerShortcut: footerUsage ? 'usage-shortcut' : 'whats-new-shortcut'} };
   const context = dom.getInternalVMContext();
   context.require = (name) => {
     assert.equal(name, "electron");
-    return { webFrame: footerUsage ? { async executeJavaScript(source) {
+    return { webFrame: { async executeJavaScript(source) {
+      if (isNativeAssetsRead(source)) return nativeAssetsFixture;
       if (source.startsWith('(async function installNativeUsageBridge(')) bridgeStates.push(source.endsWith('(true)'));
-    } } : undefined, ipcRenderer: {
+    } }, ipcRenderer: {
       async invoke(channel, patch) {
         calls.push({ channel, patch: patch === undefined ? undefined : plain(patch) });
         if (channel === "codex-workflow:settings:get") return settings;
@@ -124,20 +129,79 @@ async function createHarness(t, { placement = "toolbar", setSettings, toolbarCou
   };
 }
 
-test("usage window selection prefers 5h, supports weekly/monthly, and honors exhausted longer windows", () => {
+test("usage window selection supports automatic, explicit and combined account windows", () => {
   const context = createContext({ require: () => ({}), __codexWorkflowPreloadInstalled: true });
   new Script(preloadSource).runInContext(context);
-  const select = (windows, extra = {}) => plain(context.selectUsageWindow({ windows, ...extra }));
-  assert.deepEqual(select([allowance(10080, 60), allowance(300, 20)]), { remaining: 80, label: "5hr limit" });
-  assert.deepEqual(select([allowance(10080, 25)]), { remaining: 75, label: "Weekly limit" });
-  assert.deepEqual(select([allowance(43200, 35)]), { remaining: 65, label: "Monthly limit" });
-  assert.deepEqual(select([allowance(28 * 1440, 35)]), { remaining: 65, label: "Monthly limit" });
-  assert.deepEqual(select([allowance(300, 20), allowance(10080, 100)]), { remaining: 0, label: "Weekly limit" });
-  assert.deepEqual(select([allowance(300, 20)], { blocked: true }), { remaining: 0, label: "5hr limit" });
+  const select = (windows, selection = "automatic", extra = {}) => plain(context.selectUsageWindows({ windows, ...extra }, selection))
+    .map(({type, remaining, shortLabel, label}) => ({type, remaining, shortLabel, label}));
+  assert.deepEqual(select([allowance(10080, 60), allowance(300, 20)]), [
+    {type:"5h", remaining:80, shortLabel:"5hr", label:"5hr limit"},
+  ]);
+  assert.deepEqual(select([allowance(10080, 25)]), [{type:"weekly", remaining:75, shortLabel:"Weekly", label:"Weekly limit"}]);
+  assert.deepEqual(select([allowance(43200, 35)]), [{type:"monthly", remaining:65, shortLabel:"Monthly", label:"Monthly limit"}]);
+  assert.deepEqual(select([allowance(28 * 1440, 35)]), [{type:"monthly", remaining:65, shortLabel:"Monthly", label:"Monthly limit"}]);
+  assert.deepEqual(select([allowance(300, 7), allowance(10080, 46)], "5h-weekly").map(({type,remaining})=>({type,remaining})),
+    [{type:"5h",remaining:93},{type:"weekly",remaining:54}]);
+  assert.deepEqual(select([allowance(300, 20)], "weekly"), []);
+  assert.deepEqual(select([allowance(300, 20), allowance(10080, 100)]).map(({type,remaining})=>({type,remaining})), [{type:"weekly",remaining:0}]);
+  assert.deepEqual(select([allowance(300, 20)], "automatic", { blocked: true }).map(({remaining})=>({remaining})), [{remaining:0}]);
   for (const value of [null, {}, { unavailable: true, windows: [allowance(300, 20)] }, { windows: [] },
     { windows: [allowance(300, "20")] }, { windows: [allowance(0, 20)] }, { windows: [allowance(300, 20, 1)] }]) {
-    assert.equal(context.selectUsageWindow(value), null);
+    assert.deepEqual(plain(context.selectUsageWindows(value)), []);
   }
+  assert.equal(context.formatUsageReset(4600, 1000 * 1000), "1h");
+});
+
+test("Usage has no preview or Appearance section and exposes only available account windows", async (t) => {
+  const h = await createHarness(t);
+  await h.openSettings();
+  const panel = h.document.querySelector("[data-codex-workflow-panel]");
+  assert.match(panel.textContent, /Usage & indicators/u);
+  assert.match(panel.textContent, /Keep useful limits and status within reach\./u);
+  assert.match(panel.textContent, /Usage.*Context & alerts/su);
+  assert.doesNotMatch(panel.textContent, /Preview|Appearance & spacing/u);
+  h.emit({ windows: [allowance(300, 20)] });
+  const windowButton = panel.querySelector('button[aria-labelledby="codex-workflow-usageWindow-label"]');
+  windowButton.click();
+  assert.deepEqual([...h.document.querySelectorAll('#codex-workflow-usageWindow-menu [role="menuitemradio"]')].map((item) => item.textContent),
+    ["Automatic", "5hr"]);
+});
+
+test("combined usage, context, reset detail and semantic low-usage warning render in the shared indicator", async (t) => {
+  const h = await createHarness(t, { usageWindow: "5h-weekly", showContextUsage: true,
+    lowUsageAlert: true, usageAlertThreshold: 10 });
+  await h.openSettings();
+  h.emit({ windows: [allowance(300, 7), allowance(10080, 46)], contextPercent: 34 });
+  const button = h.counter();
+  assert.equal(button.classList.contains("gap-1"), true);
+  assert.equal(button.querySelector('[data-codex-workflow-usage-text="usage"]').textContent, "5hr 93% · Weekly 54%");
+  assert.equal(button.querySelector('[data-codex-workflow-usage-text="context"]').textContent, "Context 34%");
+  assert.equal(button.querySelector('[aria-hidden="true"]').textContent, "·");
+  assert.equal(h.document.querySelector('button[aria-labelledby="codex-workflow-usageWindow-label"]').textContent, "5hr + Weekly");
+  assert.match(button.getAttribute("aria-label"), /5hr limit: 93% remaining\. Weekly limit: 54% remaining\. Context usage: 34%/u);
+  h.emit({ windows: [allowance(300, 95), allowance(10080, 46)], contextPercent: 34 });
+  const usageText = button.querySelector('[data-codex-workflow-usage-text="usage"]');
+  assert.equal(usageText.classList.contains("text-warning"), true);
+  assert.equal(usageText.hasAttribute("style"), false);
+  assert.equal(button.querySelector('[data-codex-workflow-usage-text="context"]').classList.contains("text-warning"), false);
+  const threshold = h.document.querySelector('input[aria-labelledby="codex-workflow-usageAlertThreshold-label"]');
+  threshold.value = "4";
+  threshold.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.equal(button.querySelector('[data-codex-workflow-usage-text="usage"]').classList.contains("text-warning"), false);
+  [...h.document.querySelectorAll("button")].find((candidate) => candidate.textContent === "Reset this section").click();
+  await flush();
+  assert.deepEqual(h.calls.filter((call) => call.channel.endsWith("settings:set")).at(-1).patch, {
+    showUsageRemaining: true, usageRemainingLocation: "toolbar", usageDisplay: "remaining", usageWindow: "automatic",
+    showContextUsage: false, lowUsageAlert: false, usageAlertThreshold: 10,
+  });
+  assert.equal(button.textContent, "5%");
+});
+
+test("remaining and reset display uses the selected window countdown", async (t) => {
+  const h = await createHarness(t, { usageDisplay: "remaining-reset" });
+  h.emit({ windows: [allowance(300, 27)] });
+  assert.equal(h.counter().textContent, "73% left · resets in 1h");
+  assert.match(h.counter().getAttribute("aria-label"), /73% remaining, resets in 1h/u);
 });
 
 for (const placement of ["toolbar", "composer"]) {

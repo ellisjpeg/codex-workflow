@@ -49,8 +49,14 @@ function writeJsonAtomic(target, value) {
 }
 
 function versionParts(value) {
-  const match = String(value || "").match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u);
-  return match ? match.slice(1).map(Number) : null;
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u);
+  // Check the whole match too: JavaScript's $ may precede a final newline.
+  if (!match || match[0] !== value) return null;
+  const core = match.slice(1, 4).map(Number);
+  const prerelease = match[4]?.split(".") || [];
+  if (!core.every(Number.isSafeInteger) || prerelease.some(id => /^0\d+$/u.test(id))) return null;
+  return { core, prerelease };
 }
 
 function compareVersions(left, right) {
@@ -58,7 +64,23 @@ function compareVersions(left, right) {
   const b = versionParts(right);
   if (!a || !b) return 0;
   for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+    if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
+  }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length ? -1 : 1;
+  }
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const leftId = a.prerelease[index];
+    const rightId = b.prerelease[index];
+    if (leftId === rightId) continue;
+    if (leftId === undefined) return -1;
+    if (rightId === undefined) return 1;
+    const leftNumeric = /^\d+$/u.test(leftId);
+    const rightNumeric = /^\d+$/u.test(rightId);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    // Equal-length decimal strings compare exactly, even beyond Number precision.
+    if (leftNumeric && leftId.length !== rightId.length) return leftId.length > rightId.length ? 1 : -1;
+    return leftId > rightId ? 1 : -1;
   }
   return 0;
 }
@@ -143,15 +165,6 @@ async function waitForProcessExit(pid, timeoutMs = 30000) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return false;
-}
-
-async function waitForAppExit(executable, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!appIsRunning(executable)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  return !appIsRunning(executable);
 }
 
 function compatibilityMatches(candidate, identity) {
@@ -288,7 +301,7 @@ async function checkRemote(config, previousState) {
   if (!response.ok) throw new Error(`Workflow release check failed (${response.status})`);
   const etag = response.headers.get("etag") || null;
   const release = await response.json();
-  const version = String(release.tag_name || "").replace(/^v/u, "");
+  const version = typeof release?.tag_name === "string" ? release.tag_name.replace(/^v/u, "") : "";
   if (!releaseVersionEligible(version, installedVersion(), config.autoRepairCodexUpdates === true)) {
     return { candidate: null, etag, releaseVersion: versionParts(version) ? version : null, unchanged: false };
   }

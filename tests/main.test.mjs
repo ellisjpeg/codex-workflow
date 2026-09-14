@@ -68,7 +68,7 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
   assert.deepEqual(
     loadSettings({ schemaVersion: 1, efficiencyMode: false }),
     {
-      schemaVersion: 4,
+      schemaVersion: 5,
       sidebarNavigation: loadSettings({}).sidebarNavigation,
       focusedInterface: false,
       hiddenSettingsPages: [],
@@ -81,6 +81,11 @@ test("main settings normalizer migrates legacy Efficiency mode", () => {
       conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble", toolActivity: "summary", showMessageTimestamps: false,
       showUsageRemaining: true,
       usageRemainingLocation: "toolbar",
+      usageDisplay: "remaining",
+      usageWindow: "automatic",
+      showContextUsage: false,
+      lowUsageAlert: false,
+      usageAlertThreshold: 10,
     },
   );
 });
@@ -121,7 +126,7 @@ test("main settings normalizer accepts only canonical booleans", () => {
       hideComposerMicrophone: "yes",
     }),
     {
-      schemaVersion: 4,
+      schemaVersion: 5,
       sidebarNavigation: loadSettings({}).sidebarNavigation,
       focusedInterface: false,
       hidePullRequests: false,
@@ -134,6 +139,11 @@ test("main settings normalizer accepts only canonical booleans", () => {
       conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble", toolActivity: "summary", showMessageTimestamps: false,
       showUsageRemaining: true,
       usageRemainingLocation: "toolbar",
+      usageDisplay: "remaining",
+      usageWindow: "automatic",
+      showContextUsage: false,
+      lowUsageAlert: false,
+      usageAlertThreshold: 10,
     },
   );
   assert.equal(loadSettings({ hideComposerMicrophone: true }).hideComposerMicrophone, true);
@@ -246,7 +256,7 @@ test("numeric sidebar width accepts only bounded integers from the main Codex fr
   assert.equal(scripts.length,2);
 });
 
-function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test", fileSystem) {
+function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-update-test", fileSystem, processResult = {}) {
   const handlers = new Map();
   const appListeners = new Map();
   const readyCallbacks = [];
@@ -291,10 +301,15 @@ function createUpdateHarness(files, runtimeRoot = "/tmp/codex-workflow-main-upda
           spawn(executable, args, options) {
             const call = { executable, args, options, unref: false };
             spawned.push(call);
+            if (processResult.throwOnSpawn) throw processResult.throwOnSpawn;
             return {
               pid: 789,
               once(event, callback) {
-                if (event === "close") queueMicrotask(() => callback(0, null));
+                if (event === "error" && processResult.error) queueMicrotask(() => callback(processResult.error));
+                if (event === "close") queueMicrotask(() => {
+                  processResult.beforeClose?.();
+                  callback(processResult.code === undefined ? 0 : processResult.code, processResult.signal || null);
+                });
               },
               unref() { call.unref = true; },
             };
@@ -349,29 +364,92 @@ function releaseManifest(version) {
   });
 }
 
-test("Workflow Update installs the external runtime before relaunching", async () => {
-  const runtimeRoot = "/tmp/codex-workflow-main-update-test";
-  const stagedRoot = path.join(runtimeRoot, "updates", "0.5.0");
-  const files = new Map([
-    [path.join(runtimeRoot, "update-config.json"), JSON.stringify({
-      nodeExecutable: "/opt/node/bin/node",
-      ...compatibilityConfig,
-    })],
-    [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: "0.4.4" })],
-    [path.join(runtimeRoot, "update-state.json"), JSON.stringify({
-      availableVersion: "0.5.0",
-      stagedSourceRoot: stagedRoot,
-    })],
-    [path.join(stagedRoot, "package.json"), JSON.stringify({
-      name: "codex-workflow",
-      version: "0.5.0",
-    })],
-    [path.join(stagedRoot, "workflow-compatibility.json"), releaseManifest("0.5.0")],
-    [path.join(stagedRoot, "scripts", "install.mjs"), ""],
-    [path.join(stagedRoot, "scripts", "install-runtime.mjs"), ""],
+function availableUpdateFiles(root, version = "0.5.0", installed = "0.4.4") {
+  const staged = path.join(root, "updates", version);
+  return new Map([
+    [path.join(root, "update-config.json"), JSON.stringify({nodeExecutable:"/opt/node/bin/node", ...compatibilityConfig})],
+    [path.join(root, "state.json"), JSON.stringify({patchVersion:installed})],
+    [path.join(root, "update-state.json"), JSON.stringify({availableVersion:version, stagedSourceRoot:staged})],
+    [path.join(staged, "package.json"), JSON.stringify({name:"codex-workflow", version})],
+    [path.join(staged, "workflow-compatibility.json"), releaseManifest(version)],
+    [path.join(staged, "scripts/install.mjs"), ""],
+    [path.join(staged, "scripts/install-runtime.mjs"), ""],
     ["/opt/node/bin/node", ""],
   ]);
-  const harness = createUpdateHarness(files, runtimeRoot);
+}
+
+for (const outcome of ["no-op", "transaction", "reported-error"]) {
+  test(`Workflow Update refuses a successful helper exit with ${outcome}`, async () => {
+    const root = "/tmp/codex-workflow-main-completion-test";
+    const files = availableUpdateFiles(root);
+    const result = { beforeClose() {
+      if (outcome === "no-op") return;
+      files.set(path.join(root, "runtime/version.json"), JSON.stringify({version:"0.5.0"}));
+      if (outcome === "transaction") files.set(path.join(root, "transaction.json"), "{}");
+      else files.set(path.join(root, "update-state.json"), JSON.stringify({error:"verification failed"}));
+    } };
+    const h = createUpdateHarness(files, root, undefined, result);
+    await assert.rejects(h.handlers.get("codex-workflow:update:install")(h.trusted), /did not complete/u);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.relaunchCount(), 0);
+    assert.equal(h.exitCount(), 0);
+    if (outcome === "no-op") {
+      result.beforeClose = () => files.set(path.join(root, "runtime/version.json"), JSON.stringify({version:"0.5.0"}));
+      assert.equal((await h.handlers.get("codex-workflow:update:install")(h.trusted)).applying, true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.spawned.length, 2, "failed verification releases the in-flight guard for retry");
+      assert.equal(h.relaunchCount(), 1);
+    }
+  });
+}
+
+for (const processResult of [{code:1}, {code:null, signal:"SIGTERM"}, {error:Error("spawn failed"), code:1}, {throwOnSpawn:Error("spawn threw")}]) {
+  test(`Workflow Update does not relaunch after helper failure: ${processResult.signal || processResult.error?.message || processResult.throwOnSpawn?.message || processResult.code}`, async () => {
+    const root = "/tmp/codex-workflow-main-failed-child-test";
+    const h = createUpdateHarness(availableUpdateFiles(root), root, undefined, processResult);
+    await assert.rejects(h.handlers.get("codex-workflow:update:install")(h.trusted));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.relaunchCount(), 0);
+    assert.equal(h.exitCount(), 0);
+  });
+}
+
+test("update UI uses strict release versions and prerelease precedence", () => {
+  const runtimeRoot = "/tmp/workflow-version-fixture";
+  const stagedRoot = path.join(runtimeRoot, "staged");
+  for (const [version, installed, available] of [
+    ["1.0.0-../../escape", "0.5.41", false],
+    ["1.0.0-01", "0.5.41", false],
+    ["01.0.0", "0.5.41", false],
+    ["1.0.0\n", "0.5.41", false],
+    [["1.0.0"], "0.5.41", false],
+    ["1.0.0", "not-a-version", false],
+    ["1.0.0", "1.0.0-rc.1", true],
+    ["1.0.0-rc.1", "1.0.0", false],
+    ["1.0.0-9007199254740993", "1.0.0-9007199254740992", true],
+    ["1.0.0+new", "1.0.0+old", false],
+  ]) {
+    const files = new Map([
+      [path.join(runtimeRoot, "update-config.json"), JSON.stringify(compatibilityConfig)],
+      [path.join(runtimeRoot, "state.json"), JSON.stringify({ patchVersion: installed })],
+      [path.join(runtimeRoot, "update-state.json"), JSON.stringify({ availableVersion: version, stagedSourceRoot: stagedRoot })],
+      [path.join(stagedRoot, "package.json"), JSON.stringify({ name: "codex-workflow", version })],
+      [path.join(stagedRoot, "workflow-compatibility.json"), releaseManifest(version)],
+      [path.join(stagedRoot, "scripts/install.mjs"), ""],
+      [path.join(stagedRoot, "scripts/install-runtime.mjs"), ""],
+    ]);
+    const h = createUpdateHarness(files, runtimeRoot);
+    assert.equal(h.handlers.get("codex-workflow:update:get")(h.trusted).available, available,
+      `${JSON.stringify(version)} against ${installed}`);
+  }
+});
+
+test("Workflow Update installs the external runtime before relaunching", async () => {
+  const runtimeRoot = "/tmp/codex-workflow-main-update-test";
+  const files = availableUpdateFiles(runtimeRoot);
+  const harness = createUpdateHarness(files, runtimeRoot, undefined, { beforeClose() {
+    files.set(path.join(runtimeRoot, "runtime/version.json"), JSON.stringify({version:"0.5.0"}));
+  } });
   const status = harness.handlers.get("codex-workflow:update:get")(harness.trusted);
   assert.equal(status.available, true);
   assert.equal(status.availableVersion, "0.5.0");
@@ -380,6 +458,7 @@ test("Workflow Update installs the external runtime before relaunching", async (
   const result = await harness.handlers.get("codex-workflow:update:install")(harness.trusted);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(result.applying, true);
+  assert.equal(result.installedVersion, "0.5.0");
   assert.equal(harness.spawned.length, 1);
   assert.equal(harness.spawned[0].executable, "/opt/node/bin/node");
   assert.equal(harness.spawned[0].options.detached, undefined);

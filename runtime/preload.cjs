@@ -2,21 +2,120 @@
 
 const { ipcRenderer, webFrame } = require("electron");
 
-function selectUsageWindow(value, now = Date.now()) {
-  if (value?.unavailable || !Array.isArray(value?.windows)) return null;
+// Build-bound native interoperability: artwork stays in the user's Codex bundle.
+async function readWorkflowNativeAssets() {
+  if (location.protocol !== "app:") throw Error("Native assets require the app renderer");
+  const scripts = document.querySelectorAll('script[type="module"][src="./assets/index-b0a81f126468.js"], script[type="module"][src="./assets/detachedWindow-53e575877f9d.js"]');
+  if (scripts.length !== 1 || !/^app:\/\/-\/assets\/(?:index-b0a81f126468|detachedWindow-53e575877f9d)\.js$/.test(scripts[0].src)) throw Error("Unaudited native asset entry");
+  const specifications = [
+    ["plus16", "shared-icons-693ab6da8dfa.js", "Wu", "Gu", 1, "0 0 16 16"],
+    ["plus20", "shared-icons-693ab6da8dfa.js", "Hu", "Uu", 1, "0 0 20 20"],
+    ["hand", "app-primary-44ec287874b7.js", "nr", "tr", 1, "0 0 20 20"],
+    ["caret", "app-primary-44ec287874b7.js", "_p", "gp", 1, "0 0 16 16"],
+    ["microphone", "app-initial-9b95fa538c62.js", "Pn", "Nn", 2, "0 0 20 20"],
+    ["voice", "shared-icons-693ab6da8dfa.js", "Mc", "Nc", 4, "0 0 16 16"],
+    ["settings", "app-initial-9b95fa538c62.js", "apt", "ipt", 2, "0 0 20 20"],
+    ["profile", "app-primary-44ec287874b7.js", "Ix", "Fx", 1, "0 0 20 20"],
+    ["menu-chevron", "app-initial-9b95fa538c62.js", "Wft", "Uft", 1, "0 0 20 21"],
+    ["menu-check", "shared-icons-693ab6da8dfa.js", "rg", "ng", 1, "0 0 16 16"],
+    ["search-clear", "app-initial-9b95fa538c62.js", "bD", "yD", 2, "0 0 20 20"],
+    ["help", "app-initial-9b95fa538c62.js", "X", "Y", 2, "0 0 20 20"],
+    ["download", "app-initial-9b95fa538c62.js", "TK", "wK", 1, "0 0 20 20"],
+  ];
+  const tags = new Set(["svg", "g", "path"]);
+  const attributes = new Set(["xmlns", "width", "height", "viewBox", "fill", "fill-rule", "clip-rule", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "d", "transform", "aria-hidden", "focusable"]);
+  const element = (value) => {
+    if (!value || !tags.has(value.type)) throw Error("Non-static native icon");
+    const node = document.createElementNS("http://www.w3.org/2000/svg", value.type);
+    for (const [key, data] of Object.entries(value.props)) {
+      if (key === "children") {
+        for (const child of [data].flat()) if (child != null && child !== false) node.append(element(child));
+      } else if (data != null) {
+        const name = key === "viewBox" ? key : key.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+        if (!attributes.has(name) || !["string", "number", "boolean"].includes(typeof data)) throw Error("Unexpected native icon attribute");
+        node.setAttribute(name, String(data));
+      }
+    }
+    return node;
+  };
+  const result = {};
+  for (const [name, file, initialize, exported, paths, viewBox] of specifications) {
+    const module = await import(new URL(file, scripts[0].src).href);
+    module[initialize]();
+    const value = module[exported];
+    let svg;
+    if (typeof value === "function") svg = element(value({}));
+    else {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", value.canvas.viewBox);
+      svg.innerHTML = value.body;
+    }
+    if (svg.localName !== "svg" || svg.getAttribute("viewBox") !== viewBox || svg.querySelectorAll("path").length !== paths) throw Error("Native icon shape changed: " + name);
+    for (const node of [svg, ...svg.querySelectorAll("*")]) {
+      if (!tags.has(node.localName) || [...node.attributes].some(a => !attributes.has(a.name) ||
+        (a.name === "xmlns" ? a.value !== "http://www.w3.org/2000/svg" : /url\s*\(|(?:https?|data|javascript):/i.test(a.value)))) throw Error("Unsafe native SVG");
+    }
+    result[name] = svg.outerHTML;
+  }
+  return JSON.stringify(result);
+}
+
+let workflowNativeAssets;
+async function loadWorkflowNativeAssets() {
+  if (document.readyState === "loading") await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+  workflowNativeAssets = JSON.parse(await webFrame.executeJavaScript(`(${readWorkflowNativeAssets.toString()})()`));
+}
+
+function workflowNativeGlyph(name, className = "icon-sm") {
+  const holder = document.createElement("template");
+  holder.innerHTML = workflowNativeAssets[name];
+  const svg = holder.content.firstElementChild;
+  svg.setAttribute("class", className);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  return svg;
+}
+
+
+function selectUsageWindows(value, selection = "automatic", now = Date.now()) {
+  if (value?.unavailable || !Array.isArray(value?.windows)) return [];
   const windows = value.windows.filter((window) =>
     Number.isFinite(window?.usedPercent) && Number.isFinite(window?.windowDurationMins) &&
     window.windowDurationMins > 0 &&
     (window.resetsAt == null || Number.isFinite(window.resetsAt)))
-    .sort((left, right) => left.windowDurationMins - right.windowDurationMins);
-  const selected = windows.find((window) => window.usedPercent >= 100) || windows[0];
-  if (!selected || selected.resetsAt != null && selected.resetsAt * 1000 <= now) return null;
-  const minutes = selected.windowDurationMins;
-  const near = (duration) => Math.abs(minutes - duration) <= duration * 0.05;
-  return {
-    remaining: value.blocked ? 0 : Math.round(Math.max(0, Math.min(100, 100 - selected.usedPercent))),
-    label: near(300) ? "5hr limit" : near(10080) ? "Weekly limit" : minutes >= 28 * 1440 && minutes <= 31 * 1440 ? "Monthly limit" : "Usage limit",
-  };
+    .filter((window) => window.resetsAt == null || window.resetsAt * 1000 > now)
+    .sort((left, right) => left.windowDurationMins - right.windowDurationMins)
+    .map((window) => {
+      const minutes = window.windowDurationMins;
+      const near = (duration) => Math.abs(minutes - duration) <= duration * 0.05;
+      const type = near(300) ? "5h" : near(10080) ? "weekly" :
+        minutes >= 28 * 1440 && minutes <= 31 * 1440 ? "monthly" : "other";
+      return {
+        type,
+        remaining: Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent))),
+        resetsAt: window.resetsAt,
+        shortLabel: type === "5h" ? "5hr" : type === "weekly" ? "Weekly" : type === "monthly" ? "Monthly" : "Usage",
+        label: type === "5h" ? "5hr limit" : type === "weekly" ? "Weekly limit" : type === "monthly" ? "Monthly limit" : "Usage limit",
+      };
+    });
+  if (value.blocked && windows.length && !windows.some((window) => window.remaining === 0)) {
+    windows.reduce((lowest, window) => window.remaining < lowest.remaining ? window : lowest).remaining = 0;
+  }
+  if (selection === "all") return windows;
+  if (selection === "automatic") return [windows.find((window) => window.remaining === 0) || windows[0]].filter(Boolean);
+  if (selection === "5h-weekly") {
+    const selected = ["5h", "weekly"].map((type) => windows.find((window) => window.type === type));
+    return selected.every(Boolean) ? selected : [];
+  }
+  return windows.filter((window) => window.type === selection).slice(0, 1);
+}
+
+function formatUsageReset(resetsAt, now = Date.now()) {
+  if (!Number.isFinite(resetsAt) || resetsAt * 1000 <= now) return null;
+  let minutes = Math.max(1, Math.ceil((resetsAt * 1000 - now) / 60000));
+  const days = Math.floor(minutes / 1440); minutes %= 1440;
+  const hours = Math.floor(minutes / 60); minutes %= 60;
+  return days ? `${days}d${hours ? ` ${hours}h` : ""}` : hours ? `${hours}h${minutes ? ` ${minutes}m` : ""}` : `${minutes}m`;
 }
 
 async function installNativeUsageBridge(enabled) {
@@ -31,7 +130,7 @@ async function installNativeUsageBridge(enabled) {
     else previous.stop();
     return;
   }
-  const empty = { windows: [], blocked: false, unavailable: true };
+  const empty = { windows: [], blocked: false, unavailable: true, contextPercent: null };
   const emit = (value) => window.dispatchEvent(new CustomEvent("codex-workflow:usage", {
     detail: JSON.stringify(value),
   }));
@@ -55,6 +154,7 @@ async function installNativeUsageBridge(enabled) {
   let coreName = null;
   let slots = [null, null];
   let coreBlocked = false;
+  let contextPercent = null;
   let published = empty;
   const filter = { queryKey: ["rate-limit-status"], exact: true };
   const owner = {
@@ -94,7 +194,12 @@ async function installNativeUsageBridge(enabled) {
     const resets = windows.map((value) => value.resetsAt == null ? NaN : value.resetsAt * 1000).filter(Number.isFinite);
     const deadline = resets.length ? Math.min(...resets) : null;
     const expired = deadline != null && deadline <= Date.now();
-    publish(expired ? empty : { windows, blocked: coreBlocked || windows.some((value) => value.usedPercent >= 100), unavailable: windows.length === 0 });
+    publish(expired ? { ...empty, contextPercent } : {
+      windows,
+      blocked: coreBlocked || windows.some((value) => value.usedPercent >= 100),
+      unavailable: windows.length === 0,
+      contextPercent,
+    });
     if (deadline == null || (expired && deadline === expiredResetAt)) return;
     function arm() {
       // Browser timers cap delays at ~24.8 days; a monthly window may need
@@ -110,6 +215,22 @@ async function installNativeUsageBridge(enabled) {
     }
     arm();
   }
+  function readContext(scope = native?.tg()) {
+    let next = null;
+    try {
+      const composer = native?.["s$"]?.(scope);
+      const conversationId = composer && native?.["a$"]?.(composer);
+      const usage = conversationId == null ? null : composer?.get?.(native?.["$Dt"], conversationId);
+      const total = usage?.last?.totalTokens;
+      const capacity = usage?.modelContextWindow;
+      if (Number.isFinite(total) && total >= 0 && Number.isFinite(capacity) && capacity > 0) {
+        next = Math.round(Math.min(total, capacity) / capacity * 100);
+      }
+    } catch {}
+    if (next === contextPercent) return;
+    contextPercent = next;
+    publishWindows();
+  }
   function readCache(fresh = false) {
     if (!active || !connected || !authenticated || (needsFresh && !fresh)) return;
     const state = client?.getQueryState(filter.queryKey);
@@ -118,7 +239,7 @@ async function installNativeUsageBridge(enabled) {
       slots = [null, null];
       accountId = null;
       lastRaw = undefined;
-      publish(empty);
+      publishWindows();
       return;
     }
     // fetchQuery can resolve immediately from still-fresh native cache.
@@ -161,6 +282,7 @@ async function installNativeUsageBridge(enabled) {
     let scope;
     try { scope = bindClient(); } catch { publish(empty); return; }
     if (!scope) { publish(empty); return; }
+    readContext(scope);
     if (pending) { queued ||= force || needsFresh; return; }
     const requestEpoch = epoch;
     const requestClient = client;
@@ -180,7 +302,7 @@ async function installNativeUsageBridge(enabled) {
         accountId = null;
         slots = [null, null];
         lastRaw = undefined;
-        publish(empty);
+        publishWindows();
       }
     }).finally(() => {
       pending = null;
@@ -195,6 +317,7 @@ async function installNativeUsageBridge(enabled) {
     coreName = null;
     lastRaw = undefined;
     coreBlocked = false;
+    contextPercent = null;
     publish(empty);
     // Cancel this one native query so a request from the old account cannot
     // satisfy the next account's forced fetch through query deduplication.
@@ -219,6 +342,8 @@ async function installNativeUsageBridge(enabled) {
         publishWindows();
       }
       refresh();
+    } else if (message.method === "thread/tokenUsage/updated") {
+      queueMicrotask(() => { if (active) readContext(); });
     }
   }
   function connection(message) {
@@ -228,7 +353,7 @@ async function installNativeUsageBridge(enabled) {
     if (connected) refresh(true);
   }
   function focus() { refresh(); }
-  function route() { queueMicrotask(() => { if (active) refresh(); }); }
+  function route() { queueMicrotask(() => { if (active) { readContext(); refresh(); } }); }
   try {
     const assets = document.querySelectorAll('script[type="module"][src="./assets/index-b0a81f126468.js"]');
     if (assets.length !== 1) throw new Error("Unavailable native usage bridge");
@@ -242,7 +367,8 @@ async function installNativeUsageBridge(enabled) {
     window.addEventListener("pagehide", owner.stop, { once: true });
     disposers.push(() => window.removeEventListener("focus", focus));
     disposers.push(() => window.removeEventListener("pagehide", owner.stop));
-    bindClient();
+    const scope = bindClient();
+    readContext(scope);
     refresh();
   } catch {
     if (active) {
@@ -363,13 +489,15 @@ function isTopFrame() { try { return window.top === window; } catch { return fal
 if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   globalThis.__codexWorkflowPreloadInstalled = true;
   const defaults = {
-    schemaVersion: 4, focusedInterface: true, hidePullRequests: true,
+    schemaVersion: 5, focusedInterface: true, hidePullRequests: true,
     hidePetMenuItem: true, hideInviteFriendMenuItem: true,
     replaceHelpWithSettings: true, hideComposerMicrophone: false,
     composerModelLabel: "full", composerReasoningLabel: "full", composerWidth: "default",
     conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble",
     toolActivity: "summary", showMessageTimestamps: false,
     showUsageRemaining: true, usageRemainingLocation: "toolbar",
+    usageDisplay: "remaining", usageWindow: "automatic",
+    showContextUsage: false, lowUsageAlert: false, usageAlertThreshold: 10,
     hiddenSettingsPages: [],
     sidebarNavigation: {
       order: ["pull-requests", "scheduled", "plugins", "explore", "settings-shortcut"],
@@ -385,7 +513,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     ["sidebar", "Sidebar & navigation", "Visibility, ordering and shortcuts"],
     ["composer", "Composer", "Microphone, model labels and composer width"],
     ["conversation", "Conversation", "Width, spacing and tool output"],
-    ["appearance", "Appearance & spacing", "Density, fonts and native theme settings"],
     ["usage", "Usage & indicators", "Choose what appears and where"],
   ];
   const state = {
@@ -409,7 +536,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     usageData: null, usageButton: null, usagePlacement: null,
     usageToolbar: null, usageToolbarObserver: null, usageMountObservers: [],
     usageBridgeEnabled: false, usageBridgeInFlight: false,
-    usageTooltip: null, usageTooltipTimer: null, usageLocationMenuClose: null,
+    usageTooltip: null, usageTooltipTimer: null, usageTextTimer: null, usageLocationMenuClose: null,
     loggedAmbiguousComposerMicrophone: false,
     updateStatus: { available: false }, updateButton: null, updateApplying: false,
   };
@@ -422,6 +549,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     try {
       state.settings = normaliseSettings(await ipcRenderer.invoke("codex-workflow:settings:get"));
     } catch (error) { log("error", `settings read failed: ${error?.message || error}`); }
+    try { await loadWorkflowNativeAssets(); }
+    catch (error) { log("error", `native assets unavailable: ${error?.message || error}`); return; }
     const boot = () => {
       ipcRenderer.on("codex-workflow:update:status", (_event, status) => {
         state.updateStatus = status || { available: false };
@@ -687,8 +816,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       row.type = "button";
       row.className = "no-drag cursor-interaction flex items-center justify-between px-4 gap-6 py-3 text-start enabled:hover:bg-text/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring";
       row.dataset.codexWorkflowSection = key;
-      if (!["sidebar", "composer", "conversation", "usage"].includes(key)) row.setAttribute("aria-disabled", "true");
-      else row.addEventListener("click", () => { state.page = key; redrawWorkflowPanel(); });
+      row.addEventListener("click", () => { state.page = key; redrawWorkflowPanel(); });
       row.setAttribute("aria-label", label);
       const copy = div("flex min-w-0 flex-1 flex-col gap-0.5");
       const name = div("min-w-0 text-sm text-default font-medium");
@@ -788,9 +916,17 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     button.textContent = state.updateApplying ? "Updating…" : "Update Workflow";
   }
 
+  const usageSettingKeys = ["showUsageRemaining", "usageRemainingLocation", "usageDisplay", "usageWindow",
+    "showContextUsage", "lowUsageAlert", "usageAlertThreshold"];
+  const controlsDescriptions = {
+    composer: "Arrange the controls you use before sending a message.",
+    conversation: "Make long conversations easier to read.",
+    usage: "Keep useful limits and status within reach.",
+  };
+
   function sectionChangeCount(key) {
     if (key === "sidebar") return navigationChangeCount();
-    const keys = key === "composer" ? composerSettingKeys : key === "conversation" ? conversationSettingKeys : key === "usage" ? ["showUsageRemaining", "usageRemainingLocation"] : [];
+    const keys = key === "composer" ? composerSettingKeys : key === "conversation" ? conversationSettingKeys : key === "usage" ? usageSettingKeys : [];
     return keys.filter(name => state.settings[name] !== defaults[name]).length;
   }
 
@@ -804,7 +940,13 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     title.className = "min-w-0 break-words text-default heading-lg font-normal";
     title.tabIndex = -1;
     title.textContent = sections.find(([key]) => key === state.page)[1];
-    header.append(back, title);
+    back.classList.remove("bg-text/5", "enabled:hover:bg-text/10", "data-[state=open]:bg-text/10");
+    back.classList.add("enabled:hover:bg-primary-ghost-hover", "focus-visible:bg-primary-ghost-hover");
+    const subtitle = div("text-base text-secondary text-balance");
+    subtitle.textContent = controlsDescriptions[state.page];
+    const titleStack = div("flex min-w-0 flex-col gap-1.5");
+    titleStack.append(title, subtitle);
+    header.append(back, titleStack);
     if (state.page === "conversation") {
       renderConversationPage(page, header);
       return;
@@ -813,20 +955,152 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       renderComposerPage(page, header);
       return;
     }
-    const card = settingsCard();
-    card.append(state.page === "usage" ? renderUsageRemainingRow() : renderSettingRow({
-      key: "hideComposerMicrophone", label: "Hide microphone button", description: "Remove the idle Dictate button from the composer.",
-    }));
+    if (state.page === "usage") {
+      renderUsagePage(page, header);
+      return;
+    }
+  }
+
+  function renderControlsFooter(resetKey) {
+    const footer = div("flex flex-wrap items-center justify-between gap-4");
     const status = div("text-xs leading-4 text-secondary");
     status.setAttribute("role", "status");
     state.status = status;
-    page.append(header, card, status);
+    const reset = renderActionButton("Reset this section", true);
+    reset.addEventListener("click", () => persistSetting(resetKey, true));
+    state.resetButton = reset;
+    footer.append(status, reset);
+    return footer;
+  }
+
+  function usageWindowChoices() {
+    const types = new Set(selectUsageWindows(state.usageData, "all").map((window) => window.type));
+    const choices = [["automatic", "Automatic"]];
+    if (types.has("5h")) choices.push(["5h", "5hr"]);
+    if (types.has("weekly")) choices.push(["weekly", "Weekly"]);
+    if (types.has("monthly")) choices.push(["monthly", "Monthly"]);
+    if (types.has("5h") && types.has("weekly")) choices.push(["5h-weekly", "5hr + Weekly"]);
+    return choices;
+  }
+
+  function renderUsagePage(page, header) {
+    const stack = div("flex flex-col gap-10");
+    const usage = sectionHeading("Usage");
+    const usageCard = settingsCard();
+    usageCard.append(
+      renderSettingRow({key:"showUsageRemaining", label:"Show remaining usage", description:"Keep your active usage window visible."}),
+      renderComposerChoice("usageRemainingLocation", "Placement", "Choose where the indicator appears.", [["toolbar", "Toolbar"], ["composer", "Composer"]]),
+      renderComposerChoice("usageDisplay", "Display", "Choose which details are shown.", [["remaining", "Remaining"], ["remaining-reset", "Remaining + reset"]]),
+      renderComposerChoice("usageWindow", "Usage window", "Choose the limit shown in the indicator.", usageWindowChoices));
+    usage.append(usageCard);
+
+    const context = sectionHeading("Context & alerts");
+    const contextCard = settingsCard();
+    contextCard.append(
+      renderSettingRow({key:"showContextUsage", label:"Show context usage", description:"Display how much context this conversation uses."}),
+      renderSettingRow({key:"lowUsageAlert", label:"Low usage alert", description:"Highlight the indicator when usage is running low."}),
+      renderUsageThresholdRow());
+    context.append(contextCard);
+
+    const disableChoice = (key, unavailable) => {
+      const control = state.settingControls.get(key);
+      const applyDisabled = control.applyDisabled;
+      control.applyDisabled = disabled => applyDisabled(disabled || unavailable());
+    };
+    disableChoice("usageRemainingLocation", () => !state.settings.showUsageRemaining && !state.settings.showContextUsage);
+    disableChoice("usageDisplay", () => !state.settings.showUsageRemaining);
+    disableChoice("usageWindow", () => !state.settings.showUsageRemaining);
+    disableChoice("usageAlertThreshold", () => !state.settings.showUsageRemaining || !state.settings.lowUsageAlert);
+
+    const footer = renderControlsFooter("resetUsage");
+    stack.append(usage, context, footer);
+    page.append(header, stack);
     refreshSettingControls();
   }
 
-  // Sanitized native composer from audited Codex 26.908.40834 / 8881.
-  // Fallback for opening Settings before a composer has mounted; live clones take priority.
-  const nativeComposerExample = "<div class=\"_ComposerLayoutRoot_1qpwu_2 gap-2\" data-composer-layout=\"multiline\" data-composer-padding-variant=\"none\" data-composer-radius-variant=\"default\" data-composer-surface-overflow=\"visible\" data-composer-surface-variant=\"default\" data-composer-utility-bar-variant=\"home\" role=\"presentation\"><div class=\"_ComposerLayoutBody_1qpwu_2\" data-composer-layout=\"multiline\"><div class=\"contents\"><div class=\"_ComposerLayoutAttachments_1qpwu_2\" data-composer-attachments=\"\" data-composer-spacing=\"default\"></div></div><div class=\"contents\"><div class=\"_ComposerLayoutFooter_1qpwu_2\" data-composer-footer-responsive=\"\" data-composer-layout=\"multiline\" data-composer-rows=\"stacked\" data-composer-spacing=\"default\"><div class=\"min-w-0 _AdaptiveFooterInput_1qpwu_2 col-span-full row-start-1 -mx-2\"><div class=\"_ComposerLayoutInput_1qpwu_2 flex-grow overflow-y-auto\" data-composer-layout=\"multiline\" data-composer-spacing=\"default\" data-composer-input-variant=\"default\"><div class=\"_RichTextInput_88kve_2 vertical-scroll-fade-mask text-base transition-[min-height] duration-relaxed ease-enter-snappy motion-reduce:transition-none min-h-0\" data-rich-text-layout=\"multiline\" role=\"presentation\"><div contenteditable=\"false\" aria-multiline=\"true\" dir=\"auto\" role=\"textbox\" spellcheck=\"true\" translate=\"no\" class=\"ProseMirror\" data-composer-markdown=\"\" style=\"font-size: var(--codex-chat-font-size); height: auto; resize: none; min-height: var(--composer-editor-min-height, 2.5rem);\" aria-label=\"Do anything\"><p class=\"placeholder\" data-placeholder=\"Ask Codex anything…\"><br></p></div></div></div></div><div class=\"min-w-0 col-start-1 row-start-2\"><div class=\"flex min-w-0 items-center gap-[5px]\"><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px) aspect-square shrink-0 items-center justify-center !px-0\" aria-label=\"Add files and more\" aria-expanded=\"false\" data-composer-navigation-target=\"add-context\" data-state=\"closed\"><span class=\"_CompactSource_3pdaq_2\" aria-hidden=\"true\"><svg aria-hidden=\"true\" class=\"_Icon_qvjuo_1 text-default\" focusable=\"false\" height=\"16\" viewBox=\"0 0 16 16\" width=\"16\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M8.00049 1.9165C8.41448 1.91677 8.75049 2.25245 8.75049 2.6665V7.25049H13.3335C13.7476 7.25066 14.0835 7.58638 14.0835 8.00049C14.0832 8.41437 13.7474 8.75031 13.3335 8.75049H8.75049V13.3335C8.75031 13.7474 8.41437 14.0832 8.00049 14.0835C7.58638 14.0835 7.25066 13.7476 7.25049 13.3335V8.75049H2.6665C2.25245 8.75049 1.91677 8.41448 1.9165 8.00049C1.9165 7.58627 2.25229 7.25049 2.6665 7.25049H7.25049V2.6665C7.25049 2.25229 7.58627 1.9165 8.00049 1.9165Z\" fill=\"currentColor\"></path></svg></span><span class=\"_LeadingSource_3pdaq_6\" aria-hidden=\"true\"><svg aria-hidden=\"true\" class=\"_Icon_qvjuo_1 text-default\" focusable=\"false\" height=\"20\" viewBox=\"0 0 20 20\" width=\"20\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M10.0005 2.4585C10.4835 2.45876 10.8755 2.85041 10.8755 3.3335V9.12549H16.6665C17.1498 9.12549 17.5415 9.51724 17.5415 10.0005C17.5412 10.4835 17.1496 10.8755 16.6665 10.8755H10.8755V16.6665C10.8755 17.1496 10.4835 17.5412 10.0005 17.5415C9.51724 17.5415 9.12549 17.1498 9.12549 16.6665V10.8755H3.3335C2.85041 10.8755 2.45876 10.4835 2.4585 10.0005C2.4585 9.51724 2.85025 9.12549 3.3335 9.12549H9.12549V3.3335C9.12549 2.85025 9.51724 2.4585 10.0005 2.4585Z\" fill=\"currentColor\"></path></svg></span></button></span><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-1.5 py-0 text-sm leading-[18px] min-w-0 outline-hidden cursor-interaction\" aria-label=\"Change permissions\" data-composer-navigation-target=\"permissions\" data-state=\"closed\" aria-haspopup=\"menu\" aria-expanded=\"false\"><span class=\"_ComposerDropdownLabel_xqyck_1\" data-composer-dropdown-foreground=\"tertiary\"><span class=\"_ComposerDropdownLabelIcon_xqyck_15\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"icon-xs shrink-0 text-tertiary\"><path d=\"M12.6683 4.16699C12.6683 3.84391 12.4065 3.58203 12.0834 3.58203C11.7603 3.58203 11.4984 3.84391 11.4984 4.16699V7.91699L11.4847 8.05078C11.4227 8.35375 11.1547 8.58203 10.8334 8.58203C10.4662 8.58203 10.1685 8.28411 10.1683 7.91699V3.75C10.1683 3.42691 9.90646 3.16504 9.58337 3.16504C9.26029 3.16504 8.99841 3.42691 8.99841 3.75V7.91699C8.99824 8.28411 8.70053 8.58203 8.33337 8.58203C7.96621 8.58203 7.66851 8.28411 7.66833 7.91699V5C7.66833 4.67691 7.40646 4.41504 7.08337 4.41504C6.76029 4.41504 6.49841 4.67691 6.49841 5V9.30371C6.53326 9.3429 6.56715 9.38359 6.59998 9.42578L8.02478 11.2588C8.25005 11.5486 8.19821 11.9659 7.90857 12.1914C7.6187 12.4169 7.20048 12.365 6.97498 12.0752L5.55017 10.2432C5.15812 9.7391 4.41813 9.73637 4.01501 10.1924C4.04396 10.426 4.11486 10.8323 4.25525 11.3486C4.44664 12.0525 4.75404 12.9113 5.21619 13.7383C6.14103 15.3931 7.62465 16.835 10.0004 16.835C12.8545 16.8348 15.1682 14.5211 15.1683 11.667V6.25C15.1683 5.92691 14.9065 5.66504 14.5834 5.66504C14.2603 5.66504 13.9984 5.92691 13.9984 6.25V9.16699C13.9982 9.53411 13.7005 9.83203 13.3334 9.83203C12.9662 9.83203 12.6685 9.53411 12.6683 9.16699V4.16699ZM13.9984 4.42578C14.1828 4.36671 14.3794 4.33496 14.5834 4.33496C15.641 4.33496 16.4984 5.19237 16.4984 6.25V11.667C16.4982 15.2557 13.589 18.1649 10.0004 18.165C6.95953 18.165 5.10939 16.2734 4.05505 14.3867C3.52774 13.4431 3.1843 12.4787 2.97205 11.6982C2.76447 10.9349 2.66834 10.2954 2.66833 10C2.66833 9.87959 2.70117 9.76148 2.76306 9.6582C3.28988 8.78018 4.26555 8.40372 5.16833 8.56152V5C5.16833 3.94237 6.02575 3.08496 7.08337 3.08496C7.31706 3.08496 7.54039 3.12845 7.74744 3.20508C7.98218 2.41297 8.7151 1.83496 9.58337 1.83496C10.1836 1.83496 10.7186 2.11176 11.0697 2.54395C11.3639 2.35978 11.7107 2.25195 12.0834 2.25195C13.141 2.25195 13.9984 3.10937 13.9984 4.16699V4.42578Z\" fill=\"currentColor\"></path></svg></span><span class=\"_ComposerDropdownLabelText_xqyck_34\"><span class=\"_ComposerFooterLabel_qf7ox_1 _ComposerDropdownLabelValue_xqyck_57 max-w-40\" data-composer-footer-collapse=\"secondary\"><span class=\"_ComposerDropdownLabelValueContent_xqyck_96\" data-tooltip-overflow-target=\"true\">Ask for approval</span></span></span></span></button></div></div><div class=\"min-w-0 col-start-3 row-start-2\"><div class=\"flex min-w-0 items-center justify-end w-full\"><div class=\"flex min-w-0 flex-1 justify-end\"><div class=\"flex min-w-0 items-center gap-1\"><span><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px) min-w-0\" aria-haspopup=\"menu\" aria-expanded=\"false\" data-state=\"closed\" data-codex-intelligence-trigger=\"true\" data-composer-navigation-target=\"reasoning\" data-selected-reasoning-effort=\"medium\"><span class=\"_ComposerDropdownLabel_xqyck_1\" data-composer-dropdown-foreground=\"tertiary\" data-composer-dropdown-viewport=\"expanded\"><span class=\"_ComposerDropdownLabelText_xqyck_34\"><span class=\"_ComposerFooterLabel_qf7ox_1 _ComposerDropdownLabelValue_xqyck_57\" data-composer-footer-collapse=\"none\"><span class=\"_ComposerDropdownLabelValueContent_xqyck_96\" data-tooltip-overflow-target=\"true\" data-composer-dropdown-overflowing=\"\"><span class=\"_ModelPickerTriggerContent_bvaoz_1\"><span aria-hidden=\"true\" class=\"_ModelPickerTriggerMeasurement_bvaoz_9\">Select model</span><span class=\"_ModelPickerTriggerLabel_bvaoz_18\"><span class=\"_ModelPickerTriggerModelGroup_bvaoz_19\"><span class=\"_ModelPickerTriggerModelLabel_bvaoz_41\"><span class=\"flex min-w-0 items-center gap-1 tabular-nums\"><span class=\"truncate whitespace-nowrap _ModelPickerTriggerModelText_bvaoz_42\">GPT-6 Astra</span></span></span></span><span class=\"_ComposerFooterLabel_qf7ox_1 _ModelPickerTriggerEffortLabel_bvaoz_54\" data-composer-footer-collapse=\"none\" style=\"width: 48.4297px;\"><span class=\"sr-only\">Medium</span><span class=\"_ModelPickerTriggerEffortViewport_bvaoz_55\"><span class=\"_ModelPickerTriggerEffortLayers_bvaoz_94\"><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"none\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">None</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"minimal\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">Minimal</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"low\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">Light</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"medium\" data-max-effort=\"false\" style=\"opacity: 1; filter: blur(0px);\">Medium</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"high\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">High</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"xhigh\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">Extra High</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"max\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">Max</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"ultra\" data-max-effort=\"true\" style=\"opacity: 0; filter: blur(4px);\">Ultra</span><span class=\"_ModelPickerTriggerEffortText_bvaoz_101\" aria-hidden=\"true\" data-reasoning-effort=\"persistent\" data-max-effort=\"false\" style=\"opacity: 0; filter: blur(4px);\">Persistent</span></span></span></span></span></span></span></span></span></span><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\" aria-hidden=\"true\" class=\"me-0.5 h-3.5 w-3.5 shrink-0 text-tertiary\"><path d=\"M12.1338 5.94433C12.3919 5.77382 12.7434 5.80202 12.9707 6.02929C13.1979 6.25656 13.2261 6.60807 13.0556 6.8662L12.9707 6.9707L8.47067 11.4707C8.21097 11.7304 7.78896 11.7304 7.52926 11.4707L3.02926 6.9707L2.9443 6.8662C2.77379 6.60807 2.80199 6.25656 3.02926 6.02929C3.25653 5.80202 3.60804 5.77382 3.86617 5.94433L3.97067 6.02929L7.99996 10.0586L12.0293 6.02929L12.1338 5.94433Z\"></path></svg></button></span></span></div></div><div class=\"flex shrink-0 items-center\"><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"no-drag cursor-interaction items-center select-none focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px) aspect-square shrink-0 items-center justify-center !px-0\" aria-busy=\"false\" aria-label=\"Dictate\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\" class=\"icon-leading text-default\"><g transform=\"scale(0.8333333333333334)\"><path d=\"M18.5848 13.4121C18.7715 12.9516 19.2961 12.7296 19.7567 12.916C20.217 13.1027 20.4391 13.6274 20.2528 14.0879C19.0405 17.0826 16.2438 19.2675 12.9003 19.6035V22C12.9003 22.4971 12.4969 22.9004 11.9999 22.9004C11.5029 22.9003 11.0995 22.497 11.0995 22V19.6035C7.75618 19.2673 4.96018 17.0823 3.74791 14.0879C3.56144 13.6272 3.78344 13.1026 4.244 12.916C4.70458 12.7298 5.22933 12.9517 5.41588 13.4121C6.46985 16.0157 9.02264 17.8496 12.0008 17.8496C14.9787 17.8493 17.531 16.0155 18.5848 13.4121Z\"></path><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M11.9999 1.34961C14.7061 1.34961 16.9003 3.5438 16.9003 6.25V10.7334C16.9003 13.4396 14.7061 15.6338 11.9999 15.6338C9.29371 15.6337 7.09947 13.4396 7.09947 10.7334V6.25C7.09947 3.54384 9.29372 1.34967 11.9999 1.34961ZM11.9999 3.15039C10.2878 3.15045 8.90025 4.53795 8.90025 6.25V10.7334C8.90025 12.4454 10.2878 13.8339 11.9999 13.834C13.7119 13.834 15.0995 12.4455 15.0995 10.7334V6.25C15.0995 4.53792 13.7119 3.15039 11.9999 3.15039Z\"></path></g></svg></button></span><div class=\"ms-2 flex items-center\"><span data-state=\"closed\" class=\"contents\"><button type=\"button\" class=\"cursor-interaction size-token-button-composer flex items-center justify-center rounded-full transition-opacity focus-visible:outline-2 bg-composer-primary p-0.5 focus-visible:outline-background-composer-primary\" aria-label=\"Start new voice chat\"><svg aria-hidden=\"true\" class=\"_Icon_qvjuo_1 icon-primary-action text-composer-primary\" focusable=\"false\" height=\"16\" viewBox=\"0 0 16 16\" width=\"16\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M6.44434 1.91675C6.85855 1.91675 7.19434 2.25253 7.19434 2.66675V13.3337C7.19412 13.7478 6.85841 14.0837 6.44434 14.0837C6.03037 14.0836 5.69455 13.7477 5.69434 13.3337V2.66675C5.69434 2.25262 6.03023 1.91688 6.44434 1.91675Z\" fill=\"currentColor\"></path> <path d=\"M9.88867 3.74976C10.3028 3.74976 10.6385 4.08565 10.6387 4.49976V11.1667C10.6385 11.5808 10.3028 11.9167 9.88867 11.9167C9.47468 11.9166 9.13885 11.5807 9.13867 11.1667V4.49976C9.1388 4.08574 9.47465 3.74989 9.88867 3.74976Z\" fill=\"currentColor\"></path> <path d=\"M3 5.41675C3.41421 5.41675 3.75 5.75253 3.75 6.16675V9.83374C3.74982 10.2478 3.41411 10.5837 3 10.5837C2.58589 10.5837 2.25018 10.2478 2.25 9.83374V6.16675C2.25 5.75253 2.58579 5.41675 3 5.41675Z\" fill=\"currentColor\"></path> <path d=\"M13.334 5.91675C13.748 5.91701 14.084 6.2527 14.084 6.66675V9.33374C14.0838 9.74764 13.7479 10.0835 13.334 10.0837C12.9199 10.0837 12.5842 9.7478 12.584 9.33374V6.66675C12.584 6.25253 12.9198 5.91675 13.334 5.91675Z\" fill=\"currentColor\"></path></svg></button></span></div></div></div></div></div></div><div class=\"contents\"></div></div></div>";
+  // Native Appearance contrast slider, including its platform thumb geometry.
+  const nativeRangeClass = "h-0.5 min-w-0 flex-1 appearance-none rounded-full cursor-interaction focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border [&::-moz-range-thumb]:border-transparent [&::-moz-range-thumb]:bg-current [&::-moz-range-thumb]:shadow-sm [&::-moz-range-track]:h-0.5 [&::-moz-range-track]:rounded-full [&::-webkit-slider-runnable-track]:h-0.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-thumb]:mt-[-9px] [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-transparent [&::-webkit-slider-thumb]:bg-current [&::-webkit-slider-thumb]:shadow-sm";
+
+  function renderUsageThresholdRow() {
+    const row = renderControlRow({key:"usageAlertThreshold", label:"Alert threshold", description:"Choose when the low-usage highlight appears."});
+    row.classList.add("flex-wrap");
+    const slot = row.lastElementChild;
+    slot.className = "flex h-9 min-w-0 flex-1 basis-64 items-center gap-2.5";
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = "1";
+    input.max = "50";
+    input.step = "1";
+    input.setAttribute("aria-labelledby", "codex-workflow-usageAlertThreshold-label");
+    input.setAttribute("aria-describedby", "codex-workflow-usageAlertThreshold-description");
+    input.className = nativeRangeClass;
+    const value = div("shrink-0 text-end text-sm text-secondary tabular-nums");
+    const apply = threshold => {
+      input.value = String(threshold);
+      value.textContent = `${threshold}%`;
+      input.setAttribute("aria-valuetext", `${threshold}% remaining`);
+      const percentage = (threshold - 1) / 49 * 100;
+      input.style.background = `linear-gradient(to right, var(--color-chart-blue) ${percentage}%, var(--color-border) ${percentage}%)`;
+      input.style.color = "var(--color-text)";
+    };
+    input.addEventListener("input", () => { apply(input.valueAsNumber); updateUsageText(input.valueAsNumber); });
+    input.addEventListener("change", () => persistSetting("usageAlertThreshold", input.valueAsNumber));
+    state.settingControls.set("usageAlertThreshold", {apply, applyDisabled:disabled=>{input.disabled=disabled;}});
+    slot.append(input, value);
+    return row;
+  }
+
+  // Workflow-owned inert sample, composed against audited native CSS interfaces.
+  // No native HTML snapshot, editor state, React tree or artwork is distributed.
+  function createComposerExample() {
+    const node = (tag, classes, attributes = {}, ...children) => {
+      const element = document.createElement(tag);
+      element.className = classes;
+      for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+      element.append(...children);
+      return element;
+    };
+    const span = (classes, ...children) => node("span", classes, {}, ...children);
+    const buttonClasses = "no-drag cursor-interaction items-center select-none focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 gap-1 border whitespace-nowrap flex rounded-full text-tertiary enabled:hover:bg-primary-ghost-hover data-[state=open]:bg-primary-ghost-hover border-transparent h-token-button-composer px-(--padding-button-composer-inline,calc(var(--spacing)*2)) py-0 text-(length:--text-button-composer,var(--text-sm)) leading-(--line-height-button-composer,18px)";
+    const button = (label, classes, ...children) => node("button", buttonClasses + " " + classes, {type:"button", "aria-label":label}, ...children);
+    const editor = node("div", "ProseMirror", {contenteditable:"false", role:"textbox", "aria-multiline":"true", "aria-label":"Do anything", "data-composer-markdown":""});
+    editor.style.fontSize = "var(--codex-chat-font-size)";
+    editor.style.minHeight = "var(--composer-editor-min-height, 2.5rem)";
+    const input = node("div", "min-w-0 _AdaptiveFooterInput_1qpwu_2 col-span-full row-start-1 -mx-2", {},
+      node("div", "_ComposerLayoutInput_1qpwu_2 flex-grow overflow-y-auto", {"data-composer-layout":"multiline", "data-composer-spacing":"default", "data-composer-input-variant":"default"},
+        node("div", "_RichTextInput_88kve_2 vertical-scroll-fade-mask text-base min-h-0", {"data-rich-text-layout":"multiline", role:"presentation"}, editor)));
+    const add = button("Add files and more", "aspect-square shrink-0 justify-center !px-0",
+      span("_CompactSource_3pdaq_2", workflowNativeGlyph("plus16", "_Icon_qvjuo_1 text-default")),
+      span("_LeadingSource_3pdaq_6", workflowNativeGlyph("plus20", "_Icon_qvjuo_1 text-default")));
+    for (const svg of add.querySelectorAll("svg")) {
+      const size = svg.getAttribute("viewBox").split(" ")[2];
+      svg.setAttribute("width", size); svg.setAttribute("height", size);
+    }
+    const permission = button("Change permissions", "min-w-0 px-1.5 text-sm leading-[18px]",
+      span("_ComposerDropdownLabelIcon_xqyck_15", workflowNativeGlyph("hand", "icon-xs shrink-0 text-tertiary")),
+      node("span", "_ComposerFooterLabel_qf7ox_1 max-w-40 truncate text-tertiary font-normal", {"data-composer-footer-collapse":"secondary"}, "Ask for approval"));
+    const model = button("Select model and reasoning", "min-w-0 shrink-0",
+      span("_ModelPickerTriggerContent_bvaoz_1 font-normal",
+        span("_ModelPickerTriggerLabel_bvaoz_18",
+          span("_ModelPickerTriggerModelText_bvaoz_42 text-default tabular-nums", "GPT-6 Astra"),
+          node("span", "_ComposerFooterLabel_qf7ox_1 _ModelPickerTriggerEffortLabel_bvaoz_54", {"data-composer-footer-collapse":"none"}, "Medium"))),
+      workflowNativeGlyph("caret", "me-0.5 h-3.5 w-3.5 shrink-0 text-tertiary"));
+    model.dataset.codexIntelligenceTrigger = "true";
+    model.dataset.composerNavigationTarget = "reasoning";
+    const voice = node("button", "cursor-interaction size-token-button-composer flex items-center justify-center rounded-full bg-composer-primary p-0.5", {type:"button", "aria-label":"Start new voice chat"}, workflowNativeGlyph("voice", "_Icon_qvjuo_1 icon-primary-action text-composer-primary"));
+    voice.firstElementChild.setAttribute("width", "16"); voice.firstElementChild.setAttribute("height", "16");
+    const actions = node("div", "flex shrink-0 items-center", {},
+      button("Dictate", "aspect-square shrink-0 justify-center !px-0", workflowNativeGlyph("microphone", "icon-leading text-default")),
+      node("div", "ms-2 flex items-center", {}, voice));
+    const footer = node("div", "_ComposerLayoutFooter_1qpwu_2", {"data-composer-footer-responsive":"", "data-composer-layout":"multiline", "data-composer-rows":"stacked", "data-composer-spacing":"default"}, input,
+      node("div", "min-w-0 col-start-1 row-start-2", {}, node("div", "flex min-w-0 items-center gap-[5px]", {}, add, permission)),
+      node("div", "min-w-0 col-start-3 row-start-2", {}, node("div", "flex min-w-0 items-center justify-end w-full", {},
+        node("div", "flex min-w-0 flex-1 justify-end", {}, node("div", "flex min-w-0 items-center gap-1", {}, model)), actions)));
+    return cloneComposer(node("div", "_ComposerLayoutRoot_1qpwu_2 gap-2", {role:"presentation", "data-composer-layout":"multiline", "data-composer-padding-variant":"none", "data-composer-radius-variant":"default", "data-composer-surface-overflow":"visible", "data-composer-surface-variant":"default", "data-composer-utility-bar-variant":"home"},
+      node("div", "_ComposerLayoutBody_1qpwu_2", {"data-composer-layout":"multiline"},
+        node("div", "_ComposerLayoutAttachments_1qpwu_2", {"data-composer-attachments":"", "data-composer-spacing":"default"}), footer)));
+  }
+
   const composerSettingKeys = ["hideComposerMicrophone", "composerModelLabel", "composerReasoningLabel", "composerWidth"];
   // Guarded 26.908.40834 model picker; semantic trigger scopes these CSS-module leaves.
   const composerModelSelector = '[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"] ._ModelPickerTriggerModelText_bvaoz_42';
@@ -835,14 +1109,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   const wideComposerWidth = "calc(100% - 2 * var(--thread-wide-block-inline-shift, 0px))";
 
   function renderComposerPage(page, header) {
-    const back = header.firstElementChild;
-    back.classList.remove("bg-text/5", "enabled:hover:bg-text/10", "data-[state=open]:bg-text/10");
-    back.classList.add("enabled:hover:bg-primary-ghost-hover", "focus-visible:bg-primary-ghost-hover");
-    const subtitle = div("text-base text-secondary text-balance");
-    subtitle.textContent = "Arrange the controls you use before sending a message.";
-    const titleStack = div("flex min-w-0 flex-col gap-1.5");
-    titleStack.append(header.lastElementChild, subtitle);
-    header.append(titleStack);
     const stack = div("flex flex-col gap-10");
     const preview = sectionHeading("Preview");
     const frame = settingsCard();
@@ -864,14 +1130,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const layoutCard = settingsCard();
     layoutCard.append(renderComposerChoice("composerWidth", "Composer width", "Set the width of the message input and conversation.", [["default", "Default"], ["wide", "Wide"]], true));
     layout.append(layoutCard);
-    const footer = div("flex flex-wrap items-center justify-between gap-4");
-    const status = div("text-xs leading-4 text-secondary");
-    status.setAttribute("role", "status");
-    state.status = status;
-    const reset = renderActionButton("Reset this section", true);
-    reset.addEventListener("click", () => persistSetting("resetComposer", true));
-    state.resetButton = reset;
-    footer.append(status, reset);
+    const footer = renderControlsFooter("resetComposer");
     stack.append(preview, controls, layout, footer);
     page.append(header, stack);
     refreshSettingControls();
@@ -884,14 +1143,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   const activitySelector = 'button[aria-expanded].max-w-full.text-size-chat:not([aria-haspopup])';
 
   function renderConversationPage(page, header) {
-    const back = header.firstElementChild;
-    back.classList.remove("bg-text/5", "enabled:hover:bg-text/10", "data-[state=open]:bg-text/10");
-    back.classList.add("enabled:hover:bg-primary-ghost-hover", "focus-visible:bg-primary-ghost-hover");
-    const titleStack = div("flex min-w-0 flex-col gap-1.5");
-    const subtitle = div("text-base text-secondary text-balance");
-    subtitle.textContent = "Make long conversations easier to read.";
-    titleStack.append(header.lastElementChild, subtitle);
-    header.append(titleStack);
     const stack = div("flex flex-col gap-10");
     const preview = sectionHeading("Preview");
     const frame = settingsCard();
@@ -902,17 +1153,15 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     preview.append(frame);
     const layout = sectionHeading("Layout");
     const card = settingsCard();
-    const widthRow = renderSettingRow({key:"conversationWidth", label:"Conversation width", description:"Set the maximum width of messages."});
+    const widthRow = renderControlRow({key:"conversationWidth", label:"Conversation width", description:"Set the maximum width of messages."});
     widthRow.classList.add("flex-wrap");
     const slot = widthRow.lastElementChild;
-    slot.replaceChildren();
     slot.className = "flex h-9 min-w-0 flex-1 basis-64 items-center gap-2.5";
     const input = document.createElement("input");
     input.type = "range"; input.min = "480"; input.max = "1440"; input.step = "8";
     input.setAttribute("aria-labelledby", "codex-workflow-conversationWidth-label");
     input.setAttribute("aria-describedby", "codex-workflow-conversationWidth-description");
-    // Native Appearance contrast slider, including its platform thumb geometry.
-    input.className = "h-0.5 min-w-0 flex-1 appearance-none rounded-full cursor-interaction focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border [&::-moz-range-thumb]:border-transparent [&::-moz-range-thumb]:bg-current [&::-moz-range-thumb]:shadow-sm [&::-moz-range-track]:h-0.5 [&::-moz-range-track]:rounded-full [&::-webkit-slider-runnable-track]:h-0.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-thumb]:mt-[-9px] [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-transparent [&::-webkit-slider-thumb]:bg-current [&::-webkit-slider-thumb]:shadow-sm";
+    input.className = nativeRangeClass;
     const value = div("shrink-0 text-end text-sm text-secondary tabular-nums");
     const apply = width => {
       input.value = String(width ?? 768); // Native default column is 48rem on this build.
@@ -941,13 +1190,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       renderComposerChoice("toolActivity", "Tool activity", "Choose the initial view of tool calls.", [["summary","Summary"],["expanded","Expanded"]]),
       renderSettingRow({key:"showMessageTimestamps", label:"Show timestamps", description:"Display the time beside each message."}));
     details.append(detailCard);
-    const footer = div("flex flex-wrap items-center justify-between gap-4");
-    const status = div("text-xs leading-4 text-secondary");
-    status.setAttribute("role", "status"); state.status = status;
-    const reset = renderActionButton("Reset this section", true);
-    reset.addEventListener("click", () => persistSetting("resetConversation", true));
-    state.resetButton = reset;
-    footer.append(status, reset);
+    const footer = renderControlsFooter("resetConversation");
     stack.append(preview, layout, details, footer);
     page.append(header, stack);
     refreshSettingControls();
@@ -1115,16 +1358,15 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function renderComposerChoice(key, labelText, description, choices, segmented = false) {
-    const row = renderSettingRow({key, label:labelText, description});
-    // The native row primitive supplies copy/ARIA; replace its switch with this control.
+    const readChoices = () => typeof choices === "function" ? choices() : choices;
+    const row = renderControlRow({key, label:labelText, description});
     const slot = row.lastElementChild;
-    slot.replaceChildren();
     if (segmented) {
       const group = div("flex min-w-0 items-center gap-1 rounded-lg border border-default p-1");
       group.setAttribute("role", "group");
       group.setAttribute("aria-labelledby", `codex-workflow-${key}-label`);
       group.setAttribute("aria-describedby", `codex-workflow-${key}-description`);
-      const buttons = choices.map(([value, label]) => {
+      const buttons = readChoices().map(([value, label]) => {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = label;
@@ -1148,11 +1390,16 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       const open = event => {
         event.preventDefault();
         if (button.disabled) return;
-        openWorkflowMenu(button, {id:key, label:labelText, choices:choices.map(([value,label])=>({value,label})), selected:state.settings[key], select:value=>persistSetting(key,value)});
+        const available = readChoices();
+        const selected = available.some(([value]) => value === state.settings[key]) ? state.settings[key] : available[0]?.[0];
+        openWorkflowMenu(button, {id:key, label:labelText, choices:available.map(([value,label])=>({value,label})), selected, select:value=>persistSetting(key,value)});
       };
       button.addEventListener("click", open);
       button.addEventListener("keydown", event => {if (["ArrowDown", "ArrowUp"].includes(event.key)) open(event);});
-      state.settingControls.set(key, {button, apply:value=>{label.textContent=choices.find(item=>item[0]===value)[1];}, applyDisabled:disabled=>{button.disabled=disabled;}});
+      state.settingControls.set(key, {button, apply:value=>{
+        const available = readChoices();
+        label.textContent = (available.find(item => item[0] === value) || available[0])?.[1] || "";
+      }, applyDisabled:disabled=>{button.disabled=disabled;}});
       slot.append(button);
     }
     return row;
@@ -1279,11 +1526,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     if (!frame) return;
     if (!frame.firstElementChild) {
       let template = state.composerTemplate;
-      if (!template) {
-        const holder = document.createElement("template");
-        holder.innerHTML = nativeComposerExample;
-        template = cloneComposer(holder.content.firstElementChild);
-      }
+      if (!template) template = createComposerExample();
       frame.append(template.cloneNode(true));
     }
     const root = frame.firstElementChild;
@@ -1353,41 +1596,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     syncConversation();
   }
 
-  function renderUsageRemainingRow() {
-    const row = renderSettingRow({
-      key: "showUsageRemaining",
-      label: "Usage remaining",
-      description: "Show your remaining allowance. Hover to see the limit; click to open Usage.",
-    });
-    const {button, label} = nativeMenuButton();
-    button.setAttribute("aria-label", "Usage remaining location");
-    button.setAttribute("aria-describedby", "codex-workflow-showUsageRemaining-description");
-    button.setAttribute("aria-haspopup", "menu");
-    button.setAttribute("aria-expanded", "false");
-    button.dataset.state = "closed";
-    const apply = (value) => { label.textContent = value === "composer" ? "Composer" : "Toolbar"; };
-    const applyDisabled = (disabled) => {
-      button.disabled = disabled || !state.settings.showUsageRemaining;
-      if (button.disabled) closeUsageLocationMenu();
-    };
-    state.settingControls.set("usageRemainingLocation", { button, apply, applyDisabled });
-    apply(state.settings.usageRemainingLocation);
-    applyDisabled(state.settingsWriteInFlight);
-    const open = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (button.disabled || state.settingsWriteInFlight) return;
-      if (state.usageLocationMenuClose) closeUsageLocationMenu(true);
-      else openUsageLocationMenu(button);
-    };
-    button.addEventListener("click", open);
-    button.addEventListener("keydown", (event) => {
-      if (["ArrowDown", "ArrowUp"].includes(event.key)) open(event);
-    });
-    row.lastElementChild.prepend(button);
-    return row;
-  }
-
   function nativeMenuButton() {
     const button = document.createElement("button");
     button.type = "button";
@@ -1397,32 +1605,14 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     button.dataset.state = "closed";
     const label = document.createElement("span");
     label.className = "flex min-w-0 flex-1 items-center gap-1.5";
-    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    chevron.setAttribute("viewBox", "0 0 20 21");
-    chevron.setAttribute("class", "icon-2xs shrink-0 text-tertiary");
-    chevron.setAttribute("fill", "none");
-    chevron.setAttribute("aria-hidden", "true");
-    const path = document.createElementNS(chevron.namespaceURI, "path");
-    path.setAttribute("d", "M15.2793 7.71101C15.539 7.45131 15.961 7.45131 16.2207 7.71101C16.4804 7.97071 16.4804 8.39272 16.2207 8.65242L10.4707 14.4024C10.211 14.6621 9.78902 14.6621 9.52932 14.4024L3.77932 8.65242L3.69436 8.54792C3.52385 8.28979 3.55205 7.93828 3.77932 7.71101C4.00659 7.48374 4.3581 7.45554 4.61623 7.62605L4.72073 7.71101L10 12.9903L15.2793 7.71101Z");
-    path.setAttribute("fill", "currentColor");
-    path.setAttribute("stroke", "currentColor");
-    path.setAttribute("stroke-width", "0.6");
-    chevron.append(path);
+    const chevron = workflowNativeGlyph("menu-chevron", "icon-2xs shrink-0 text-tertiary");
+    chevron.querySelector("path").setAttribute("stroke-width", "0.6");
     button.append(label, chevron);
     return {button, label};
   }
 
   function closeUsageLocationMenu(restoreFocus = false) {
     state.usageLocationMenuClose?.(restoreFocus);
-  }
-
-  function openUsageLocationMenu(trigger) {
-    openWorkflowMenu(trigger, {
-      id: "usage-location", label: "Usage remaining location",
-      choices: ["toolbar", "composer"].map(value => ({value, label: value === "toolbar" ? "Toolbar" : "Composer"})),
-      selected: state.settings.usageRemainingLocation,
-      select: value => persistSetting("usageRemainingLocation", value),
-    });
   }
 
   function openWorkflowMenu(trigger, {id, label: menuLabel, choices, selected: selectedValue, select}) {
@@ -1453,16 +1643,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       if (icon) row.append(icon);
       row.append(label);
       if (selected) {
-        const check = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        check.setAttribute("viewBox", "0 0 16 16");
-        check.setAttribute("width", "16");
-        check.setAttribute("height", "16");
-        check.setAttribute("class", "shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100");
-        check.setAttribute("aria-hidden", "true");
-        const path = document.createElementNS(check.namespaceURI, "path");
-        path.setAttribute("d", "M12.7216 2.99666C12.8863 2.75824 13.2125 2.69837 13.4511 2.86287C13.6895 3.0274 13.75 3.35377 13.5858 3.59236L7.20011 12.8472C6.97922 13.1685 6.52057 13.2111 6.24405 12.9361L2.45987 9.18123C2.25451 8.97704 2.25305 8.64475 2.45694 8.43904C2.66115 8.23343 2.99433 8.23205 3.20011 8.43611L6.62296 11.8326L12.7216 2.99666Z");
-        path.setAttribute("fill", "currentColor");
-        check.append(path);
+        const check = workflowNativeGlyph("menu-check", "shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100");
+        check.setAttribute("width", "16"); check.setAttribute("height", "16");
         row.append(check);
       }
       item.append(row);
@@ -1617,7 +1799,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   function needsUsageData() {
-    return state.settings.showUsageRemaining || state.settings.focusedInterface &&
+    return state.settings.showUsageRemaining || state.settings.showContextUsage || state.settings.focusedInterface &&
       state.settings.sidebarNavigation.footerShortcut === "usage-shortcut";
   }
 
@@ -1656,10 +1838,11 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   function syncUsageRemaining() {
     syncUsageBridge();
     const placement = state.settings.usageRemainingLocation;
+    const showIndicator = state.settings.showUsageRemaining || state.settings.showContextUsage;
     let owner = null;
     let anchor = null;
     let template = null;
-    if (state.settings.showUsageRemaining && placement === "composer") {
+    if (showIndicator && placement === "composer") {
       const buttons = Array.from(state.composerRoot?.querySelectorAll(
         '[data-composer-rows] button[data-composer-navigation-target="permissions"]',
       ) || []).filter(visibleUsageTarget);
@@ -1667,7 +1850,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
         anchor = template = buttons[0];
         owner = anchor.parentElement;
       }
-    } else if (state.settings.showUsageRemaining) {
+    } else if (showIndicator) {
       const toolbars = Array.from(document.querySelectorAll(usageToolbarSelector)).filter(visibleUsageTarget);
       if (toolbars.length === 1 && toolbars[0].children.length === 2) {
         const toolbar = toolbars[0];
@@ -1721,6 +1904,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     for (const name of ["aspect-square", "!px-0", "group/sidebar-trigger", "browser:size-9", "ms-3"]) classes.delete(name);
     classes.add("shrink-0");
     classes.add("tabular-nums");
+    classes.add("gap-1");
     if (placement === "toolbar") classes.add("px-1");
     if (placement === "composer") {
       classes.delete("text-tertiary");
@@ -1742,19 +1926,90 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     state.usagePlacement = null;
   }
 
-  function updateUsageText() {
-    const limit = selectUsageWindow(state.usageData);
-    const text = limit ? `${limit.remaining}%` : "—";
-    const label = limit?.label || "Usage unavailable";
-    const accessible = limit ? `${label}: ${text} remaining. Open Usage settings` : "Usage unavailable. Open Usage settings";
-    const footer = state.footerShortcut?.button;
-    for (const button of [state.usageButton, footer?.dataset.shortcut === "usage-shortcut" ? footer : null]) {
-      if (!button) continue;
-      if (button.textContent !== text) button.textContent = text;
-      if (button.getAttribute("aria-label") !== accessible) button.setAttribute("aria-label", accessible);
-      if (button === footer && button.title !== label) button.title = label;
+  function usageView(alertThreshold = state.settings.usageAlertThreshold, now = Date.now()) {
+    let limits = selectUsageWindows(state.usageData, state.settings.usageWindow, now);
+    if (!limits.length && state.settings.usageWindow !== "automatic") limits = selectUsageWindows(state.usageData, "automatic", now);
+    limits = limits.map((limit) => ({
+      ...limit,
+      reset: state.settings.usageDisplay === "remaining-reset" ? formatUsageReset(limit.resetsAt, now) : null,
+    }));
+    const multiple = limits.length > 1;
+    const text = limits.length ? limits.map((limit) =>
+      `${multiple ? `${limit.shortLabel} ` : ""}${limit.remaining}%${state.settings.usageDisplay === "remaining-reset" ? ` left${limit.reset ? ` · resets in ${limit.reset}` : ""}` : ""}`
+    ).join(" · ") : "—";
+    const contextPercent = Number.isFinite(state.usageData?.contextPercent) &&
+      state.usageData.contextPercent >= 0 && state.usageData.contextPercent <= 100
+      ? Math.round(state.usageData.contextPercent) : null;
+    return {
+      now,
+      limits,
+      text,
+      contextPercent,
+      warning: state.settings.lowUsageAlert && limits.some((limit) => limit.remaining <= alertThreshold),
+      label: limits.length ? limits.map((limit) => limit.label).join(" · ") : "Usage unavailable",
+      usageAccessible: limits.length ? limits.map((limit) =>
+        `${limit.label}: ${limit.remaining}% remaining${limit.reset ? `, resets in ${limit.reset}` : ""}`
+      ).join(". ") : "Usage unavailable",
+    };
+  }
+
+  function applyUsageValue(button, view, includeUsage, includeContext) {
+    if (!button) return;
+    const parts = [];
+    if (includeUsage) parts.push({kind:"usage", text:view.text, warning:view.warning});
+    if (includeContext) parts.push({kind:"context", text:`Context ${view.contextPercent == null ? "—" : `${view.contextPercent}%`}`});
+    const signature = JSON.stringify(parts);
+    if (button.dataset.codexWorkflowUsageValue !== signature) {
+      button.dataset.codexWorkflowUsageValue = signature;
+      button.replaceChildren();
+      parts.forEach((part, index) => {
+        if (index) {
+          const separator = document.createElement("span");
+          separator.className = "text-tertiary";
+          separator.setAttribute("aria-hidden", "true");
+          separator.textContent = "·";
+          button.append(separator);
+        }
+        const text = document.createElement("span");
+        text.dataset.codexWorkflowUsageText = part.kind;
+        if (part.warning) text.className = "text-warning";
+        text.textContent = part.text;
+        button.append(text);
+      });
     }
-    if (state.usageTooltip && state.usageTooltip.textContent !== label) state.usageTooltip.textContent = label;
+    const accessible = [];
+    if (includeUsage) accessible.push(view.usageAccessible);
+    if (includeContext) accessible.push(view.contextPercent == null ? "Context usage unavailable" : `Context usage: ${view.contextPercent}%`);
+    const label = `${accessible.join(". ")}. Open Usage settings`;
+    if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+  }
+
+  function usageTooltipText(view) {
+    const parts = [];
+    if (state.settings.showUsageRemaining) parts.push(view.label);
+    if (state.settings.showContextUsage) parts.push(`Context ${view.contextPercent == null ? "unavailable" : `${view.contextPercent}%`}`);
+    return parts.join(" · ") || "Usage unavailable";
+  }
+
+  function updateUsageText(alertThreshold = state.settings.usageAlertThreshold) {
+    clearTimeout(state.usageTextTimer);
+    state.usageTextTimer = null;
+    const view = usageView(alertThreshold);
+    const footer = state.footerShortcut?.button;
+    applyUsageValue(state.usageButton, view, state.settings.showUsageRemaining, state.settings.showContextUsage);
+    if (footer?.dataset.shortcut === "usage-shortcut") {
+      applyUsageValue(footer, view, true, false);
+      if (footer.title !== view.label) footer.title = view.label;
+    }
+    const tooltip = usageTooltipText(view);
+    if (state.usageTooltip && state.usageTooltip.textContent !== tooltip) state.usageTooltip.textContent = tooltip;
+    state.settingControls.get("usageWindow")?.apply(state.settings.usageWindow);
+    if (state.settings.usageDisplay === "remaining-reset" && view.limits.some((limit) => limit.resetsAt != null) &&
+      (state.settings.showUsageRemaining && state.usageButton || footer?.dataset.shortcut === "usage-shortcut")) {
+      const delays = view.limits.map((limit) => limit.resetsAt * 1000 - view.now).filter((delay) => delay > 0)
+        .map((delay) => delay % 60000 || 60000);
+      if (delays.length) state.usageTextTimer = setTimeout(updateUsageText, Math.max(100, Math.min(...delays) + 20));
+    }
   }
 
   function showUsageTooltip() {
@@ -1765,7 +2020,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     tooltip.id = "codex-workflow-usage-tooltip";
     tooltip.setAttribute("role", "tooltip");
     tooltip.dataset.codexWorkflow = "usage-tooltip";
-    tooltip.textContent = selectUsageWindow(state.usageData)?.label || "Usage unavailable";
+    tooltip.textContent = usageTooltipText(usageView());
     tooltip.style.position = "fixed";
     document.body.append(tooltip);
     const rect = button.getBoundingClientRect();
@@ -1865,21 +2120,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     clear.className = "flex shrink-0 cursor-interaction items-center justify-center text-secondary hover:text-default size-6";
     clear.setAttribute("aria-label", "Clear customisation search");
     clear.dataset.codexWorkflow = "search-clear";
-    // The native Settings search clear icon (app-initial, VN).
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("class", "icon-sm");
-    icon.setAttribute("viewBox", "0 0 20 20");
-    icon.setAttribute("fill", "currentColor");
-    icon.setAttribute("aria-hidden", "true");
-    for (const d of [
-      "M7.231 7.231a.665.665 0 0 1 .94 0L10 9.06l1.828-1.829.104-.085a.666.666 0 0 1 .921.922l-.084.104L10.94 10l1.829 1.828a.665.665 0 0 1-.94.94L10 10.94l-1.828 1.83a.665.665 0 0 1-.94-.94L9.06 10 7.23 8.172a.665.665 0 0 1 0-.94Z",
-      "M10 2.085a7.915 7.915 0 1 1 0 15.83 7.915 7.915 0 0 1 0-15.83Zm0 1.33a6.585 6.585 0 1 0 0 13.17 6.585 6.585 0 0 0 0-13.17Z",
-    ]) {
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", d);
-      path.setAttribute("fill-rule", "evenodd");
-      icon.append(path);
-    }
+    const icon = workflowNativeGlyph("search-clear");
     clear.append(icon);
     clear.addEventListener("click", () => {
       state.query = "";
@@ -1923,7 +2164,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const focusedControl = document.activeElement;
     const patch = key === "reset" ? {...defaults, sidebarNavigation:{...defaults.sidebarNavigation}} :
       key === "resetComposer" ? Object.fromEntries(composerSettingKeys.map(name => [name, defaults[name]])) :
-      key === "resetConversation" ? Object.fromEntries(conversationSettingKeys.map(name => [name, defaults[name]])) : {[key]:next};
+      key === "resetConversation" ? Object.fromEntries(conversationSettingKeys.map(name => [name, defaults[name]])) :
+      key === "resetUsage" ? Object.fromEntries(usageSettingKeys.map(name => [name, defaults[name]])) : {[key]:next};
     state.settings = { ...previous, ...patch };
     state.settingsWriteInFlight = true;
     if (state.status) state.status.textContent = "";
@@ -1993,7 +2235,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const order = [...new Set([...savedOrder, ...(value?.schemaVersion >= 4 ? builtins : defaults.sidebarNavigation.order)]
       .map(id => id === "general-shortcut" ? "settings-shortcut" : id).filter(id => sidebarItems.includes(id)))];
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       focusedInterface: typeof value?.focusedInterface === "boolean"
         ? value.focusedInterface
         : legacyFocusedInterface,
@@ -2023,6 +2265,13 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       toolActivity: value?.toolActivity === "expanded" ? "expanded" : "summary",
       showMessageTimestamps: value?.showMessageTimestamps === true,
       usageRemainingLocation: ["toolbar", "composer"].includes(value?.usageRemainingLocation) ? value.usageRemainingLocation : defaults.usageRemainingLocation,
+      usageDisplay: ["remaining", "remaining-reset"].includes(value?.usageDisplay) ? value.usageDisplay : defaults.usageDisplay,
+      usageWindow: ["automatic", "5h", "weekly", "monthly", "5h-weekly"].includes(value?.usageWindow) ? value.usageWindow : defaults.usageWindow,
+      showContextUsage: value?.showContextUsage === true,
+      lowUsageAlert: value?.lowUsageAlert === true,
+      usageAlertThreshold: Number.isFinite(value?.usageAlertThreshold)
+        ? Math.min(50, Math.max(1, Math.round(value.usageAlertThreshold)))
+        : defaults.usageAlertThreshold,
       hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
         ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
           typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
@@ -2113,17 +2362,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
       replaceNavIcon(root);
       return root.firstElementChild;
     }
-    if (id === "profile-shortcut") {
-      const svg = navigationGlyph("eye");
-      svg.setAttribute("viewBox", "0 0 20 20");
-      svg.removeAttribute("stroke");
-      // Profile settings glyph, audited Codex 26.903.71938 / 8576.
-      const path = document.createElementNS(svg.namespaceURI, "path");
-      path.setAttribute("fill", "currentColor");
-      path.setAttribute("d", "M16.585 10C16.585 6.3632 13.6368 3.41504 10 3.41504C6.3632 3.41504 3.41504 6.3632 3.41504 10C3.41504 11.9528 4.26592 13.7062 5.61621 14.9121C6.6544 13.6452 8.23235 12.835 10 12.835C11.7674 12.835 13.3447 13.6454 14.3828 14.9121C15.7334 13.7062 16.585 11.9531 16.585 10ZM10 14.165C8.67626 14.165 7.49115 14.7585 6.69531 15.6953C7.66679 16.2602 8.79525 16.585 10 16.585C11.2041 16.585 12.3316 16.2597 13.3027 15.6953C12.5069 14.759 11.3233 14.1651 10 14.165ZM11.835 8.5C11.835 7.48656 11.0134 6.66504 10 6.66504C8.98656 6.66504 8.16504 7.48656 8.16504 8.5C8.16504 9.51344 8.98656 10.335 10 10.335C11.0134 10.335 11.835 9.51344 11.835 8.5ZM17.915 10C17.915 14.3713 14.3713 17.915 10 17.915C5.62867 17.915 2.08496 14.3713 2.08496 10C2.08496 5.62867 5.62867 2.08496 10 2.08496C14.3713 2.08496 17.915 5.62867 17.915 10ZM13.165 8.5C13.165 10.248 11.748 11.665 10 11.665C8.25202 11.665 6.83496 10.248 6.83496 8.5C6.83496 6.75202 8.25202 5.33496 10 5.33496C11.748 5.33496 13.165 6.75202 13.165 8.5Z");
-      svg.replaceChildren(path);
-      return svg;
-    }
+    if (id === "profile-shortcut") return workflowNativeGlyph("profile");
     return navigationGlyph(id === "usage-shortcut" ? "gauge" : "help");
   }
 
@@ -2305,22 +2544,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return svg;
   }
 
-  function nativeSettingsGlyph() {
-    const svg = navigationGlyph("eye");
-    svg.setAttribute("viewBox", "0 0 20 20");
-    svg.removeAttribute("stroke");
-    svg.removeAttribute("stroke-width");
-    const paths = [
-    "M9.99944 7.24939C11.5169 7.2495 12.7473 8.47995 12.7475 9.99744C12.7475 11.5151 11.517 12.7454 9.99944 12.7455C8.48176 12.7455 7.2514 11.5151 7.2514 9.99744C7.25155 8.47988 8.48186 7.24939 9.99944 7.24939ZM9.99944 8.57947C9.2164 8.57947 8.58163 9.21442 8.58148 9.99744C8.58148 10.7806 9.2163 11.4154 9.99944 11.4154C10.7825 11.4153 11.4174 10.7805 11.4174 9.99744C11.4173 9.21449 10.7824 8.57958 9.99944 8.57947Z",
-    "M10.6391 1.67517C11.2939 1.67532 11.8991 2.02577 12.226 2.59314L13.2485 4.36755H15.2963C15.9505 4.36758 16.555 4.71709 16.8823 5.28357L17.5219 6.39001C17.8489 6.95668 17.8481 7.65542 17.5209 8.22205L16.4975 9.99451L17.5239 11.7689C17.8519 12.3357 17.8521 13.0347 17.5248 13.6019L16.8862 14.7084C16.559 15.2747 15.9543 15.6243 15.3002 15.6244H13.2514L12.2299 17.3988C11.9029 17.9663 11.297 18.3168 10.642 18.3168L9.3637 18.3158C8.71064 18.3155 8.10718 17.9678 7.77972 17.4027L6.74847 15.6234L4.69964 15.6244C4.04558 15.6242 3.44087 15.2747 3.1137 14.7084L2.47503 13.6019C2.14791 13.0349 2.14836 12.3366 2.47601 11.7699L3.50237 9.99548L2.47894 8.22205C2.15175 7.65533 2.15174 6.95673 2.47894 6.39001L3.11761 5.28259C3.44458 4.71663 4.04894 4.36813 4.70257 4.36755L6.75042 4.36658L7.77581 2.59119C8.10301 2.02476 8.7076 1.67527 9.36175 1.67517H10.6391ZM9.36273 3.00623C9.1835 3.00623 9.01679 3.10199 8.92718 3.2572L7.82659 5.16345C7.63652 5.49253 7.28473 5.69529 6.90472 5.69568L4.70355 5.69763C4.52451 5.69782 4.3585 5.79355 4.26898 5.94861L3.6303 7.05505C3.54091 7.2102 3.54077 7.40192 3.6303 7.55701L4.73089 9.46326C4.92108 9.7929 4.92135 10.1992 4.73089 10.5287L3.62737 12.4359C3.5378 12.591 3.53792 12.7817 3.62737 12.9369L4.26605 14.0433C4.35567 14.1982 4.52067 14.2932 4.69964 14.2933L6.90276 14.2943C7.28242 14.2946 7.63335 14.497 7.82366 14.8256L8.93011 16.7357C9.01984 16.8905 9.18578 16.9857 9.36468 16.9857H10.642C10.8213 16.9857 10.987 16.89 11.0766 16.7347L12.1752 14.8275C12.3653 14.4975 12.7182 14.2943 13.0991 14.2943H15.3002C15.4794 14.2942 15.6452 14.1985 15.7348 14.0433L16.3725 12.9379C16.4621 12.7826 16.4621 12.5911 16.3725 12.4359L15.27 10.5287C15.1032 10.2404 15.0808 9.89331 15.2055 9.59021L15.269 9.46326L16.3696 7.55701C16.4591 7.40189 16.459 7.21022 16.3696 7.05505L15.7309 5.94861C15.6412 5.79363 15.4754 5.69863 15.2963 5.69861L13.0951 5.69763L12.9535 5.68884C12.6751 5.65158 12.4217 5.50519 12.2504 5.28259L12.1723 5.16443L11.0737 3.2572C10.9841 3.10175 10.8175 3.00525 10.6381 3.00525L9.36273 3.00623Z",
-  ];
-    svg.replaceChildren(...paths.map(d => {
-      const path = document.createElementNS(svg.namespaceURI,"path");
-      path.setAttribute("d",d); path.setAttribute("fill","currentColor");
-      path.setAttribute("fill-rule","evenodd"); return path;
-    }));
-    return svg;
-  }
+  function nativeSettingsGlyph() { return workflowNativeGlyph("settings"); }
 
   function renderNavigationPage(page) {
     const header = div("flex flex-col gap-4 pb-8");
@@ -3129,7 +3353,19 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     return card;
   }
 
-  function renderSettingRow({ key, label: labelText, description: descriptionText, requiresFocusedInterface = false }) {
+  function renderSettingRow({ key, label, description, requiresFocusedInterface = false }) {
+    const row = renderControlRow({ key, label, description });
+    row.lastElementChild.appendChild(renderSwitch({
+      key,
+      labelId: `codex-workflow-${key}-label`,
+      descriptionId: `codex-workflow-${key}-description`,
+      requiresFocusedInterface,
+    }));
+    return row;
+  }
+
+  // Shared copy and control slot; callers construct only the control they need.
+  function renderControlRow({ key, label: labelText, description: descriptionText }) {
     const row = div("flex items-center justify-between px-4 gap-6 py-3");
     const left = div("flex min-w-0 items-center gap-3 flex-1");
     const stack = div("flex min-w-0 flex-1 flex-col gap-0.5");
@@ -3143,12 +3379,6 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     left.appendChild(stack);
 
     const control = div("flex max-w-full shrink-0 items-center gap-2");
-    control.appendChild(renderSwitch({
-      key,
-      labelId: label.id,
-      descriptionId: description.id,
-      requiresFocusedInterface,
-    }));
     row.append(left, control);
     return row;
   }
