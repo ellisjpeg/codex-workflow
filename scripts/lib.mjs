@@ -680,6 +680,10 @@ export function recoverTransaction(journal, {
   verifyRollback = () => preflight(journal.rollbackAsar, journal.rollbackPlist, { allowVersion: true }),
   verifyRestored = () => {
     if (targetAsar === asarPath && targetPlist === infoPlistPath) {
+      const restored = preflightLiveUncached({ allowVersion: true });
+      // Older snapshots lost extended signatures; signing also repairs the
+      // executable signature changed by an interrupted full-bundle re-sign.
+      if (!restored.signatureIsValid) resignPatchedApp(targetApp);
       return preflightLiveUncached({ allowVersion: true });
     }
     return preflight(targetAsar, targetPlist, { allowVersion: true });
@@ -918,7 +922,9 @@ export function validateTransactionJournal(journal) {
 
 function copyFileDurably(from, to) {
   mkdirSync(dirname(to), { recursive: true });
-  cpSync(from, to);
+  // macOS stores signatures for non-Mach-O code in extended attributes.
+  // Node's cpSync copies bytes but drops those attributes.
+  execFileSync("/bin/cp", ["-p", from, to]);
   fsyncFile(to);
   fsyncDirectory(dirname(to));
 }

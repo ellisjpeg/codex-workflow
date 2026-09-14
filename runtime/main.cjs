@@ -24,7 +24,7 @@ const updateWatchers = [];
 let updateLaunchInFlight = false;
 let updateCheckInFlight = false;
 const defaults = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   focusedInterface: true,
   hidePullRequests: true,
   hidePetMenuItem: true,
@@ -35,6 +35,8 @@ const defaults = {
   conversationWidth: null, messageSpacing: "default", userMessageStyle: "bubble",
   toolActivity: "summary", showMessageTimestamps: false,
   showUsageRemaining: true, usageRemainingLocation: "toolbar",
+  usageDisplay: "remaining", usageWindow: "automatic",
+  showContextUsage: false, lowUsageAlert: false, usageAlertThreshold: 10,
   hiddenSettingsPages: [],
   sidebarNavigation: {
     order: ["pull-requests", "scheduled", "plugins", "explore", "settings-shortcut"],
@@ -82,7 +84,7 @@ function normaliseSettings(value) {
   const order = [...new Set([...sidebarOrder, ...(value?.schemaVersion >= 4 ? builtins : sidebarDefaults.order)]
     .map(id => id === "general-shortcut" ? "settings-shortcut" : id).filter(id => allowed.includes(id)))];
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     focusedInterface: typeof value?.focusedInterface === "boolean"
       ? value.focusedInterface
       : legacyFocusedInterface,
@@ -112,6 +114,13 @@ function normaliseSettings(value) {
     toolActivity: value?.toolActivity === "expanded" ? "expanded" : "summary",
     showMessageTimestamps: value?.showMessageTimestamps === true,
     usageRemainingLocation: ["toolbar", "composer"].includes(value?.usageRemainingLocation) ? value.usageRemainingLocation : defaults.usageRemainingLocation,
+    usageDisplay: ["remaining", "remaining-reset"].includes(value?.usageDisplay) ? value.usageDisplay : defaults.usageDisplay,
+    usageWindow: ["automatic", "5h", "weekly", "monthly", "5h-weekly"].includes(value?.usageWindow) ? value.usageWindow : defaults.usageWindow,
+    showContextUsage: value?.showContextUsage === true,
+    lowUsageAlert: value?.lowUsageAlert === true,
+    usageAlertThreshold: Number.isFinite(value?.usageAlertThreshold)
+      ? Math.min(50, Math.max(1, Math.round(value.usageAlertThreshold)))
+      : defaults.usageAlertThreshold,
     hiddenSettingsPages: Array.isArray(value?.hiddenSettingsPages)
       ? [...new Set(value.hiddenSettingsPages.slice(0, 100).filter((slug) =>
         typeof slug === "string" && /^[a-z][a-z0-9-]{0,79}$/u.test(slug) && slug !== "workflow"))]
@@ -187,8 +196,14 @@ function readJson(target) {
 }
 
 function versionParts(value) {
-  const match = String(value || "").match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u);
-  return match ? match.slice(1).map(Number) : null;
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u);
+  // Check the whole match too: JavaScript's $ may precede a final newline.
+  if (!match || match[0] !== value) return null;
+  const core = match.slice(1, 4).map(Number);
+  const prerelease = match[4]?.split(".") || [];
+  if (!core.every(Number.isSafeInteger) || prerelease.some(id => /^0\d+$/u.test(id))) return null;
+  return { core, prerelease };
 }
 
 function compareVersions(left, right) {
@@ -196,7 +211,23 @@ function compareVersions(left, right) {
   const b = versionParts(right);
   if (!a || !b) return 0;
   for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+    if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
+  }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length ? -1 : 1;
+  }
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const leftId = a.prerelease[index];
+    const rightId = b.prerelease[index];
+    if (leftId === rightId) continue;
+    if (leftId === undefined) return -1;
+    if (rightId === undefined) return 1;
+    const leftNumeric = /^\d+$/u.test(leftId);
+    const rightNumeric = /^\d+$/u.test(rightId);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    // Equal-length decimal strings compare exactly, even beyond Number precision.
+    if (leftNumeric && leftId.length !== rightId.length) return leftId.length > rightId.length ? 1 : -1;
+    return leftId > rightId ? 1 : -1;
   }
   return 0;
 }
@@ -393,6 +424,7 @@ if (!globalThis.__codexWorkflowMainInstalled) {
       throw new Error("Workflow updater Node.js runtime is unavailable");
     }
     updateLaunchInFlight = true;
+    let appliedStatus;
     appendLog("info", `Workflow update requested: ${status.installedVersion || "unknown"} -> ${status.availableVersion || "unknown"}`);
     try {
       const child = spawn(config.nodeExecutable, [updaterPath, "--apply"], {
@@ -406,13 +438,16 @@ if (!globalThis.__codexWorkflowMainInstalled) {
           else reject(new Error(`Workflow updater exited ${signal ? `with ${signal}` : `with code ${code}`}`));
         });
       });
+      appliedStatus = readUpdateStatus();
+      if (appliedStatus.installedVersion !== status.availableVersion || appliedStatus.blockedReason || appliedStatus.error) {
+        throw new Error("Workflow update did not complete cleanly; Codex was not relaunched");
+      }
       appendLog("info", `Workflow update applied by process ${child.pid || "unknown"}`);
     } catch (error) {
       updateLaunchInFlight = false;
       appendLog("error", `Workflow updater failed: ${error?.stack || error}`);
       throw error;
     }
-    const appliedStatus = readUpdateStatus();
     setImmediate(() => {
       app.relaunch();
       app.exit(0);

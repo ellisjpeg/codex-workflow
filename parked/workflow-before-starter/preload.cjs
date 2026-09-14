@@ -1,7 +1,82 @@
 // Archived renderer: intentionally not loaded by the starter screen.
 "use strict";
 
-const { ipcRenderer } = require("electron");
+const { ipcRenderer, webFrame } = require("electron");
+
+// Build-bound native interoperability: artwork stays in the user's Codex bundle.
+async function readWorkflowNativeAssets() {
+  if (location.protocol !== "app:") throw Error("Native assets require the app renderer");
+  const scripts = document.querySelectorAll('script[type="module"][src="./assets/index-b0a81f126468.js"], script[type="module"][src="./assets/detachedWindow-53e575877f9d.js"]');
+  if (scripts.length !== 1 || !/^app:\/\/-\/assets\/(?:index-b0a81f126468|detachedWindow-53e575877f9d)\.js$/.test(scripts[0].src)) throw Error("Unaudited native asset entry");
+  const specifications = [
+    ["plus16", "shared-icons-693ab6da8dfa.js", "Wu", "Gu", 1, "0 0 16 16"],
+    ["plus20", "shared-icons-693ab6da8dfa.js", "Hu", "Uu", 1, "0 0 20 20"],
+    ["hand", "app-primary-44ec287874b7.js", "nr", "tr", 1, "0 0 20 20"],
+    ["caret", "app-primary-44ec287874b7.js", "_p", "gp", 1, "0 0 16 16"],
+    ["microphone", "app-initial-9b95fa538c62.js", "Pn", "Nn", 2, "0 0 20 20"],
+    ["voice", "shared-icons-693ab6da8dfa.js", "Mc", "Nc", 4, "0 0 16 16"],
+    ["settings", "app-initial-9b95fa538c62.js", "apt", "ipt", 2, "0 0 20 20"],
+    ["profile", "app-primary-44ec287874b7.js", "Ix", "Fx", 1, "0 0 20 20"],
+    ["menu-chevron", "app-initial-9b95fa538c62.js", "Wft", "Uft", 1, "0 0 20 21"],
+    ["menu-check", "shared-icons-693ab6da8dfa.js", "rg", "ng", 1, "0 0 16 16"],
+    ["search-clear", "app-initial-9b95fa538c62.js", "bD", "yD", 2, "0 0 20 20"],
+    ["help", "app-initial-9b95fa538c62.js", "X", "Y", 2, "0 0 20 20"],
+    ["download", "app-initial-9b95fa538c62.js", "TK", "wK", 1, "0 0 20 20"],
+  ];
+  const tags = new Set(["svg", "g", "path"]);
+  const attributes = new Set(["xmlns", "width", "height", "viewBox", "fill", "fill-rule", "clip-rule", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "d", "transform", "aria-hidden", "focusable"]);
+  const element = (value) => {
+    if (!value || !tags.has(value.type)) throw Error("Non-static native icon");
+    const node = document.createElementNS("http://www.w3.org/2000/svg", value.type);
+    for (const [key, data] of Object.entries(value.props)) {
+      if (key === "children") {
+        for (const child of [data].flat()) if (child != null && child !== false) node.append(element(child));
+      } else if (data != null) {
+        const name = key === "viewBox" ? key : key.replace(/[A-Z]/g, c => "-" + c.toLowerCase());
+        if (!attributes.has(name) || !["string", "number", "boolean"].includes(typeof data)) throw Error("Unexpected native icon attribute");
+        node.setAttribute(name, String(data));
+      }
+    }
+    return node;
+  };
+  const result = {};
+  for (const [name, file, initialize, exported, paths, viewBox] of specifications) {
+    const module = await import(new URL(file, scripts[0].src).href);
+    module[initialize]();
+    const value = module[exported];
+    let svg;
+    if (typeof value === "function") svg = element(value({}));
+    else {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", value.canvas.viewBox);
+      svg.innerHTML = value.body;
+    }
+    if (svg.localName !== "svg" || svg.getAttribute("viewBox") !== viewBox || svg.querySelectorAll("path").length !== paths) throw Error("Native icon shape changed: " + name);
+    for (const node of [svg, ...svg.querySelectorAll("*")]) {
+      if (!tags.has(node.localName) || [...node.attributes].some(a => !attributes.has(a.name) ||
+        (a.name === "xmlns" ? a.value !== "http://www.w3.org/2000/svg" : /url\s*\(|(?:https?|data|javascript):/i.test(a.value)))) throw Error("Unsafe native SVG");
+    }
+    result[name] = svg.outerHTML;
+  }
+  return JSON.stringify(result);
+}
+
+let workflowNativeAssets;
+async function loadWorkflowNativeAssets() {
+  if (document.readyState === "loading") await new Promise(resolve => document.addEventListener("DOMContentLoaded", resolve, { once: true }));
+  workflowNativeAssets = JSON.parse(await webFrame.executeJavaScript(`(${readWorkflowNativeAssets.toString()})()`));
+}
+
+function workflowNativeGlyph(name, className = "icon-sm") {
+  const holder = document.createElement("template");
+  holder.innerHTML = workflowNativeAssets[name];
+  const svg = holder.content.firstElementChild;
+  svg.setAttribute("class", className);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  return svg;
+}
+
 
 function isTopFrame() {
   try {
@@ -119,6 +194,12 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
   }
 
   async function start() {
+    try {
+      await loadWorkflowNativeAssets();
+      const paths = name => [...workflowNativeGlyph(name).querySelectorAll("path")].map(p => p.getAttribute("d"));
+      settingsGearPaths = paths("settings"); helpQuestionPaths = paths("help");
+    } catch (error) { log("error", `native assets unavailable: ${error?.message || error}`); return; }
+
     try {
       state.settings = normaliseSettings(
         await ipcRenderer.invoke("codex-workflow:settings:get"),
@@ -612,14 +693,8 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     for (const observer of observers) observer.disconnect();
   }
 
-  const settingsGearPaths = [
-    "M9.99944 7.24939C11.5169 7.2495 12.7473 8.47995 12.7475 9.99744C12.7475 11.5151 11.517 12.7454 9.99944 12.7455C8.48176 12.7455 7.2514 11.5151 7.2514 9.99744C7.25155 8.47988 8.48186 7.24939 9.99944 7.24939ZM9.99944 8.57947C9.2164 8.57947 8.58163 9.21442 8.58148 9.99744C8.58148 10.7806 9.2163 11.4154 9.99944 11.4154C10.7825 11.4153 11.4174 10.7805 11.4174 9.99744C11.4173 9.21449 10.7824 8.57958 9.99944 8.57947Z",
-    "M10.6391 1.67517C11.2939 1.67532 11.8991 2.02577 12.226 2.59314L13.2485 4.36755H15.2963C15.9505 4.36758 16.555 4.71709 16.8823 5.28357L17.5219 6.39001C17.8489 6.95668 17.8481 7.65542 17.5209 8.22205L16.4975 9.99451L17.5239 11.7689C17.8519 12.3357 17.8521 13.0347 17.5248 13.6019L16.8862 14.7084C16.559 15.2747 15.9543 15.6243 15.3002 15.6244H13.2514L12.2299 17.3988C11.9029 17.9663 11.297 18.3168 10.642 18.3168L9.3637 18.3158C8.71064 18.3155 8.10718 17.9678 7.77972 17.4027L6.74847 15.6234L4.69964 15.6244C4.04558 15.6242 3.44087 15.2747 3.1137 14.7084L2.47503 13.6019C2.14791 13.0349 2.14836 12.3366 2.47601 11.7699L3.50237 9.99548L2.47894 8.22205C2.15175 7.65533 2.15174 6.95673 2.47894 6.39001L3.11761 5.28259C3.44458 4.71663 4.04894 4.36813 4.70257 4.36755L6.75042 4.36658L7.77581 2.59119C8.10301 2.02476 8.7076 1.67527 9.36175 1.67517H10.6391ZM9.36273 3.00623C9.1835 3.00623 9.01679 3.10199 8.92718 3.2572L7.82659 5.16345C7.63652 5.49253 7.28473 5.69529 6.90472 5.69568L4.70355 5.69763C4.52451 5.69782 4.3585 5.79355 4.26898 5.94861L3.6303 7.05505C3.54091 7.2102 3.54077 7.40192 3.6303 7.55701L4.73089 9.46326C4.92108 9.7929 4.92135 10.1992 4.73089 10.5287L3.62737 12.4359C3.5378 12.591 3.53792 12.7817 3.62737 12.9369L4.26605 14.0433C4.35567 14.1982 4.52067 14.2932 4.69964 14.2933L6.90276 14.2943C7.28242 14.2946 7.63335 14.497 7.82366 14.8256L8.93011 16.7357C9.01984 16.8905 9.18578 16.9857 9.36468 16.9857H10.642C10.8213 16.9857 10.987 16.89 11.0766 16.7347L12.1752 14.8275C12.3653 14.4975 12.7182 14.2943 13.0991 14.2943H15.3002C15.4794 14.2942 15.6452 14.1985 15.7348 14.0433L16.3725 12.9379C16.4621 12.7826 16.4621 12.5911 16.3725 12.4359L15.27 10.5287C15.1032 10.2404 15.0808 9.89331 15.2055 9.59021L15.269 9.46326L16.3696 7.55701C16.4591 7.40189 16.459 7.21022 16.3696 7.05505L15.7309 5.94861C15.6412 5.79363 15.4754 5.69863 15.2963 5.69861L13.0951 5.69763L12.9535 5.68884C12.6751 5.65158 12.4217 5.50519 12.2504 5.28259L12.1723 5.16443L11.0737 3.2572C10.9841 3.10175 10.8175 3.00525 10.6381 3.00525L9.36273 3.00623Z",
-  ];
-  const helpQuestionPaths = [
-    "M16.585 10C16.585 6.3632 13.6368 3.41504 10 3.41504C6.3632 3.41504 3.41504 6.3632 3.41504 10C3.41504 13.6368 6.3632 16.585 10 16.585C13.6368 16.585 16.585 13.6368 16.585 10ZM17.915 10C17.915 14.3713 14.3713 17.915 10 17.915C5.62867 17.915 2.08496 14.3713 2.08496 10C2.08496 5.62867 5.62867 2.08496 10 2.08496C14.3713 2.08496 17.915 5.62867 17.915 10Z",
-    "M9.81735 11.5962C9.3582 11.5962 9.08812 11.2829 9.08812 10.84V10.7643C9.08812 10.1269 9.41762 9.7056 10.055 9.33288C10.7519 8.91695 10.9625 8.64686 10.9625 8.1499C10.9625 7.62053 10.552 7.25321 9.9578 7.25321C9.42843 7.25321 9.07191 7.51249 8.89906 7.99325C8.76401 8.33896 8.52093 8.49021 8.19142 8.49021C7.76469 8.49021 7.5 8.22552 7.5 7.81499C7.5 7.58271 7.55402 7.37745 7.66205 7.17218C8.00776 6.45915 8.87205 6 10.0334 6C11.5675 6 12.5993 6.84267 12.5993 8.10128C12.5993 8.91695 12.2049 9.47333 11.4433 9.92167C10.7248 10.3376 10.5628 10.5699 10.4926 11.0236C10.4115 11.3856 10.2009 11.5962 9.81735 11.5962ZM9.82816 14C9.342 14 8.94767 13.6273 8.94767 13.1519C8.94767 12.6766 9.342 12.3038 9.82816 12.3038C10.3197 12.3038 10.714 12.6766 10.714 13.1519C10.714 13.6273 10.3197 14 9.82816 14Z",
-  ];
+  let settingsGearPaths;
+  let helpQuestionPaths;
 
   function applyFilledIcon(svg, paths) {
     if (!(svg instanceof SVGElement)) return;
@@ -2516,14 +2591,7 @@ if (!globalThis.__codexWorkflowPreloadInstalled && isTopFrame()) {
     const icon = document.createElement("span");
     icon.setAttribute("aria-hidden", "true");
     icon.dataset.codexWorkflowUpdateIcon = "true";
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 20 20");
-    svg.setAttribute("fill", "currentColor");
-    svg.setAttribute("aria-hidden", "true");
-    svg.setAttribute("class", "size-3 shrink-0 motion-reduce:transition-none");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", "M2.66831 12.6664V12.5004C2.66831 12.1331 2.96607 11.8353 3.33334 11.8353C3.70061 11.8353 3.99838 12.1331 3.99838 12.5004V12.6664C3.99838 13.3773 3.99929 13.8708 4.03061 14.2543C4.0613 14.6299 4.11812 14.8414 4.19858 14.9994L4.26889 15.1263C4.4452 15.4138 4.69823 15.6482 5.00034 15.8021L5.13022 15.8578C5.27399 15.9092 5.4635 15.9471 5.74545 15.9701C6.12897 16.0014 6.62231 16.0013 7.33334 16.0013H12.6664C13.3772 16.0013 13.8708 16.0014 14.2542 15.9701C14.6296 15.9394 14.8414 15.8825 14.9994 15.8021L15.1263 15.7308C15.4137 15.5545 15.6482 15.3014 15.8021 14.9994L15.8578 14.8695C15.9092 14.7258 15.947 14.5361 15.9701 14.2543C16.0014 13.8708 16.0013 13.3772 16.0013 12.6664V12.5004C16.0013 12.1332 16.2992 11.8355 16.6664 11.8353C17.0336 11.8353 17.3314 12.1331 17.3314 12.5004V12.6664C17.3314 13.3554 17.332 13.9125 17.2953 14.3627C17.2625 14.7636 17.1975 15.1248 17.0531 15.4613L16.9867 15.6039C16.7212 16.1248 16.3173 16.5606 15.8216 16.8646L15.6039 16.9867C15.2271 17.1787 14.8206 17.2579 14.3626 17.2953C13.9124 17.3321 13.3554 17.3314 12.6664 17.3314H7.33334C6.64425 17.3314 6.0873 17.3321 5.63706 17.2953C5.23651 17.2626 4.87562 17.1982 4.5394 17.0541L4.39682 16.9867C3.8757 16.7212 3.4392 16.3175 3.1351 15.8217L3.01303 15.6039C2.82106 15.2271 2.74186 14.8207 2.70444 14.3627C2.66767 13.9125 2.66831 13.3554 2.66831 12.6664ZM9.3353 3.33337C9.3353 2.9661 9.63307 2.66833 10.0003 2.66833C10.3675 2.66851 10.6654 2.96621 10.6654 3.33337V10.8939L12.8626 8.69666L12.9671 8.61169C13.2253 8.44097 13.5767 8.4693 13.804 8.69666C14.0634 8.95633 14.0635 9.37748 13.804 9.63708L10.4701 12.9701C10.3454 13.0947 10.1766 13.1653 10.0003 13.1654C9.82397 13.1654 9.65434 13.0948 9.52963 12.9701L6.19663 9.63708L6.11166 9.53259C5.9411 9.27445 5.96934 8.92394 6.19663 8.69666C6.42392 8.46937 6.77442 8.44113 7.03256 8.61169L7.13705 8.69666L9.3353 10.8949V3.33337Z");
-    svg.append(path);
+    const svg = workflowNativeGlyph("download", "size-3 shrink-0 motion-reduce:transition-none");
     icon.append(svg);
 
     const measurement = document.createElement("span");

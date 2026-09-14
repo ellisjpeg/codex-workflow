@@ -44,6 +44,16 @@ function harness(initial = raw(), url = "app://codex/index.html") {
   const cacheListeners = new Set();
   const handlers = new Map();
   const output = [];
+  let contextValue = null;
+  const tokenUsageAtom = {};
+  const composerScope = {
+    conversationId: "thread-1",
+    get(atom, conversationId) {
+      assert.equal(atom, tokenUsageAtom);
+      assert.equal(conversationId, "thread-1");
+      return contextValue;
+    },
+  };
   let state = { data: initial, status: "success", dataUpdatedAt: 1 };
   let nextFetch;
   let importGate;
@@ -67,11 +77,15 @@ function harness(initial = raw(), url = "app://codex/index.html") {
       return state.data;
     },
   };
-  const scope = { queryClient: client, query: { getOptions: () => ({ queryKey: ["rate-limit-status"], staleTime: 30000 }) } };
+  const scope = { queryClient: client, composerScope,
+    query: { getOptions: () => ({ queryKey: ["rate-limit-status"], staleTime: 30000 }) } };
   let mounted = scope;
   const native = {
     tg: () => mounted,
     rz: {},
+    s$: (value) => value?.composerScope,
+    a$: (value) => value?.conversationId,
+    $Dt: tokenUsageAtom,
     xmn: { subscribe(type, fn) {
       const set = handlers.get(type) ?? new Set();
       handlers.set(type, set);
@@ -99,7 +113,7 @@ function harness(initial = raw(), url = "app://codex/index.html") {
     assert.equal(typeof event.detail, "string");
     assert.ok(!event.detail.includes("fixture-account") && !event.detail.includes("must-not-leave"));
     const value = JSON.parse(event.detail);
-    assert.deepEqual(Object.keys(value).sort(), ["blocked", "unavailable", "windows"]);
+    assert.deepEqual(Object.keys(value).sort(), ["blocked", "contextPercent", "unavailable", "windows"]);
     output.push(value);
   });
   return {
@@ -123,6 +137,7 @@ function harness(initial = raw(), url = "app://codex/index.html") {
     },
     hold() { const hold = deferred(); nextFetch = hold; return hold; },
     holdImport() { const hold = deferred(); importGate = hold; return hold; },
+    setContext(value) { contextValue = value; },
     setScope(value) { mounted = value; },
     update(data, status = "success", key = ["rate-limit-status"]) {
       state = { data, status, dataUpdatedAt: state.dataUpdatedAt + 1 };
@@ -142,7 +157,7 @@ test("native cache projection is sanitized, exact-key scoped, idempotent and dis
   assert.deepEqual(h.output.at(-1), { windows: [
     { usedPercent: 25, windowDurationMins: 300, resetsAt: 2000000000 },
     { usedPercent: 30, windowDurationMins: 10080, resetsAt: null },
-  ], blocked: false, unavailable: false });
+  ], blocked: false, unavailable: false, contextPercent: null });
   await h.install(true);
   assert.equal(h.cacheListeners.size, 1);
   assert.equal(h.fetches, 1);
@@ -158,6 +173,25 @@ test("native cache projection is sanitized, exact-key scoped, idempotent and dis
   h.window.dispatchEvent(new h.window.Event("focus"));
   h.update(raw(77));
   assert.equal(h.output.length, stopped);
+  await h.close();
+});
+
+test("current-thread context is projected from the native route scope and follows token updates", async () => {
+  const h = harness();
+  await h.install(true);
+  await flush();
+  h.setContext({ modelContextWindow: 200000, last: { totalTokens: 68000 } });
+  h.notification("thread/tokenUsage/updated", {});
+  await flush();
+  assert.equal(h.output.at(-1).contextPercent, 34);
+  h.setContext({ modelContextWindow: 100, last: { totalTokens: 150 } });
+  h.message("navigate-to-route", { path: "/" });
+  await flush();
+  assert.equal(h.output.at(-1).contextPercent, 100);
+  h.setContext(null);
+  h.message("navigate-to-route", { path: "/settings" });
+  await flush();
+  assert.equal(h.output.at(-1).contextPercent, null);
   await h.close();
 });
 

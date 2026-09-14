@@ -17,29 +17,21 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      - run: npm ci --engine-strict
+      - run: npm audit --audit-level=moderate
       - run: npm run check
       - name: Build updater asset
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          package_version="$(node -p 'require("./package.json").version')"
-          test "$version" = "$package_version"
-          npm prune --omit=dev
-          find node_modules -type l -delete
-          mkdir -p "dist/stage/codex-workflow-$version"
-          cp -R loader.cjs runtime scripts node_modules package.json package-lock.json \
-            workflow-compatibility.json README.md LICENSE \
-            "dist/stage/codex-workflow-$version/"
+          node scripts/stage-release.mjs "$version" "dist/stage/codex-workflow-$version"
           tar -C dist/stage -czf "dist/codex-workflow-$version.tar.gz" "codex-workflow-$version"
-      - name: Publish release
+      - name: Create release draft for review
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/codex-workflow-$version.tar.gz" \
-            --generate-notes \
-            --verify-tag
+          node scripts/release-draft.mjs "$GITHUB_REF_NAME" "dist/codex-workflow-$version.tar.gz"

@@ -77,13 +77,18 @@ test("composer preferences validate, preserve unrelated settings and survive reo
   assert.equal(runtime.get().hideComposerMicrophone, true);
 });
 
-test("usage defaults follow schema 4 and reject malformed values", (t) => {
+test("usage defaults follow schema 5 and reject malformed values", (t) => {
   const root = temporaryRoot(t);
   const runtime = loadRuntime(root);
   const defaults = runtime.get();
-  assert.equal(defaults.schemaVersion, 4);
+  assert.equal(defaults.schemaVersion, 5);
   assert.equal(defaults.showUsageRemaining, true);
   assert.equal(defaults.usageRemainingLocation, "toolbar");
+  assert.equal(defaults.usageDisplay, "remaining");
+  assert.equal(defaults.usageWindow, "automatic");
+  assert.equal(defaults.showContextUsage, false);
+  assert.equal(defaults.lowUsageAlert, false);
+  assert.equal(defaults.usageAlertThreshold, 10);
   const settingsPath = path.join(root, "settings.json");
   for (const value of [null, [], {}, "composer", 1, false]) {
     fs.writeFileSync(settingsPath, JSON.stringify(value));
@@ -99,10 +104,29 @@ test("usage defaults follow schema 4 and reject malformed values", (t) => {
   for (const value of [null, false, 1, "", "Toolbar", "sidebar", ["composer"], {}]) {
     assert.equal(runtime.set({ usageRemainingLocation: value }).usageRemainingLocation, "toolbar");
   }
+  for (const value of [null, false, 1, "", "reset", [], {}]) {
+    assert.equal(runtime.set({ usageDisplay: value }).usageDisplay, "remaining");
+    assert.equal(runtime.set({ usageWindow: value }).usageWindow, "automatic");
+  }
+  for (const key of ["showContextUsage", "lowUsageAlert"]) {
+    for (const value of [null, 0, 1, "true", [], {}]) assert.equal(runtime.set({ [key]: value })[key], false);
+    assert.equal(runtime.set({ [key]: true })[key], true);
+    assert.equal(runtime.set({ [key]: false })[key], false);
+  }
+  for (const [value, expected] of [[-2, 1], [1.4, 1], [24.6, 25], [99, 50]]) {
+    assert.equal(runtime.set({ usageAlertThreshold: value }).usageAlertThreshold, expected);
+  }
+  for (const value of [null, "10", NaN, Infinity, [], {}]) {
+    assert.equal(runtime.set({ usageAlertThreshold: value }).usageAlertThreshold, 10);
+  }
   assert.equal(runtime.set({ showUsageRemaining: false }).showUsageRemaining, false);
   assert.equal(runtime.set({ showUsageRemaining: true }).showUsageRemaining, true);
   assert.equal(runtime.set({ usageRemainingLocation: "composer" }).usageRemainingLocation, "composer");
   assert.equal(runtime.set({ usageRemainingLocation: "toolbar" }).usageRemainingLocation, "toolbar");
+  assert.equal(runtime.set({ usageDisplay: "remaining-reset" }).usageDisplay, "remaining-reset");
+  for (const value of ["5h", "weekly", "monthly", "5h-weekly"]) {
+    assert.equal(runtime.set({ usageWindow: value }).usageWindow, value);
+  }
 });
 
 test("narrow usage patches preserve settings and roundtrip through an atomic owner-only write", (t) => {
@@ -117,7 +141,9 @@ test("narrow usage patches preserve settings and roundtrip through an atomic own
     hideComposerMicrophone: true,
     hiddenSettingsPages: ["appearance", "voice"],
   });
-  const expected = { ...existing, showUsageRemaining: false, usageRemainingLocation: "composer" };
+  const expected = { ...existing, showUsageRemaining: false, usageRemainingLocation: "composer",
+    usageDisplay: "remaining-reset", usageWindow: "5h-weekly", showContextUsage: true,
+    lowUsageAlert: true, usageAlertThreshold: 18 };
   const operations = [];
   const runtime = loadRuntime(root, {
     ...fs,
@@ -136,7 +162,9 @@ test("narrow usage patches preserve settings and roundtrip through an atomic own
       fs.renameSync(from, to);
     },
   });
-  assert.deepEqual(runtime.set({ showUsageRemaining: false, usageRemainingLocation: "composer", unknown: true }), expected);
+  assert.deepEqual(runtime.set({ showUsageRemaining: false, usageRemainingLocation: "composer",
+    usageDisplay: "remaining-reset", usageWindow: "5h-weekly", showContextUsage: true,
+    lowUsageAlert: true, usageAlertThreshold: 18, unknown: true }), expected);
   assert.deepEqual(operations, ["sync-file", "rename", "sync-directory"]);
   assert.equal(fs.statSync(settingsPath).mode & 0o777, 0o600);
   const reopened = loadRuntime(root);

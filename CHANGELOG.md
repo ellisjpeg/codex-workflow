@@ -2,6 +2,27 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.42 - Workflow Alpha 1
+
+- Publish Workflow Alpha 1 as a regular Latest release, with tag-pinned source installation and compatible updates through the existing release feed. Alpha describes the unfinished product scope.
+- Create draft releases for review rather than publishing automatically on tag push. Set prerelease classification from validated SemVer and never mark a draft Latest.
+- Include complete Lucide/Feather icon notices in source and updater assets, with archive-content regression coverage.
+- Obtain native glyphs from the user's audited Codex installation at runtime instead of bundling captured artwork. Build the complete cold-entry Composer preview from Workflow-owned structure, preserving its native appearance and controls.
+- Preserve macOS extended signature attributes in durable backups and restore a valid local ad-hoc signature during recovery/removal, including older snapshots with missing metadata.
+
+### Changes carried forward from the audited 0.5.42 candidate
+
+- Preserve the complete 0.5.41 usage-indicators feature set while avoiding discarded switch construction for dropdowns and sliders, sharing the native slider class, and removing unreachable internal code.
+- Validate release versions strictly and compare prereleases correctly in the updater and update UI. Reject malformed remote tags before download or extraction.
+- Verify the requested installed version and absence of blocking/error state before relaunching after an update; successful helper exits alone are not accepted, and failed verification permits retry.
+- Align the Node.js requirement with the locked test dependencies and enforce it during clean installation, including minimum-version CI coverage.
+- Stage an explicit updater payload with locked production dependencies and preserved licence notices, without pruning the development installation. Keep deferred policy modules and historical regression fixtures in source.
+- Correct the build-8881 documentation link and document the actual IPC/network boundary, source map and release verification limits.
+
+## 0.5.41 - Usage-indicators baseline
+
+- Add usage-window selection, remaining/reset presentation, context usage, configurable low-usage alerts and section reset, retaining existing placement and settings migrations.
+
 ## 0.5.40 - 2026-09-12
 
 - Restore the Conversation width track with the current native blue token on Codex build 8881.

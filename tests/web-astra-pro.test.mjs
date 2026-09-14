@@ -1,3 +1,4 @@
+import {nativeAssetsFixture, isNativeAssetsRead} from "./native-assets-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -139,7 +140,7 @@ test("preload bridge follows native composer and portal remounts without a mutat
     assert.equal(name, "electron");
     return {
       ipcRenderer: { invoke: async () => ({}), on() {}, send() {} },
-      webFrame: { executeJavaScript: async (code) => { calls++; return window.eval(code); } },
+      webFrame: { executeJavaScript: async (code) => { if (isNativeAssetsRead(code)) return nativeAssetsFixture; calls++; return window.eval(code); } },
     };
   };
   // Discovery, bridge writes and their observer follow-up run on animation frames.

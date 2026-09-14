@@ -35,6 +35,7 @@ import {
   processIdentityMatches,
   processStartToken,
   restoreStaging,
+  refreshStaging,
   stopStaging,
   assertStagingRoot,
   assertManagedStagingPath,
@@ -50,6 +51,29 @@ import {
 } from "../scripts/staging.mjs";
 
 const fixturePort = 49258;
+
+test("runtime refresh rejects a running stage and preserves stopped-stage settings", async () => {
+  const fixture = await createStockFixture();
+  let manifest;
+  try {
+    manifest = await prepareFixture(fixture);
+    const target = join(manifest.workflowRoot,"runtime","preload.cjs");
+    const before = fileHash(target), settings = fileHash(manifest.settings);
+    assert.throws(() => refreshStaging(manifest.manifest,{listAppProcesses:()=>[{}]}),/Stop the exact staging process/);
+    assert.equal(fileHash(target),before);
+    writeFileSync(manifest.manifest,JSON.stringify({...manifest,status:"stopped"}));
+    writeFileSync(target,"old disposable runtime");
+    refreshStaging(manifest.manifest,{listAppProcesses:()=>[],signatureIsValid:()=>true});
+    assert.equal(fileHash(target),before);
+    assert.equal(fileHash(manifest.settings),settings);
+  } finally {
+    if (manifest) {
+      restoreStaging(manifest.manifest,{listAppProcesses:()=>[],resignPatchedApp(){},signatureIsValid:()=>true});
+      cleanupStaging(manifest.manifest,{listAppProcesses:()=>[]});
+    }
+    rmSync(fixture.root,{recursive:true,force:true});
+  }
+});
 
 function infoPlist(integrity) {
   return `<?xml version="1.0" encoding="UTF-8"?>

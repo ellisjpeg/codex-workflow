@@ -947,6 +947,30 @@ export async function stopStaging(manifestPath, hooks = {}) {
   return stoppedManifest(manifest);
 }
 
+// Refresh external runtime only; preserve this stage's settings and account state.
+export function refreshStaging(manifestPath, hooks = {}) {
+  const manifest = readManifest(manifestPath);
+  if (manifest.status !== "stopped" || (hooks.listAppProcesses || processesUnderRoot)(manifest.root).length) {
+    throw new Error("Stop the exact staging process before refreshing its runtime");
+  }
+  assertInstalledFingerprint(manifest);
+  if (manifest.patchVersion !== patchVersion) throw new Error("A changed release version requires a new staging app");
+  if (embeddedFileHash("workflow-loader.cjs", manifest.asar) !== fileHash(join(sourceRoot, "loader.cjs"))) {
+    throw new Error("A changed loader requires a new staging app");
+  }
+  for (const name of ["main.cjs", "preload.cjs"]) {
+    const target = join(manifest.workflowRoot, "runtime", name);
+    assertManagedStagingPath(manifest.root, target, "runtime");
+    atomicReplace(join(sourceRoot, "runtime", name), target);
+  }
+  const verification = verifyStagingApp(manifest, manifest.source, {
+    signatureCheck: hooks.signatureIsValid || signatureIsValid,
+  });
+  const next = {...manifest, verification: verification.checks};
+  writeJsonAtomic(manifest.manifest, next);
+  return next;
+}
+
 export function restoreStaging(manifestPath, hooks = {}) {
   const manifest = readManifest(manifestPath);
   const listAppProcesses = hooks.listAppProcesses || processesUnderRoot;
@@ -1052,12 +1076,14 @@ async function main() {
     result = await launchStaging(process.argv[3]);
   } else if (command === "stop") {
     result = await stopStaging(process.argv[3]);
+  } else if (command === "refresh") {
+    result = refreshStaging(process.argv[3]);
   } else if (command === "restore") {
     result = restoreStaging(process.argv[3]);
   } else if (command === "cleanup") {
     result = cleanupStaging(process.argv[3]);
   } else {
-    throw new Error("Usage: staging.mjs prepare --port <port> | launch|stop|restore|cleanup <manifest>");
+    throw new Error("Usage: staging.mjs prepare --port <port> | launch|stop|refresh|restore|cleanup <manifest>");
   }
   console.log(JSON.stringify({ ok: true, ...result }, null, 2));
 }

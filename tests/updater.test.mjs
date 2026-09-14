@@ -5,9 +5,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
-const updaterRuntimeRoot = "/tmp/codex-workflow-updater-test";
+const updaterRuntimeRoot = mkdtempSync(join(tmpdir(), "codex-workflow-updater-test-"));
+after(() => rmSync(updaterRuntimeRoot, { recursive: true, force: true }));
 process.env.CODEX_WORKFLOW_ROOT = updaterRuntimeRoot;
 const require = createRequire(import.meta.url);
 const {
@@ -57,6 +58,55 @@ test("updater compares canonical release versions", () => {
   assert.equal(compareVersions("0.5.0", "0.5.0"), 0);
   assert.equal(compareVersions("0.4.4", "0.5.0"), -1);
   assert.equal(compareVersions("main", "0.5.0"), 0);
+});
+
+test("release versions reject malformed suffixes before selecting a package", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "workflow-release-version-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const version of ["1.0.0-../../escape", "1.0.0+../../escape", "01.0.0", "1.0.0-01",
+    "1.0.0-alpha..1", "1.0.0-", "1.0.0+", "1.0.0\n", "9007199254740992.0.0", ["1.0.0"]]) {
+    assert.equal(releaseVersionEligible(version, "0.5.41"), false, JSON.stringify(version));
+    writeRelease(root, version);
+    assert.equal(sourcePackage(root), null, JSON.stringify(version));
+  }
+});
+
+test("release precedence preserves prereleases, large numeric identifiers and metadata", () => {
+  const ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
+    "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"];
+  for (let i = 0; i < ordered.length; i++) {
+    for (let j = 0; j < ordered.length; j++) assert.equal(compareVersions(ordered[i], ordered[j]), Math.sign(i - j));
+  }
+  assert.equal(compareVersions("1.0.0-9007199254740992", "1.0.0-9007199254740993"), -1);
+  assert.equal(compareVersions("1.0.0-9", "1.0.0-A"), -1);
+  assert.equal(compareVersions("1.0.0-Z", "1.0.0-a"), -1);
+  assert.equal(compareVersions("1.0.0+001", "1.0.0+build.2"), 0);
+  assert.equal(releaseVersionEligible("1.0.0", "1.0.0-rc.1"), true);
+  assert.equal(releaseVersionEligible("1.0.0-rc.1", "1.0.0"), false);
+  assert.equal(releaseVersionEligible("1.0.0+one", "1.0.0+two", true), false);
+  assert.equal(releaseVersionEligible("1.0.0+one", "1.0.0+one", true), true);
+});
+
+test("remote malformed tags never reach asset download or extraction", async () => {
+  const originalFetch = globalThis.fetch;
+  mkdirSync(join(updaterRuntimeRoot, "runtime"), { recursive: true });
+  writeFileSync(join(updaterRuntimeRoot, "runtime/version.json"), '{"version":"0.5.41"}');
+  try {
+    for (const tag of ["v1.0.0-../../../escape", "v1.0.0+../../escape", ["v1.0.0"], "v1.0.0\n"]) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        assert.equal(++calls, 1, "malformed release must not download any asset");
+        return { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ tag_name: tag, assets: [] }) };
+      };
+      const result = await checkRemote({ releaseApi: "https://api.github.test/releases/latest" }, {});
+      assert.equal(result.candidate, null);
+      assert.equal(result.releaseVersion, null);
+      assert.equal(calls, 1);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(updaterRuntimeRoot, { recursive: true, force: true });
+  }
 });
 
 test("updater limits remote checks to five-minute intervals", () => {
