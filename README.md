@@ -9,8 +9,6 @@ Workflow brings your preferences into Codex Desktop through native-feeling setti
 
 [Get started](#install) · [Explore the settings](#your-setup-your-way) · [Release notes](docs/releases/0.5.43.md) · [Feedback](#help-shape-workflow)
 
-<img src=".github/assets/workflow-presentation/workflow-workspace.png" alt="Abstract sidebar, conversation and composer panels connected by soft blue ribbons" width="1200">
-
 ## Your setup, your way
 
 | Make it yours | What you can change |
