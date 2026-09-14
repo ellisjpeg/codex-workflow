@@ -2,6 +2,13 @@
 
 All notable changes to Codex Workflow are documented here.
 
+## 0.5.43 - 2026-09-14
+
+- Install Workflow directly into the existing Codex app through public setup, without creating or opening Codex Workflow Staging. Preserve source checks, exact-build preflight, explicit confirmation, backups, recovery and verified relaunch.
+- Keep staging as an explicit developer command and exclude its helpers from updater assets.
+- Shorten the GitHub README, retain the original banner, add matching illustrations and move detailed operating notes into the installation guide.
+- State that pull requests are not accepted, with bug reports, feature ideas and personal forks still welcome.
+
 ## 0.5.42 - Workflow Alpha 1
 
 - Publish Workflow Alpha 1 as a regular Latest release, with tag-pinned source installation and compatible updates through the existing release feed. Alpha describes the unfinished product scope.

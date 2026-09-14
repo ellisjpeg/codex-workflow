@@ -1,11 +1,8 @@
 import {
   appendFileSync,
-  existsSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
 } from "node:fs";
-import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
@@ -15,13 +12,6 @@ import {
   appRoot,
   sourceRoot,
 } from "./lib.mjs";
-import {
-  cleanupStaging,
-  launchStaging,
-  prepareStaging,
-  restoreStaging,
-  stopStaging,
-} from "./staging.mjs";
 
 const delay = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 
@@ -34,24 +24,8 @@ function throwIfInterrupted(signal) {
   throw signal.reason instanceof Error ? signal.reason : new Error("Setup interrupted");
 }
 
-function readJson(target) {
-  return JSON.parse(readFileSync(target, "utf8"));
-}
-
 function appendCommandLog(logPath, label, result) {
   appendFileSync(logPath, `\n## ${label}\n${result.stdout || ""}${result.stderr || ""}`, { mode: 0o600 });
-}
-
-function appendStagingEvidence(logPath, manifest) {
-  if (!logPath) return;
-  for (const [label, target] of [
-    ["staging process", manifest.processLog],
-    ["staging runtime", manifest.logs && join(manifest.logs, "runtime.log")],
-    ["staging updater", manifest.logs && join(manifest.logs, "updater.log")],
-  ]) {
-    if (!target || !existsSync(target)) continue;
-    appendFileSync(logPath, `\n## ${label}\n${readFileSync(target, "utf8")}`, { mode: 0o600 });
-  }
 }
 
 function runCaptured(logPath, label, command, args) {
@@ -75,35 +49,7 @@ function runNodeJson(logPath, label, script, args = []) {
   }
 }
 
-async function availablePort() {
-  const server = createServer();
-  await new Promise((resolvePromise, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolvePromise);
-  });
-  const address = server.address();
-  await new Promise((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
-  if (!address || typeof address === "string") throw new Error("Could not reserve an isolated staging port");
-  return address.port;
-}
-
-export async function cleanupStagingSession(manifestPath, hooks = {}) {
-  const readState = hooks.readState || readJson;
-  const stop = hooks.stop || stopStaging;
-  const restore = hooks.restore || restoreStaging;
-  const cleanup = hooks.cleanup || cleanupStaging;
-  let manifest = readState(manifestPath);
-  if (Number.isSafeInteger(manifest.processId) && manifest.processId > 0) {
-    await stop(manifestPath);
-    manifest = readState(manifestPath);
-  }
-  if (manifest.status !== "restored") {
-    restore(manifestPath);
-  }
-  return cleanup(manifestPath);
-}
-
-async function askForApproval(signal, question = "Install Workflow after the isolated window opened normally? [y/N] ") {
+async function askForApproval(signal, question) {
   if (!process.stdin.isTTY) {
     throw new Error("Interactive approval requires a terminal; rerun with --yes for agent mode");
   }
@@ -144,7 +90,7 @@ export async function runSetup({
     throw new Error(`Setup stopped safely: status recommends ${status.recommendedAction}`);
   }
 
-  print("1/4 Checking source and guarded preflight…");
+  print("1/3 Checking source and guarded preflight…");
   (hooks.runChecks || (() => runCaptured(
     logPath,
     "source checks",
@@ -165,41 +111,17 @@ export async function runSetup({
   )))();
   throwIfInterrupted(signal);
 
-  if (status.recommendedAction === "install") {
-    print("2/4 Opening one isolated staging app…");
-    const port = await (hooks.availablePort || availablePort)();
-    const manifest = await (hooks.prepareStaging || prepareStaging)(port);
-    let stagingError = null;
-    let approved = false;
-    try {
-      await (hooks.launchStaging || launchStaging)(manifest.manifest, { signal });
-      approved = assumeYes || await (hooks.askForApproval || askForApproval)(signal);
-    } catch (error) {
-      stagingError = error;
-      appendStagingEvidence(logPath, manifest);
-    }
-    try {
-      await (hooks.cleanupStagingSession || cleanupStagingSession)(manifest.manifest);
-    } catch (cleanupError) {
-      appendStagingEvidence(logPath, manifest);
-      stagingError = stagingError
-        ? new AggregateError([stagingError, cleanupError], "Staging failed and cleanup was incomplete")
-        : cleanupError;
-    }
-    if (stagingError) throw stagingError;
-    if (!approved) {
-      print("Setup cancelled; production Codex was unchanged.");
-      return { ok: true, installed: false, reason: "declined" };
-    }
-  } else if (!assumeYes && !await (hooks.askForApproval || askForApproval)(
+  if (!assumeYes && !await (hooks.askForApproval || askForApproval)(
     signal,
-    "Reapply the guarded Workflow installation? [y/N] ",
+    status.recommendedAction === "install"
+      ? "Install Workflow into Codex? This changes the app bundle and its signature. [y/N] "
+      : "Reapply Workflow to Codex? This changes the app bundle and its signature. [y/N] ",
   )) {
     print("Setup cancelled; production Codex was unchanged.");
     return { ok: true, installed: false, reason: "declined" };
   }
 
-  print("3/4 Applying the guarded installation once…");
+  print("2/3 Applying the guarded installation once…");
   await (hooks.waitForProductionExit || waitForProductionExit)(signal);
   throwIfInterrupted(signal);
   (hooks.applyInstall || (() => runNodeJson(
@@ -221,7 +143,7 @@ export async function runSetup({
     appendCommandLog(logPath, "relaunch", opened);
     throw new Error("Workflow installed, but Codex could not be relaunched");
   }
-  print(`4/4 Workflow ${verified.installedWorkflowVersion} installed and Codex relaunched.`);
+  print(`3/3 Workflow ${verified.installedWorkflowVersion} installed and Codex relaunched.`);
   return { ok: true, installed: true, autoRepairCodexUpdates: autoRepair };
 }
 
