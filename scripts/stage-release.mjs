@@ -7,8 +7,7 @@ import { fileURLToPath } from "node:url";
 export const releaseFiles = [
   "loader.cjs", "runtime/main.cjs", "runtime/preload.cjs", "runtime/updater.cjs",
   "scripts/adhoc.entitlements", "scripts/install.mjs", "scripts/install-runtime.mjs",
-  "scripts/lib.mjs", "scripts/setup.mjs", "scripts/staging.mjs",
-  "scripts/staging-updater-disabled.cjs", "scripts/status.mjs", "scripts/uninstall.mjs",
+  "scripts/lib.mjs", "scripts/setup.mjs", "scripts/status.mjs", "scripts/uninstall.mjs",
   "package.json", "package-lock.json", "workflow-compatibility.json", "README.md", "SECURITY.md", "LICENSE",
   "THIRD_PARTY_NOTICES.md",
 ];

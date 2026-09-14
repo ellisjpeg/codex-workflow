@@ -1,3 +1,7 @@
+> **Workflow is not accepting pull requests, including code or documentation changes.** Please use the issue forms for bug reports or feature ideas. See [the contribution policy](https://github.com/ellisjpeg/codex-workflow/blob/main/CONTRIBUTING.md).
+
+<!-- The checklist below is retained for maintainer work. -->
+
 ## Summary
 
 Describe the change and why it is needed.

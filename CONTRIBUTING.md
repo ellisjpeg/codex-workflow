@@ -1,6 +1,12 @@
 # Contributing
 
-Contributions are welcome when they preserve the guarded installer and native Codex behavior.
+**Workflow is not accepting pull requests, including code or documentation changes.**
+
+A pull request (PR) asks a project's maintainer to review your proposed changes and add them to the project. Please do not open one at this time.
+
+Bug reports and feature ideas are welcome through the [issue forms](https://github.com/ellisjpeg/codex-workflow/issues/new/choose). For security concerns, follow the [private reporting guidance](SECURITY.md#reporting-a-vulnerability).
+
+You are welcome to explore the code and maintain your own fork under the [licence](LICENSE). The development notes below are for maintainers and personal forks, not an invitation to submit changes.
 
 ## Development setup
 
@@ -18,7 +24,8 @@ macOS and Node.js 24.15 or newer in the 24.x line, or Node.js 26 or newer, are r
 | `loader.cjs` | Small embedded fail-open entry; continues into the original Codex application. |
 | `runtime/main.cjs`, `runtime/preload.cjs` | Active settings/IPC and renderer integration. Start with the responsible helper and its callers, rather than rewriting the whole renderer. |
 | `runtime/updater.cjs`, `scripts/lib.mjs` | Release selection, compatibility, installation transactions, backups and recovery. The installer manages only main, preload and updater runtime files. |
-| `scripts/setup.mjs`, `scripts/staging.mjs` | Guided installation and isolated native verification. Source checks do not authorise production installation or an app restart. |
+| `scripts/setup.mjs` | Public guided installation into the existing Codex app, without creating or opening staging. Source checks do not authorise installation or an app restart. |
+| `scripts/staging.mjs` | Developer-only opt-in test app for unfinished features. Run explicitly from the full source checkout; excluded from updater assets. |
 | `scripts/stage-release.mjs` | Explicit updater payload and locked production-dependency staging, without pruning the contributor's `node_modules`. |
 | `scripts/release-draft.mjs` | Validated release-draft arguments, exact asset/notes requirements and explicit prerelease policy. Never publishes a draft. |
 | `tests/`, `docs/`, `parked/` | Regression fixtures, build-specific evidence and the documented historical renderer. Some tests intentionally execute the parked renderer; it is not deployed. |
@@ -46,7 +53,7 @@ must not delete an existing release or overwrite its assets automatically.
 See [the alpha release checklist](docs/ALPHA_RELEASE.md). The reduced updater
 asset intentionally excludes release-only scripts and test dependencies.
 
-## Pull requests
+## Local change checklist
 
 - Keep changes focused and reversible.
 - Add regression coverage for bug fixes and durable behavior.

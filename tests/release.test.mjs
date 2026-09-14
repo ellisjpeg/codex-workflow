@@ -36,6 +36,13 @@ test("updater asset contains only active runtime and locked production dependenc
   assert.equal(existsSync(join(target, "node_modules/jsdom")), false);
   assert.equal(existsSync(join(target, "parked")), false);
   assert.equal(existsSync(join(target, "tests")), false);
+  assert.equal(existsSync(join(target, "scripts/staging.mjs")), false);
+  assert.equal(existsSync(join(target, "scripts/staging-updater-disabled.cjs")), false);
+  const setupImport = spawnSync(process.execPath, ["--input-type=module", "-"], {
+    input: `await import(${JSON.stringify(pathToFileURL(join(target, "scripts/setup.mjs")).href)});`,
+    encoding: "utf8",
+  });
+  assert.equal(setupImport.status, 0, setupImport.stderr);
   for (const file of releaseFiles) assert.deepEqual(readFileSync(join(target, file)), readFileSync(join(source, file)));
   const lock = JSON.parse(lockBefore);
   const dependencies = Object.entries(lock.packages).filter(([name, pkg]) => name && !pkg.dev);
