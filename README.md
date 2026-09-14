@@ -1,6 +1,7 @@
-# Workflow
-
-**Make Codex yours.**
+<picture>
+  <source media="(max-width: 640px)" srcset=".github/assets/workflow-presentation/workflow-hero-mobile.png">
+  <img src=".github/assets/workflow-presentation/workflow-hero.png" alt="Workflow — Make Codex yours" width="1200">
+</picture>
 
 Workflow is an open-source customisation layer for Codex Desktop on macOS. It brings your preferences into the app through a native-feeling settings experience, with local control and a guarded installation.
 
